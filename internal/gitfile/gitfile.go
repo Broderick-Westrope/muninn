@@ -61,7 +61,10 @@ func ReadFile(ctx context.Context, mirrorDir, commit, path string, offset, limit
 	obj := commit + ":" + path
 	objType, err := runGit(ctx, "-C", mirrorDir, "cat-file", "-t", obj)
 	if err != nil {
-		return "", 0, fmt.Errorf("path %q not found at commit %s: %w", path, shortSHA(commit), fs.ErrNotExist)
+		if isMissingObject(err) {
+			return "", 0, fmt.Errorf("path %q not found at commit %s: %w", path, shortSHA(commit), fs.ErrNotExist)
+		}
+		return "", 0, fmt.Errorf("typing %q at commit %s: %w", path, shortSHA(commit), err)
 	}
 	if objType != "blob" {
 		return "", 0, fmt.Errorf("path %q at commit %s is a %s, not a file", path, shortSHA(commit), objType)
@@ -113,14 +116,18 @@ func window(blob string, offset, limit int) (content string, totalLines int, err
 
 // ListTree lists the entries under path at commit in the bare mirror at
 // mirrorDir, descending depth levels below path (depth < 1 is treated as 1).
-// Path "" lists from the repo root. An unreachable commit yields
-// ErrIndexMismatch; a missing path yields an error wrapping fs.ErrNotExist.
-func ListTree(ctx context.Context, mirrorDir, commit, path string, depth int) ([]TreeEntry, error) {
+// Path "" lists from the repo root. At most maxEntries entries are returned
+// (0 means unlimited); total reports how many entries exist within depth,
+// so total > len(entries) means the listing was truncated. Entries past the
+// cap are counted but not parsed, bounding the work for huge trees. An
+// unreachable commit yields ErrIndexMismatch; a missing path yields an
+// error wrapping fs.ErrNotExist.
+func ListTree(ctx context.Context, mirrorDir, commit, path string, depth, maxEntries int) (entries []TreeEntry, total int, err error) {
 	if depth < 1 {
 		depth = 1
 	}
 	if err := checkCommit(ctx, mirrorDir, commit); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	// -r -t lists blobs and trees recursively in one call; entries deeper
@@ -133,31 +140,39 @@ func ListTree(ctx context.Context, mirrorDir, commit, path string, depth int) ([
 	}
 	out, err := runGit(ctx, args...)
 	if err != nil {
-		return nil, fmt.Errorf("listing tree %q at commit %s: %w", path, shortSHA(commit), err)
+		return nil, 0, fmt.Errorf("listing tree %q at commit %s: %w", path, shortSHA(commit), err)
 	}
 
-	var entries []TreeEntry
 	for _, record := range strings.Split(out, "\x00") {
 		if record == "" {
 			continue
 		}
+		_, name, ok := strings.Cut(record, "\t")
+		if !ok {
+			return nil, 0, fmt.Errorf("listing tree %q at commit %s: malformed ls-tree record %q", path, shortSHA(commit), record)
+		}
+		if relativeDepth(name, prefix) > depth {
+			continue
+		}
+		total++
+		if maxEntries > 0 && len(entries) >= maxEntries {
+			// Past the cap: count for the total but skip full parsing.
+			continue
+		}
 		entry, err := parseTreeEntry(record)
 		if err != nil {
-			return nil, fmt.Errorf("listing tree %q at commit %s: %w", path, shortSHA(commit), err)
-		}
-		if relativeDepth(entry.Path, prefix) > depth {
-			continue
+			return nil, 0, fmt.Errorf("listing tree %q at commit %s: %w", path, shortSHA(commit), err)
 		}
 		entries = append(entries, entry)
 	}
-	if len(entries) == 0 {
+	if total == 0 {
 		// ls-tree exits 0 with empty output for a pathspec that matches
 		// nothing; distinguish that from a genuinely empty tree at root.
 		if prefix != "" {
-			return nil, fmt.Errorf("path %q not found at commit %s: %w", path, shortSHA(commit), fs.ErrNotExist)
+			return nil, 0, fmt.Errorf("path %q not found at commit %s: %w", path, shortSHA(commit), fs.ErrNotExist)
 		}
 	}
-	return entries, nil
+	return entries, total, nil
 }
 
 // parseTreeEntry parses one `ls-tree --long` record:
@@ -198,6 +213,14 @@ func relativeDepth(path, prefix string) int {
 		rel = strings.TrimPrefix(path, prefix+"/")
 	}
 	return strings.Count(rel, "/") + 1
+}
+
+// isMissingObject reports whether a git error indicates a missing object
+// or path (as opposed to some other failure such as a corrupt repo).
+func isMissingObject(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "Not a valid object name") ||
+		strings.Contains(msg, "does not exist")
 }
 
 // checkCommit verifies the commit exists and is reachable in the mirror,

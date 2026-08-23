@@ -16,6 +16,7 @@ const (
 	defaultGrepLimit = 50
 	maxGrepLimit     = 200
 	defaultGlobLimit = 100
+	maxGlobLimit     = 500
 )
 
 const grepDescription = `Search file contents across all indexed repos with a regular expression (RE2 syntax).
@@ -30,7 +31,7 @@ The pattern is a zoekt query, so these atoms can be combined with the regex (spa
 
 Results are capped at 'limit' line matches (default 50, max 200); a truncation notice reports how many more matches were omitted. Output lines are 'repo/path:line: content'.`
 
-const globDescription = `Find files by path glob across all indexed repos. Supports *, ?, ** and {a,b} alternation; matching is case-insensitive against the full path within each repo (e.g. '**/*.go', 'src/**/*.{ts,tsx}'). Results are capped at 'limit' files (default 100) and grouped by repo.`
+const globDescription = `Find files by path glob across all indexed repos. Supports *, ?, ** and {a,b} alternation; matching is case-insensitive against the full path within each repo (e.g. '**/*.go', 'src/**/*.{ts,tsx}'). Results are capped at 'limit' files (default 100, max 500) and grouped by repo.`
 
 const listReposDescription = `List indexed repositories: name, branch, and indexed commit, plus the age of the last sync. Optional 'query' regex filters by repo name. Output starts with a staleness warning when the index is older than 24h or has never been synced.`
 
@@ -83,7 +84,7 @@ func (s *Server) Grep(ctx context.Context, args GrepArgs) (string, error) {
 type GlobArgs struct {
 	Pattern string `json:"pattern" jsonschema:"path glob: *, ?, ** and {a,b} (e.g. **/*.go)"`
 	Repo    string `json:"repo,omitempty" jsonschema:"optional repo name regex to search in"`
-	Limit   int    `json:"limit,omitempty" jsonschema:"max files to return (default 100)"`
+	Limit   int    `json:"limit,omitempty" jsonschema:"max files to return (default 100, max 500)"`
 }
 
 // Glob lists files whose paths match a glob, grouped by repo.
@@ -91,10 +92,7 @@ func (s *Server) Glob(ctx context.Context, args GlobArgs) (string, error) {
 	if args.Pattern == "" {
 		return "", errors.New("pattern is required")
 	}
-	limit := args.Limit
-	if limit <= 0 {
-		limit = defaultGlobLimit
-	}
+	limit := clampLimit(args.Limit, defaultGlobLimit, maxGlobLimit)
 	re, err := globToRegexp(args.Pattern)
 	if err != nil {
 		return "", fmt.Errorf("invalid glob %q: %w", args.Pattern, err)
@@ -157,12 +155,17 @@ func (s *Server) ListRepos(ctx context.Context, args ListReposArgs) (string, err
 		return "", err
 	}
 
+	// One status read feeds both the staleness warning and the sync-age
+	// line so they can never disagree.
 	var b strings.Builder
-	if warning := s.stalenessWarning(); warning != "" {
-		b.WriteString(warning + "\n")
-	}
-	if st, err := status.Read(s.statusPath); err == nil {
-		fmt.Fprintf(&b, "last sync: %s (%s ago)\n", st.FinishedAt.Format(time.RFC3339), formatAge(status.Age(st)))
+	if st, err := status.Read(s.statusPath); err != nil {
+		b.WriteString("WARNING: no sync status found; the index may be empty or stale — run `muninn sync`\n")
+	} else {
+		age := status.Age(st)
+		if age > staleAfter {
+			fmt.Fprintf(&b, "WARNING: index is stale: last sync finished %s ago — run `muninn sync`\n", formatAge(age))
+		}
+		fmt.Fprintf(&b, "last sync: %s (%s ago)\n", st.FinishedAt.Format(time.RFC3339), formatAge(age))
 	}
 
 	shown := 0
@@ -175,19 +178,6 @@ func (s *Server) ListRepos(ctx context.Context, args ListReposArgs) (string, err
 	}
 	fmt.Fprintf(&b, "\n%d repos", shown)
 	return b.String(), nil
-}
-
-// stalenessWarning returns a warning line when the status file is missing
-// or the last sync finished more than staleAfter ago, and "" otherwise.
-func (s *Server) stalenessWarning() string {
-	st, err := status.Read(s.statusPath)
-	if err != nil {
-		return "WARNING: no sync status found; the index may be empty or stale — run `muninn sync`"
-	}
-	if age := status.Age(st); age > staleAfter {
-		return fmt.Sprintf("WARNING: index is stale: last sync finished %s ago — run `muninn sync`", formatAge(age))
-	}
-	return ""
 }
 
 // formatGrep renders search results as repo/path:line lines, enforcing the
@@ -299,12 +289,12 @@ func quoteToken(s string) string {
 }
 
 // clampLimit applies a default for non-positive limits and a hard maximum.
-func clampLimit(limit, def, max int) int {
+func clampLimit(limit, def, maxLimit int) int {
 	if limit <= 0 {
 		return def
 	}
-	if limit > max {
-		return max
+	if limit > maxLimit {
+		return maxLimit
 	}
 	return limit
 }

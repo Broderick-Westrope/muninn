@@ -13,20 +13,22 @@ import (
 
 const (
 	defaultReadFileLimit = 500
+	maxReadFileLimit     = 2000
 	defaultTreeDepth     = 1
 	maxTreeDepth         = 10
+	maxTreeEntries       = 500
 )
 
-const readFileDescription = `Read a file from an indexed repo at its indexed commit: line numbers always agree with grep results, but content may lag the repo's latest commit until the next sync. 'repo' is the exact owner/name (see list_repos). 'offset' is the 1-based first line to return; 'limit' is the number of lines (default 500).`
+const readFileDescription = `Read a file from an indexed repo at its indexed commit: line numbers always agree with grep results, but content may lag the repo's latest commit until the next sync. 'repo' is the exact owner/name (see list_repos). 'offset' is the 1-based first line to return; 'limit' is the number of lines (default 500, max 2000).`
 
-const listTreeDescription = `List directory entries of an indexed repo at its indexed commit (content may lag the latest commit until the next sync). 'path' defaults to the repo root; 'depth' is how many levels to descend (default 1, max 10). Directories end with '/'.`
+const listTreeDescription = `List directory entries of an indexed repo at its indexed commit (content may lag the latest commit until the next sync). 'path' defaults to the repo root; 'depth' is how many levels to descend (default 1, max 10). Directories end with '/'. Output is capped at 500 entries.`
 
 // ReadFileArgs are the parameters of the read_file tool.
 type ReadFileArgs struct {
 	Repo   string `json:"repo" jsonschema:"exact repo name as owner/name"`
 	Path   string `json:"path" jsonschema:"file path within the repo"`
 	Offset int    `json:"offset,omitempty" jsonschema:"1-based first line to return (default 1)"`
-	Limit  int    `json:"limit,omitempty" jsonschema:"number of lines to return (default 500)"`
+	Limit  int    `json:"limit,omitempty" jsonschema:"number of lines to return (default 500, max 2000)"`
 }
 
 // ReadFile returns file content at the repo's indexed commit with a
@@ -35,10 +37,7 @@ func (s *Server) ReadFile(ctx context.Context, args ReadFileArgs) (string, error
 	if args.Path == "" {
 		return "", errors.New("path is required")
 	}
-	limit := args.Limit
-	if limit <= 0 {
-		limit = defaultReadFileLimit
-	}
+	limit := clampLimit(args.Limit, defaultReadFileLimit, maxReadFileLimit)
 	mirrorDir, commit, err := s.resolveIndexedCommit(args.Repo)
 	if err != nil {
 		return "", err
@@ -62,8 +61,15 @@ func (s *Server) ReadFile(ctx context.Context, args ReadFileArgs) (string, error
 		shown++
 	}
 	end := start + shown - 1
-	return fmt.Sprintf("%s/%s @ %s (lines %d-%d of %d)\n%s",
-		args.Repo, args.Path, shortSHA(commit), start, end, totalLines, content), nil
+	out := fmt.Sprintf("%s/%s @ %s (lines %d-%d of %d)\n%s",
+		args.Repo, args.Path, shortSHA(commit), start, end, totalLines, content)
+	if end < totalLines {
+		if !strings.HasSuffix(out, "\n") {
+			out += "\n"
+		}
+		out += fmt.Sprintf("\n[truncated: %d more lines; use offset to page]", totalLines-end)
+	}
+	return out, nil
 }
 
 // ListTreeArgs are the parameters of the list_tree tool.
@@ -87,7 +93,7 @@ func (s *Server) ListTree(ctx context.Context, args ListTreeArgs) (string, error
 		return "", err
 	}
 
-	entries, err := gitfile.ListTree(ctx, mirrorDir, commit, args.Path, depth)
+	entries, total, err := gitfile.ListTree(ctx, mirrorDir, commit, args.Path, depth, maxTreeEntries)
 	if err != nil {
 		return "", err
 	}
@@ -105,7 +111,10 @@ func (s *Server) ListTree(ctx context.Context, args ListTreeArgs) (string, error
 			fmt.Fprintf(&b, "%s (%d B)\n", e.Path, e.Size)
 		}
 	}
-	fmt.Fprintf(&b, "\n%d entries", len(entries))
+	if omitted := total - len(entries); omitted > 0 {
+		fmt.Fprintf(&b, "\n[truncated: %d more entries; reduce depth or list a subdirectory]\n", omitted)
+	}
+	fmt.Fprintf(&b, "\n%d entries", total)
 	return b.String(), nil
 }
 
@@ -115,8 +124,8 @@ func (s *Server) ListTree(ctx context.Context, args ListTreeArgs) (string, error
 // so file reads stay pinned to the commit the shards were built from.
 func (s *Server) resolveIndexedCommit(repo string) (mirrorDir, commit string, err error) {
 	owner, name, ok := strings.Cut(repo, "/")
-	if !ok || owner == "" || name == "" || strings.Contains(name, "/") {
-		return "", "", fmt.Errorf("repo %q must be an exact owner/name; use list_repos to see indexed repos", repo)
+	if !ok || !validRepoPart(owner) || !validRepoPart(name) {
+		return "", "", fmt.Errorf("invalid repo %q: must be an exact owner/name; use list_repos to see indexed repos", repo)
 	}
 	st, err := status.Read(s.statusPath)
 	if err != nil {
@@ -130,4 +139,14 @@ func (s *Server) resolveIndexedCommit(repo string) (mirrorDir, commit string, er
 		return "", "", fmt.Errorf("repo %q has no indexed commit; use list_repos to see indexed repos, or run `muninn sync`", repo)
 	}
 	return filepath.Join(s.mirrorsDir, owner, name+".git"), rs.IndexedCommit, nil
+}
+
+// validRepoPart reports whether an owner or name component of a repo
+// parameter is safe to join into a mirror path: non-empty, not a dot
+// segment, and free of path separators.
+func validRepoPart(s string) bool {
+	if s == "" || s == "." || s == ".." {
+		return false
+	}
+	return !strings.ContainsAny(s, `/\`)
 }

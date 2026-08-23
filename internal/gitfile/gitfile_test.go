@@ -193,9 +193,12 @@ func TestListTreeDepth(t *testing.T) {
 	ctx := context.Background()
 
 	// Depth 1 at root: only top-level entries.
-	entries, err := ListTree(ctx, mirror, commit1, "", 1)
+	entries, total, err := ListTree(ctx, mirror, commit1, "", 1, 0)
 	if err != nil {
 		t.Fatalf("ListTree depth 1: %v", err)
+	}
+	if total != len(entries) {
+		t.Errorf("total = %d, want %d (no cap)", total, len(entries))
 	}
 	got := entriesByPath(entries)
 	if len(got) != 3 {
@@ -209,7 +212,7 @@ func TestListTreeDepth(t *testing.T) {
 	}
 
 	// Depth 2 at root adds a's children but not a/b's.
-	entries, err = ListTree(ctx, mirror, commit1, "", 2)
+	entries, _, err = ListTree(ctx, mirror, commit1, "", 2, 0)
 	if err != nil {
 		t.Fatalf("ListTree depth 2: %v", err)
 	}
@@ -228,7 +231,7 @@ func TestListTreeDepth(t *testing.T) {
 	}
 
 	// Depth 1 under a subdirectory.
-	entries, err = ListTree(ctx, mirror, commit1, "a", 1)
+	entries, _, err = ListTree(ctx, mirror, commit1, "a", 1, 0)
 	if err != nil {
 		t.Fatalf("ListTree of a: %v", err)
 	}
@@ -241,9 +244,26 @@ func TestListTreeDepth(t *testing.T) {
 	}
 }
 
+func TestListTreeMaxEntries(t *testing.T) {
+	mirror, commit1, _ := fixtureMirror(t)
+
+	// Depth 2 at root has 5 entries; a cap of 2 returns the first 2 but
+	// still reports the full total.
+	entries, total, err := ListTree(context.Background(), mirror, commit1, "", 2, 2)
+	if err != nil {
+		t.Fatalf("ListTree capped: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Errorf("entries = %+v, want 2 entries", entries)
+	}
+	if total != 5 {
+		t.Errorf("total = %d, want 5", total)
+	}
+}
+
 func TestListTreeMissingPath(t *testing.T) {
 	mirror, commit1, _ := fixtureMirror(t)
-	_, err := ListTree(context.Background(), mirror, commit1, "nope", 1)
+	_, _, err := ListTree(context.Background(), mirror, commit1, "nope", 1, 0)
 	if !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("err = %v, want fs.ErrNotExist", err)
 	}
@@ -252,7 +272,7 @@ func TestListTreeMissingPath(t *testing.T) {
 func TestListTreeIndexMismatch(t *testing.T) {
 	mirror, _, _ := fixtureMirror(t)
 	bogus := strings.Repeat("d", 40)
-	_, err := ListTree(context.Background(), mirror, bogus, "", 1)
+	_, _, err := ListTree(context.Background(), mirror, bogus, "", 1, 0)
 	if !errors.Is(err, ErrIndexMismatch) {
 		t.Fatalf("err = %v, want ErrIndexMismatch", err)
 	}

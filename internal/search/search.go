@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	// zoekt query atoms take regexps from the grafana fork, not stdlib.
 	"github.com/grafana/regexp"
@@ -141,11 +142,16 @@ func (s *Searcher) ListRepos(ctx context.Context) ([]RepoInfo, error) {
 	return repos, nil
 }
 
-// trimLine strips the trailing newline and caps the line at maxLineBytes.
+// trimLine strips the trailing newline and caps the line at maxLineBytes,
+// cutting at a rune boundary so multi-byte characters are never split.
 func trimLine(line []byte) string {
 	s := strings.TrimRight(string(line), "\r\n")
 	if len(s) > maxLineBytes {
-		s = s[:maxLineBytes]
+		cut := maxLineBytes
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		s = s[:cut]
 	}
 	return s
 }

@@ -13,20 +13,21 @@ import (
 
 const (
 	defaultDefinitionsLimit = 50
+	maxDefinitionsLimit     = 200
 	defaultReferencesLimit  = 100
 	maxReferencesLimit      = 300
 )
 
-const findDefinitionsDescription = `Find definition sites of an exact identifier using ctags-backed symbol search (case-sensitive, word-boundary anchored). Output lines are 'repo/path:line: content'. Default limit 50.`
+const findDefinitionsDescription = `Find definition sites of an exact identifier using ctags-backed symbol search (case-sensitive, word-boundary anchored). Output lines are 'repo/path:line: content'. Default limit 50, max 200.`
 
-const findReferencesDescription = `Find references to an exact identifier (case-sensitive, word-boundary text search) with definition sites excluded. Approximate: text-based reference search excluding definition sites. Treat as leads, not ground truth. It cannot distinguish shadowed names, comments, or strings, and only excludes definitions that ctags recognized. Default limit 100, max 300.`
+const findReferencesDescription = `Find references to an exact identifier (case-sensitive, word-boundary text search) with definition sites excluded. Approximate: text-based reference search excluding definition sites. Treat as leads, not ground truth. It cannot distinguish shadowed names, comments, or strings, and only excludes definitions that ctags recognized. Entire definition lines are excluded, so a reference sharing a line with a definition is dropped. Default limit 100, max 300.`
 
 // FindDefinitionsArgs are the parameters of the find_symbol_definitions
 // tool.
 type FindDefinitionsArgs struct {
 	Symbol string `json:"symbol" jsonschema:"exact identifier to find definitions of"`
 	Repo   string `json:"repo,omitempty" jsonschema:"optional repo name regex to search in"`
-	Limit  int    `json:"limit,omitempty" jsonschema:"max results (default 50)"`
+	Limit  int    `json:"limit,omitempty" jsonschema:"max results (default 50, max 200)"`
 }
 
 // FindSymbolDefinitions finds definition sites of an identifier via a
@@ -35,10 +36,7 @@ func (s *Server) FindSymbolDefinitions(ctx context.Context, args FindDefinitions
 	if args.Symbol == "" {
 		return "", errors.New("symbol is required")
 	}
-	limit := args.Limit
-	if limit <= 0 {
-		limit = defaultDefinitionsLimit
-	}
+	limit := clampLimit(args.Limit, defaultDefinitionsLimit, maxDefinitionsLimit)
 	res, err := s.searcher.Search(ctx, search.Options{
 		Query:      symbolQuery("sym:", args.Symbol),
 		RepoFilter: args.Repo,
@@ -47,11 +45,10 @@ func (s *Server) FindSymbolDefinitions(ctx context.Context, args FindDefinitions
 	if err != nil {
 		return "", err
 	}
-	out := formatGrep(res, limit, false)
-	if out == "no matches" {
+	if len(res.Files) == 0 {
 		return fmt.Sprintf("no definitions found for %q (note: symbol search requires the index to be built with universal-ctags)", args.Symbol), nil
 	}
-	return out, nil
+	return formatGrep(res, limit, false), nil
 }
 
 // FindReferencesArgs are the parameters of the find_symbol_references tool.
@@ -136,6 +133,9 @@ func (s *Server) FindSymbolReferences(ctx context.Context, args FindReferencesAr
 			omitted = 1
 		}
 		fmt.Fprintf(&b, "\n[truncated: at least %d more references omitted; narrow with repo or raise limit (max %d)]\n", omitted, maxReferencesLimit)
+	}
+	if defRes.Truncated {
+		b.WriteString("\n[caveat: the definition query was truncated, so definition exclusion may be incomplete; some listed references may be definition sites]\n")
 	}
 	fmt.Fprintf(&b, "\n%d references (approximate; definition sites excluded) (%d files considered, %s)",
 		len(shown), res.Stats.FilesConsidered, res.Stats.Duration.Round(time.Millisecond))
