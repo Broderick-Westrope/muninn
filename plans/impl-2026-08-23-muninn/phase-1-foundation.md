@@ -1,6 +1,6 @@
 # Phase 1: Foundation
 
-> **Status:** DRAFT
+> **Status:** COMPLETED
 > **Spec:** `plans/design-2026-08-23-muninn.md`
 
 Delivers the module scaffold and the primitives every other phase builds on: config loading (Sourcebot-compatible subset), XDG path resolution, the sync status file with atomic writes, and universal-ctags detection/validation.
