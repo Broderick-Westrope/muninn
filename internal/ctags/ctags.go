@@ -3,6 +3,7 @@
 package ctags
 
 import (
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -30,17 +31,20 @@ func Resolve(configured string) (string, error) {
 		return configured, nil
 	}
 
+	var failures []string
 	for _, candidate := range probeCandidates {
 		path, err := exec.LookPath(candidate)
 		if err != nil {
+			failures = append(failures, fmt.Sprintf("%s: not found in PATH", candidate))
 			continue
 		}
 		if err := Validate(path); err != nil {
+			failures = append(failures, fmt.Sprintf("%s: %v", path, err))
 			continue
 		}
 		return path, nil
 	}
-	return "", fmt.Errorf("no usable universal-ctags binary found; %s", installHint)
+	return "", fmt.Errorf("no usable universal-ctags binary found (tried: %s); %s", strings.Join(failures, "; "), installHint)
 }
 
 // Validate checks that the binary at path is universal-ctags with the
@@ -48,7 +52,7 @@ func Resolve(configured string) (string, error) {
 func Validate(path string) error {
 	version, err := exec.Command(path, "--version").Output()
 	if err != nil {
-		return fmt.Errorf("running %s --version: %w; %s", path, err, installHint)
+		return fmt.Errorf("running %s --version: %w%s; %s", path, err, stderrDetail(err), installHint)
 	}
 	if !strings.Contains(string(version), "Universal Ctags") {
 		return fmt.Errorf("%s is not Universal Ctags (--version check failed); %s", path, installHint)
@@ -56,12 +60,24 @@ func Validate(path string) error {
 
 	features, err := exec.Command(path, "--list-features").Output()
 	if err != nil {
-		return fmt.Errorf("running %s --list-features: %w; %s", path, err, installHint)
+		return fmt.Errorf("running %s --list-features: %w%s; %s", path, err, stderrDetail(err), installHint)
 	}
 	if !hasFeature(string(features), "interactive") {
 		return fmt.Errorf("%s lacks the interactive feature (--list-features check failed); %s", path, installHint)
 	}
 	return nil
+}
+
+// stderrDetail extracts trimmed stderr from an exec.ExitError for error
+// context, or returns an empty string.
+func stderrDetail(err error) string {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		if stderr := strings.TrimSpace(string(exitErr.Stderr)); stderr != "" {
+			return fmt.Sprintf(" (stderr: %s)", stderr)
+		}
+	}
+	return ""
 }
 
 func hasFeature(output, feature string) bool {

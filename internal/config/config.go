@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -96,15 +97,22 @@ func applyDefaults(c *Config) {
 }
 
 // ResolveToken returns the GitHub token using the following precedence:
-// auth.githubToken from the config, the env var named by the first
-// connection's token.env, then `gh auth token`.
+// auth.githubToken from the config, env vars named by connections' token.env
+// (in sorted connection-name order for determinism), then `gh auth token`.
 func ResolveToken(c *Config) (string, error) {
 	if c.Auth.GitHubToken != "" {
 		return c.Auth.GitHubToken, nil
 	}
 
+	names := make([]string, 0, len(c.Connections))
+	for name := range c.Connections {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
 	var envName string
-	for _, conn := range c.Connections {
+	for _, name := range names {
+		conn := c.Connections[name]
 		if conn.Token != nil && conn.Token.Env != "" {
 			envName = conn.Token.Env
 			if v := os.Getenv(envName); v != "" {
@@ -120,11 +128,19 @@ func ResolveToken(c *Config) (string, error) {
 		}
 	}
 
+	var ghDetail string
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		if stderr := strings.TrimSpace(string(exitErr.Stderr)); stderr != "" {
+			ghDetail = fmt.Sprintf(" (`gh auth token` failed: %s)", stderr)
+		}
+	}
+
 	hint := "set a token env var referenced by a connection's token.env, or install the GitHub CLI (gh) and run `gh auth login`"
 	if envName != "" {
 		hint = fmt.Sprintf("set the %s environment variable, or install the GitHub CLI (gh) and run `gh auth login`", envName)
 	}
-	return "", fmt.Errorf("no GitHub token found: %s", hint)
+	return "", fmt.Errorf("no GitHub token found: %s%s", hint, ghDetail)
 }
 
 // Save writes the config to path atomically with 0600 permissions.
@@ -137,9 +153,30 @@ func Save(path string, c *Config) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("creating config directory: %w", err)
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	f, err := os.CreateTemp(filepath.Dir(path), ".config-*.tmp")
+	if err != nil {
+		return fmt.Errorf("creating temp config file: %w", err)
+	}
+	tmp := f.Name()
+	cleanup := func() {
+		f.Close()
+		os.Remove(tmp)
+	}
+	if err := f.Chmod(0o600); err != nil {
+		cleanup()
+		return fmt.Errorf("setting config permissions: %w", err)
+	}
+	if _, err := f.Write(data); err != nil {
+		cleanup()
 		return fmt.Errorf("writing config: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		cleanup()
+		return fmt.Errorf("syncing config: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("closing config: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		os.Remove(tmp)

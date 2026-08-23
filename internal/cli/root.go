@@ -1,8 +1,15 @@
 package cli
 
-import "github.com/spf13/cobra"
+import (
+	"errors"
+
+	"github.com/spf13/cobra"
+)
 
 var configPath string
+
+// errNotImplemented is returned by command stubs that are not yet built.
+var errNotImplemented = errors.New("not implemented")
 
 func newRootCmd() *cobra.Command {
 	rootCmd := &cobra.Command{

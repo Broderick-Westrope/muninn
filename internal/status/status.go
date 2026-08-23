@@ -12,7 +12,7 @@ import (
 )
 
 // ErrNotExist indicates the status file does not exist (never synced).
-var ErrNotExist = fmt.Errorf("status file does not exist: %w", os.ErrNotExist)
+var ErrNotExist = errors.New("status file does not exist")
 
 type SyncStatus struct {
 	StartedAt  time.Time             `json:"startedAt"`
@@ -38,9 +38,30 @@ func Write(path string, s *SyncStatus) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("creating status directory: %w", err)
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	f, err := os.CreateTemp(filepath.Dir(path), ".status-*.tmp")
+	if err != nil {
+		return fmt.Errorf("creating temp status file: %w", err)
+	}
+	tmp := f.Name()
+	cleanup := func() {
+		f.Close()
+		os.Remove(tmp)
+	}
+	if err := f.Chmod(0o600); err != nil {
+		cleanup()
+		return fmt.Errorf("setting status permissions: %w", err)
+	}
+	if _, err := f.Write(data); err != nil {
+		cleanup()
 		return fmt.Errorf("writing status: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		cleanup()
+		return fmt.Errorf("syncing status: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("closing status: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		os.Remove(tmp)
@@ -55,7 +76,7 @@ func Read(path string) (*SyncStatus, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("%w: %s", ErrNotExist, path)
+			return nil, fmt.Errorf("%w: %w", ErrNotExist, err)
 		}
 		return nil, fmt.Errorf("reading status: %w", err)
 	}
