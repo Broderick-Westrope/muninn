@@ -1,0 +1,13 @@
+# Binary
+/muninn
+
+# OS
+.DS_Store
+
+# Editor
+.idea/
+.vscode/
+
+# Test/coverage artifacts
+*.test
+*.out
