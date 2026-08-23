@@ -96,6 +96,13 @@ Out (v1, possible later):
 - **Zoekt pinned + wrapped**: Zoekt has no stable library API (recent `build`→`index` restructure, churn driven by Sourcegraph). Pin a commit, keep all Zoekt types behind the core-lib interface so frontends never import Zoekt, budget for upgrade breakage.
 - **Core lib + frontends layering**: MCP, CLI, and web are thin frontends over one core (sync/index/search/git), guaranteeing future surfaces (editor integration, commits/diff tools) bolt on without rework.
 
+**Implementation Notes (from design review, resolve during planning):**
+
+- Protect indexed commits from force-push + git gc on mirrors: write a `refs/muninn/indexed` ref at index time (and/or `gc.auto=0`); on unreachable commit, return a clear "index/mirror mismatch" error, not a raw git object error.
+- Confirm the pinned Zoekt commit's package layout (`NewDirectorySearcher` recently moved `shards` → `search`) when writing the core-lib wrapper.
+- Pick the definition-exclusion mechanism for `find_symbol_references` (`-sym:` query negation vs post-filter via `SymbolInfo`); filter before applying result caps.
+- Apply atomic write-then-rename to the status file too, since a live MCP session reads it while sync rewrites it.
+
 **Context Files:**
 
 - `/Users/broderick.westrope/dev/helse/sourcebot/config.json` — existing config to remain migration-compatible with
