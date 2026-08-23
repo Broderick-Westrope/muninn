@@ -1,6 +1,6 @@
 # Phase 2: Sync Engine
 
-> **Status:** DRAFT
+> **Status:** COMPLETED
 > **Spec:** `plans/design-2026-08-23-muninn.md`
 > **Depends on:** Phase 1 merged
 
