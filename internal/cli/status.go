@@ -4,12 +4,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/broderick-westrope/muninn/internal/launchd"
 	"github.com/broderick-westrope/muninn/internal/status"
 	"github.com/broderick-westrope/muninn/internal/xdg"
 )
@@ -29,6 +31,7 @@ func newStatusCmd() *cobra.Command {
 			default:
 				printStatus(out, st)
 			}
+			fmt.Fprintf(out, "launchd agent: %s\n", agentState())
 			return nil
 		},
 	}
@@ -59,6 +62,18 @@ func printStatus(out io.Writer, st *status.SyncStatus) {
 		}
 		w.Flush()
 	}
+}
+
+// agentState reports whether the launchd agent's plist is installed.
+func agentState() string {
+	plistPath, err := launchd.PlistPath()
+	if err != nil {
+		return "unknown (" + err.Error() + ")"
+	}
+	if _, err := os.Stat(plistPath); err == nil {
+		return "installed (" + plistPath + ")"
+	}
+	return "not installed — run `muninn sync --install`"
 }
 
 // failedRepos returns the names of repos with errors, sorted.
