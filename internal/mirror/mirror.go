@@ -5,6 +5,7 @@ package mirror
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -133,15 +134,18 @@ func (m *Manager) Remove(fullName string) error {
 
 // authEnv returns the extra environment injecting the token as an HTTP
 // header via git config env vars, so it never appears in argv or on disk.
+// GitHub's git endpoint rejects Bearer for OAuth/gh tokens, so Basic auth
+// with the x-access-token username is used (works for all token types).
 // It returns nil for empty tokens and file:// URLs (used in tests).
 func authEnv(cloneURL, token string) []string {
 	if token == "" || strings.HasPrefix(cloneURL, "file://") {
 		return nil
 	}
+	credentials := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))
 	return []string{
 		"GIT_CONFIG_COUNT=1",
 		"GIT_CONFIG_KEY_0=http.extraHeader",
-		"GIT_CONFIG_VALUE_0=Authorization: Bearer " + token,
+		"GIT_CONFIG_VALUE_0=Authorization: Basic " + credentials,
 	}
 }
 
