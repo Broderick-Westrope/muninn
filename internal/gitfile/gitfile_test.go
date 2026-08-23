@@ -1,0 +1,259 @@
+package gitfile
+
+import (
+	"context"
+	"errors"
+	"io/fs"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// git runs a git command against dir (or without -C when dir is empty),
+// failing the test on error.
+func git(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	base := []string{"-c", "user.name=test", "-c", "user.email=test@example.com"}
+	if dir != "" {
+		base = append(base, "-C", dir)
+	}
+	cmd := exec.Command("git", append(base, args...)...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// writeFile writes a fixture file, creating parent directories.
+func writeFile(t *testing.T, dir, name, content string) {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("creating fixture directory: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("writing fixture file %s: %v", name, err)
+	}
+}
+
+const fileV1 = "one\ntwo\nthree\nfour\nfive\n"
+const fileV2 = "one\nCHANGED\nthree\n"
+
+// fixtureMirror creates a bare mirror with two commits touching file.txt
+// (v1 then v2) plus a small tree, returning the mirror dir and both commits.
+func fixtureMirror(t *testing.T) (mirror, commit1, commit2 string) {
+	t.Helper()
+	src := filepath.Join(t.TempDir(), "src")
+	git(t, "", "init", "-b", "main", src)
+
+	writeFile(t, src, "file.txt", fileV1)
+	writeFile(t, src, "top.txt", "top\n")
+	writeFile(t, src, "a/d.txt", "d\n")
+	writeFile(t, src, "a/b/c.txt", "c\n")
+	git(t, src, "add", ".")
+	git(t, src, "commit", "-m", "v1")
+	commit1 = git(t, src, "rev-parse", "HEAD")
+
+	writeFile(t, src, "file.txt", fileV2)
+	git(t, src, "add", ".")
+	git(t, src, "commit", "-m", "v2")
+	commit2 = git(t, src, "rev-parse", "HEAD")
+
+	mirror = filepath.Join(t.TempDir(), "repo.git")
+	git(t, "", "clone", "--bare", src, mirror)
+	return mirror, commit1, commit2
+}
+
+func TestReadFilePinnedCommit(t *testing.T) {
+	mirror, commit1, commit2 := fixtureMirror(t)
+	ctx := context.Background()
+
+	content, total, err := ReadFile(ctx, mirror, commit1, "file.txt", 0, 0)
+	if err != nil {
+		t.Fatalf("ReadFile at commit1: %v", err)
+	}
+	if content != fileV1 {
+		t.Errorf("content at commit1 = %q, want %q", content, fileV1)
+	}
+	if total != 5 {
+		t.Errorf("totalLines at commit1 = %d, want 5", total)
+	}
+
+	content, total, err = ReadFile(ctx, mirror, commit2, "file.txt", 0, 0)
+	if err != nil {
+		t.Fatalf("ReadFile at commit2: %v", err)
+	}
+	if content != fileV2 {
+		t.Errorf("content at commit2 = %q, want %q", content, fileV2)
+	}
+	if total != 3 {
+		t.Errorf("totalLines at commit2 = %d, want 3", total)
+	}
+}
+
+func TestReadFileWindow(t *testing.T) {
+	mirror, commit1, _ := fixtureMirror(t)
+	ctx := context.Background()
+
+	tests := []struct {
+		name          string
+		offset, limit int
+		want          string
+	}{
+		{"middle window", 2, 2, "two\nthree\n"},
+		{"from offset to end", 4, 0, "four\nfive\n"},
+		{"limit past end", 4, 10, "four\nfive\n"},
+		{"offset past end", 6, 2, ""},
+		{"offset zero is line one", 0, 1, "one\n"},
+		{"whole file", 1, 0, fileV1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			content, total, err := ReadFile(ctx, mirror, commit1, "file.txt", tt.offset, tt.limit)
+			if err != nil {
+				t.Fatalf("ReadFile(offset=%d, limit=%d): %v", tt.offset, tt.limit, err)
+			}
+			if content != tt.want {
+				t.Errorf("content = %q, want %q", content, tt.want)
+			}
+			if total != 5 {
+				t.Errorf("totalLines = %d, want 5", total)
+			}
+		})
+	}
+
+	if _, _, err := ReadFile(ctx, mirror, commit1, "file.txt", -1, 0); err == nil {
+		t.Error("negative offset: err = nil, want error")
+	}
+	if _, _, err := ReadFile(ctx, mirror, commit1, "file.txt", 0, -1); err == nil {
+		t.Error("negative limit: err = nil, want error")
+	}
+}
+
+func TestReadFileMissingPath(t *testing.T) {
+	mirror, commit1, _ := fixtureMirror(t)
+	_, _, err := ReadFile(context.Background(), mirror, commit1, "nope.txt", 0, 0)
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("err = %v, want fs.ErrNotExist", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "nope.txt") {
+		t.Errorf("err = %v, want message mentioning the path", err)
+	}
+}
+
+func TestReadFileDirectory(t *testing.T) {
+	mirror, commit1, _ := fixtureMirror(t)
+	_, _, err := ReadFile(context.Background(), mirror, commit1, "a", 0, 0)
+	if err == nil || !strings.Contains(err.Error(), "not a file") {
+		t.Fatalf("err = %v, want 'not a file' error", err)
+	}
+}
+
+func TestReadFileIndexMismatch(t *testing.T) {
+	mirror, _, _ := fixtureMirror(t)
+	bogus := strings.Repeat("d", 40)
+	_, _, err := ReadFile(context.Background(), mirror, bogus, "file.txt", 0, 0)
+	if !errors.Is(err, ErrIndexMismatch) {
+		t.Fatalf("err = %v, want ErrIndexMismatch", err)
+	}
+	if !strings.Contains(err.Error(), "muninn sync") {
+		t.Errorf("err = %v, want message telling the user to run muninn sync", err)
+	}
+}
+
+func TestReadFileTooLarge(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "src")
+	git(t, "", "init", "-b", "main", src)
+	big := strings.Repeat("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n", (11<<20)/32) // ~11 MiB
+	writeFile(t, src, "big.txt", big)
+	git(t, src, "add", ".")
+	git(t, src, "commit", "-m", "big")
+	commit := git(t, src, "rev-parse", "HEAD")
+
+	_, _, err := ReadFile(context.Background(), src, commit, "big.txt", 0, 0)
+	if !errors.Is(err, ErrFileTooLarge) {
+		t.Fatalf("err = %v, want ErrFileTooLarge", err)
+	}
+}
+
+// entriesByPath maps entry path → entry for assertions.
+func entriesByPath(entries []TreeEntry) map[string]TreeEntry {
+	m := make(map[string]TreeEntry, len(entries))
+	for _, e := range entries {
+		m[e.Path] = e
+	}
+	return m
+}
+
+func TestListTreeDepth(t *testing.T) {
+	mirror, commit1, _ := fixtureMirror(t)
+	ctx := context.Background()
+
+	// Depth 1 at root: only top-level entries.
+	entries, err := ListTree(ctx, mirror, commit1, "", 1)
+	if err != nil {
+		t.Fatalf("ListTree depth 1: %v", err)
+	}
+	got := entriesByPath(entries)
+	if len(got) != 3 {
+		t.Fatalf("depth 1 entries = %+v, want a, file.txt, top.txt", entries)
+	}
+	if e := got["a"]; e.Type != "dir" {
+		t.Errorf("a = %+v, want dir", e)
+	}
+	if e := got["file.txt"]; e.Type != "file" || e.Size != int64(len(fileV1)) {
+		t.Errorf("file.txt = %+v, want file of %d bytes", e, len(fileV1))
+	}
+
+	// Depth 2 at root adds a's children but not a/b's.
+	entries, err = ListTree(ctx, mirror, commit1, "", 2)
+	if err != nil {
+		t.Fatalf("ListTree depth 2: %v", err)
+	}
+	got = entriesByPath(entries)
+	if len(got) != 5 {
+		t.Fatalf("depth 2 entries = %+v, want 5 entries", entries)
+	}
+	if e := got["a/b"]; e.Type != "dir" {
+		t.Errorf("a/b = %+v, want dir", e)
+	}
+	if e := got["a/d.txt"]; e.Type != "file" {
+		t.Errorf("a/d.txt = %+v, want file", e)
+	}
+	if _, ok := got["a/b/c.txt"]; ok {
+		t.Error("a/b/c.txt listed at depth 2, want excluded")
+	}
+
+	// Depth 1 under a subdirectory.
+	entries, err = ListTree(ctx, mirror, commit1, "a", 1)
+	if err != nil {
+		t.Fatalf("ListTree of a: %v", err)
+	}
+	got = entriesByPath(entries)
+	if len(got) != 3 {
+		t.Fatalf("entries under a = %+v, want a, a/b, a/d.txt", entries)
+	}
+	if _, ok := got["a/b/c.txt"]; ok {
+		t.Error("a/b/c.txt listed at depth 1 under a, want excluded")
+	}
+}
+
+func TestListTreeMissingPath(t *testing.T) {
+	mirror, commit1, _ := fixtureMirror(t)
+	_, err := ListTree(context.Background(), mirror, commit1, "nope", 1)
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("err = %v, want fs.ErrNotExist", err)
+	}
+}
+
+func TestListTreeIndexMismatch(t *testing.T) {
+	mirror, _, _ := fixtureMirror(t)
+	bogus := strings.Repeat("d", 40)
+	_, err := ListTree(context.Background(), mirror, bogus, "", 1)
+	if !errors.Is(err, ErrIndexMismatch) {
+		t.Fatalf("err = %v, want ErrIndexMismatch", err)
+	}
+}
