@@ -60,6 +60,10 @@ func (s *Server) mcpServer() *sdk.Server {
 	sdk.AddTool(srv, &sdk.Tool{Name: "grep", Description: grepDescription}, textHandler(s.Grep))
 	sdk.AddTool(srv, &sdk.Tool{Name: "glob", Description: globDescription}, textHandler(s.Glob))
 	sdk.AddTool(srv, &sdk.Tool{Name: "list_repos", Description: listReposDescription}, textHandler(s.ListRepos))
+	sdk.AddTool(srv, &sdk.Tool{Name: "read_file", Description: readFileDescription}, textHandler(s.ReadFile))
+	sdk.AddTool(srv, &sdk.Tool{Name: "list_tree", Description: listTreeDescription}, textHandler(s.ListTree))
+	sdk.AddTool(srv, &sdk.Tool{Name: "find_symbol_definitions", Description: findDefinitionsDescription}, textHandler(s.FindSymbolDefinitions))
+	sdk.AddTool(srv, &sdk.Tool{Name: "find_symbol_references", Description: findReferencesDescription}, textHandler(s.FindSymbolReferences))
 	return srv
 }
 
