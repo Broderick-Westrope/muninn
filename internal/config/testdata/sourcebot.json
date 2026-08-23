@@ -1,0 +1,32 @@
+{
+    "$schema": "https://raw.githubusercontent.com/sourcebot-dev/sourcebot/main/schemas/v3/index.json",
+    "connections": {
+        "github-connection": {
+            "type": "github",
+            "orgs": [
+                "eucalyptusvc"
+            ],
+            "token": {
+                "env": "MUNINN_TEST_GITHUB_TOKEN"
+            },
+            "exclude": {
+                "archived": true,
+                "repos": [
+                    "eucalyptusvc/ai-response-gen",
+                    "eucalyptusvc/cloudflare-workers",
+                    "eucalyptusvc/security-scripts"
+                ]
+            }
+        }
+    },
+    "models": [
+        {
+            "provider": "anthropic",
+            "model": "claude-sonnet-4-6",
+            "displayName": "Sonnet 4.6",
+            "token": {
+                "env": "FAKE_API_KEY"
+            }
+        }
+    ]
+}
