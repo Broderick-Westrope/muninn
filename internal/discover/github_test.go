@@ -185,6 +185,63 @@ func TestDiscoverRetriesRateLimit(t *testing.T) {
 	}
 }
 
+// TestDiscoverRetriesRateLimited403 verifies a 403 carrying GitHub's
+// rate-limit headers is retried like a 429.
+func TestDiscoverRetriesRateLimited403(t *testing.T) {
+	var calls int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/orgs/testorg/repos", func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Header().Set("X-RateLimit-Remaining", "0")
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusForbidden)
+			fmt.Fprint(w, `{"message": "API rate limit exceeded"}`)
+			return
+		}
+		writeRepos(t, w, []apiRepo{
+			{FullName: "testorg/main", CloneURL: "https://example.com/testorg/main.git", DefaultBranch: "main"},
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := &Client{BaseURL: srv.URL}
+	repos, err := c.Discover(context.Background(), githubConfig(config.Connection{Type: "github", Orgs: []string{"testorg"}}), "test-token")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if calls != 2 {
+		t.Errorf("calls = %d, want 2", calls)
+	}
+	if got := fullNames(repos); !equal(got, []string{"testorg/main"}) {
+		t.Errorf("repos = %v, want [testorg/main]", got)
+	}
+}
+
+// TestDiscoverPlain403FailsFast verifies a 403 without rate-limit headers
+// (bad token, SAML enforcement) is not retried.
+func TestDiscoverPlain403FailsFast(t *testing.T) {
+	var calls int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/orgs/testorg/repos", func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprint(w, `{"message": "Resource protected by organization SAML enforcement"}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := &Client{BaseURL: srv.URL}
+	_, err := c.Discover(context.Background(), githubConfig(config.Connection{Type: "github", Orgs: []string{"testorg"}}), "test-token")
+	if err == nil {
+		t.Fatal("Discover: want error, got nil")
+	}
+	if calls != 1 {
+		t.Errorf("calls = %d, want 1 (plain 403 must not be retried)", calls)
+	}
+}
+
 func equal(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

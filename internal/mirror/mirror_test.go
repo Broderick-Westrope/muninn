@@ -2,6 +2,9 @@ package mirror
 
 import (
 	"context"
+	"encoding/base64"
+	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -75,7 +78,7 @@ func TestEnsureClonesBareWithNarrowRefspec(t *testing.T) {
 		t.Errorf("gc.auto = %q, want 0", got)
 	}
 
-	head, err := m.HeadCommit(dir, "main")
+	head, err := m.HeadCommit(context.Background(), dir, "main")
 	if err != nil {
 		t.Fatalf("HeadCommit: %v", err)
 	}
@@ -114,12 +117,37 @@ func TestEnsureFetchesNewCommit(t *testing.T) {
 	if created {
 		t.Error("created = true, want false")
 	}
-	head, err := m.HeadCommit(m.Dir(repo.FullName), "main")
+	head, err := m.HeadCommit(context.Background(), m.Dir(repo.FullName), "main")
 	if err != nil {
 		t.Fatalf("HeadCommit: %v", err)
 	}
 	if head != want {
 		t.Errorf("HeadCommit = %q, want %q", head, want)
+	}
+}
+
+// TestEnsureSelfHealsConfig simulates a mirror left without the fetch
+// refspec (as an older two-step clone could after a crash) and asserts the
+// fetch path re-asserts both config keys.
+func TestEnsureSelfHealsConfig(t *testing.T) {
+	m := &Manager{BaseDir: t.TempDir()}
+	repo, _ := fixtureRepo(t, "acme/widget")
+
+	if _, err := m.Ensure(context.Background(), repo, ""); err != nil {
+		t.Fatalf("Ensure (clone): %v", err)
+	}
+	dir := m.Dir(repo.FullName)
+	git(t, dir, "config", "--unset-all", "remote.origin.fetch")
+	git(t, dir, "config", "--unset-all", "gc.auto")
+
+	if _, err := m.Ensure(context.Background(), repo, ""); err != nil {
+		t.Fatalf("Ensure (fetch): %v", err)
+	}
+	if got := git(t, dir, "config", "remote.origin.fetch"); got != "+refs/heads/*:refs/heads/*" {
+		t.Errorf("remote.origin.fetch = %q, want +refs/heads/*:refs/heads/*", got)
+	}
+	if got := git(t, dir, "config", "gc.auto"); got != "0" {
+		t.Errorf("gc.auto = %q, want 0", got)
 	}
 }
 
@@ -135,11 +163,11 @@ func TestForcePushKeepsIndexedCommit(t *testing.T) {
 	if _, err := m.Ensure(context.Background(), repo, ""); err != nil {
 		t.Fatalf("Ensure (clone): %v", err)
 	}
-	oldSHA, err := m.HeadCommit(dir, "main")
+	oldSHA, err := m.HeadCommit(context.Background(), dir, "main")
 	if err != nil {
 		t.Fatalf("HeadCommit: %v", err)
 	}
-	if err := m.MarkIndexed(dir, oldSHA); err != nil {
+	if err := m.MarkIndexed(context.Background(), dir, oldSHA); err != nil {
 		t.Fatalf("MarkIndexed: %v", err)
 	}
 
@@ -154,7 +182,7 @@ func TestForcePushKeepsIndexedCommit(t *testing.T) {
 		t.Fatalf("Ensure (fetch --prune): %v", err)
 	}
 
-	head, err := m.HeadCommit(dir, "main")
+	head, err := m.HeadCommit(context.Background(), dir, "main")
 	if err != nil {
 		t.Fatalf("HeadCommit: %v", err)
 	}
@@ -197,8 +225,29 @@ func TestListRemove(t *testing.T) {
 	if want := []string{"beta/gadget"}; !equal(list, want) {
 		t.Errorf("List after Remove = %v, want %v", list, want)
 	}
-	if _, err := os.Stat(filepath.Join(m.BaseDir, "acme")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(m.BaseDir, "acme")); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("empty owner dir acme not pruned: stat err = %v", err)
+	}
+}
+
+func TestAuthEnv(t *testing.T) {
+	const token = "gho_secret123"
+	want := []string{
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=http.extraHeader",
+		"GIT_CONFIG_VALUE_0=Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:"+token)),
+	}
+	env := authEnv(token)
+	if !equal(env, want) {
+		t.Errorf("authEnv = %v, want %v", env, want)
+	}
+	for _, entry := range env {
+		if strings.Contains(entry, token) {
+			t.Errorf("raw token leaked into env entry %q", entry)
+		}
+	}
+	if env := authEnv(""); env != nil {
+		t.Errorf("authEnv(\"\") = %v, want nil", env)
 	}
 }
 

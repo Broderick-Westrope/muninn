@@ -3,11 +3,14 @@ package sync
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	stdsync "sync"
 	"testing"
+	"time"
 
 	"github.com/broderick-westrope/muninn/internal/config"
 	"github.com/broderick-westrope/muninn/internal/discover"
@@ -209,7 +212,7 @@ func TestRunRemovedRepoGC(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second Run: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(e.mirrorsDir(), "acme", "b.git")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(e.mirrorsDir(), "acme", "b.git")); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("mirror for removed acme/b still exists (err = %v)", err)
 	}
 	indexed, err := e.indexer().ListIndexed()
@@ -293,6 +296,133 @@ func TestRunDiscoveryFailureRetainsPreviousEntries(t *testing.T) {
 	}
 }
 
+// failingRemoveMirror delegates to the embedded Mirror except Remove,
+// which always fails.
+type failingRemoveMirror struct {
+	Mirror
+}
+
+func (failingRemoveMirror) Remove(string) error { return errors.New("remove boom") }
+
+func TestRunGCFailureDoesNotAbortRun(t *testing.T) {
+	srcA, commitA := fixtureRepo(t)
+	srcB, _ := fixtureRepo(t)
+	e := newEnv(t)
+
+	repoA, repoB := fileRepo("acme/a", srcA), fileRepo("acme/b", srcB)
+	if _, err := Run(context.Background(), &config.Config{}, e.deps(&stubDiscoverer{repos: []discover.Repo{repoA, repoB}}, nil)); err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+
+	deps := e.deps(&stubDiscoverer{repos: []discover.Repo{repoA}}, nil)
+	deps.Mirror = failingRemoveMirror{deps.Mirror}
+	st, err := Run(context.Background(), &config.Config{}, deps)
+	if err != nil {
+		t.Fatalf("second Run: %v (a GC failure must not abort the run)", err)
+	}
+	if st.Success {
+		t.Error("Success = true, want false")
+	}
+	rs, ok := st.Repos["acme/b"]
+	if !ok {
+		t.Fatal("GC-failed acme/b missing from status")
+	}
+	if !strings.Contains(rs.Error, "remove boom") {
+		t.Errorf("acme/b Error = %q, want the removal failure", rs.Error)
+	}
+	if a := st.Repos["acme/a"]; !a.Indexed || a.IndexedCommit != commitA {
+		t.Errorf("acme/a = %+v, want indexed at %s after GC failure", a, commitA)
+	}
+}
+
+func TestRunReconcileFailureWritesStatus(t *testing.T) {
+	src, commit := fixtureRepo(t)
+	e := newEnv(t)
+	repo := fileRepo("acme/a", src)
+
+	if _, err := Run(context.Background(), &config.Config{}, e.deps(&stubDiscoverer{repos: []discover.Repo{repo}}, nil)); err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+
+	// Break shard listing so reconcile aborts before GC.
+	deps := e.deps(&stubDiscoverer{repos: []discover.Repo{repo}}, func(string) Indexer {
+		return failingListIndexer{e.indexer()}
+	})
+	if _, err := Run(context.Background(), &config.Config{}, deps); err == nil {
+		t.Fatal("Run with failing reconcile: want error, got nil")
+	}
+
+	onDisk, err := status.Read(e.statusPath())
+	if err != nil {
+		t.Fatalf("reading status file: %v", err)
+	}
+	if onDisk.Success {
+		t.Error("Success = true, want false after reconcile failure")
+	}
+	if onDisk.FinishedAt.IsZero() {
+		t.Error("FinishedAt is zero, want set on abort")
+	}
+	if rs := onDisk.Repos["acme/a"]; rs.IndexedCommit != commit {
+		t.Errorf("IndexedCommit = %q, want %q carried forward", rs.IndexedCommit, commit)
+	}
+}
+
+// failingListIndexer delegates to the embedded Indexer except ListIndexed,
+// which always fails.
+type failingListIndexer struct {
+	Indexer
+}
+
+func (failingListIndexer) ListIndexed() (map[string]string, error) {
+	return nil, errors.New("list boom")
+}
+
+// countingIndexer tracks the peak number of concurrent IndexRepo calls.
+type countingIndexer struct {
+	Indexer
+	mu        stdsync.Mutex
+	cur, peak int
+}
+
+func (c *countingIndexer) IndexRepo(ctx context.Context, dir, name, branch, commit string) error {
+	c.mu.Lock()
+	c.cur++
+	if c.cur > c.peak {
+		c.peak = c.cur
+	}
+	c.mu.Unlock()
+	// Hold the slot long enough that overlapping repos must queue.
+	time.Sleep(30 * time.Millisecond)
+	c.mu.Lock()
+	c.cur--
+	c.mu.Unlock()
+	return c.Indexer.IndexRepo(ctx, dir, name, branch, commit)
+}
+
+func TestRunIndexConcurrencyBounded(t *testing.T) {
+	e := newEnv(t)
+	var repos []discover.Repo
+	for _, name := range []string{"acme/a", "acme/b", "acme/c", "acme/d", "acme/e", "acme/f"} {
+		src, _ := fixtureRepo(t)
+		repos = append(repos, fileRepo(name, src))
+	}
+
+	ci := &countingIndexer{Indexer: e.indexer()}
+	st, err := Run(context.Background(), &config.Config{}, e.deps(&stubDiscoverer{repos: repos}, func(string) Indexer { return ci }))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !st.Success {
+		t.Errorf("Success = false, want true: %+v", st.Repos)
+	}
+	if ci.peak > 2 {
+		t.Errorf("peak index concurrency = %d, want at most 2", ci.peak)
+	}
+	if ci.peak < 2 {
+		t.Errorf("peak index concurrency = %d, want 2 (test did not exercise concurrency)", ci.peak)
+	}
+}
+
 func TestRunInvalidCtagsFailsRun(t *testing.T) {
 	e := newEnv(t)
 	deps := e.deps(&stubDiscoverer{}, nil)
@@ -301,7 +431,7 @@ func TestRunInvalidCtagsFailsRun(t *testing.T) {
 	if _, err := Run(context.Background(), &config.Config{}, deps); err == nil {
 		t.Fatal("Run with invalid ctags: want error, got nil")
 	}
-	if _, err := os.Stat(e.statusPath()); !os.IsNotExist(err) {
+	if _, err := os.Stat(e.statusPath()); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("status file written despite ctags hard failure (err = %v)", err)
 	}
 }

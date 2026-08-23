@@ -2,6 +2,8 @@ package index
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -164,7 +166,7 @@ func TestCleanTmp(t *testing.T) {
 	if err := ix.CleanTmp(); err != nil {
 		t.Fatalf("CleanTmp: %v", err)
 	}
-	if _, err := os.Stat(tmp); !os.IsNotExist(err) {
+	if _, err := os.Stat(tmp); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("%s still exists after CleanTmp", tmp)
 	}
 	if _, err := os.Stat(keep); err != nil {

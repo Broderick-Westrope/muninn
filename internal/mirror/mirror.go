@@ -42,9 +42,15 @@ func (m *Manager) Dir(fullName string) string {
 // fetch destination.
 func (m *Manager) Ensure(ctx context.Context, repo discover.Repo, token string) (created bool, err error) {
 	dir := m.Dir(repo.FullName)
-	env := authEnv(repo.CloneURL, token)
+	env := authEnv(token)
 
 	if _, statErr := os.Stat(dir); statErr == nil {
+		// Re-assert the config before fetching so mirrors created by older
+		// versions (which set config after clone and could die in between)
+		// self-heal instead of staying silently stale.
+		if err := assertConfig(ctx, dir, repo.FullName); err != nil {
+			return false, err
+		}
 		if _, err := runGit(ctx, env, "-C", dir, "fetch", "--prune", "origin"); err != nil {
 			return false, fmt.Errorf("fetching %s: %w", repo.FullName, err)
 		}
@@ -56,25 +62,48 @@ func (m *Manager) Ensure(ctx context.Context, repo discover.Repo, token string) 
 	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
 		return false, fmt.Errorf("creating mirror directory for %s: %w", repo.FullName, err)
 	}
-	if _, err := runGit(ctx, env, "clone", "--bare", repo.CloneURL, dir); err != nil {
+	// The mirror is created atomically: clone into a temp sibling, set the
+	// fetch refspec there, then rename into place. A process death at any
+	// point leaves either no mirror (re-cloned next run) or a complete one
+	// — never a mirror without a fetch refspec, which would be silently
+	// stale forever. Setting the refspec via `clone --config` is not
+	// possible: it duplicates the bare clone's internal refs/heads mapping
+	// ("multiple updates for ref ... not allowed"). gc.auto=0 is a backstop
+	// protecting indexed commits from auto-gc; refs/muninn/indexed is the
+	// primary mechanism. The fixed temp name does not collide because sync
+	// never runs Ensure for the same repo concurrently within a run.
+	tmp := dir + ".tmp"
+	if err := os.RemoveAll(tmp); err != nil {
+		return false, fmt.Errorf("removing stale temp clone for %s: %w", repo.FullName, err)
+	}
+	if _, err := runGit(ctx, env, "clone", "--bare", "--config", "gc.auto=0", repo.CloneURL, tmp); err != nil {
 		return false, fmt.Errorf("cloning %s: %w", repo.FullName, err)
 	}
-	// `git clone --bare` copies all branches into refs/heads but does not
-	// set a fetch refspec, so subsequent fetches need this set explicitly.
-	if _, err := runGit(ctx, nil, "-C", dir, "config", "remote.origin.fetch", "+refs/heads/*:refs/heads/*"); err != nil {
+	if _, err := runGit(ctx, nil, "-C", tmp, "config", "remote.origin.fetch", "+refs/heads/*:refs/heads/*"); err != nil {
 		return false, fmt.Errorf("configuring fetch refspec for %s: %w", repo.FullName, err)
 	}
-	// Backstop protecting indexed commits from auto-gc; refs/muninn/indexed
-	// is the primary mechanism.
-	if _, err := runGit(ctx, nil, "-C", dir, "config", "gc.auto", "0"); err != nil {
-		return false, fmt.Errorf("disabling auto-gc for %s: %w", repo.FullName, err)
+	if err := os.Rename(tmp, dir); err != nil {
+		return false, fmt.Errorf("moving mirror of %s into place: %w", repo.FullName, err)
 	}
 	return true, nil
 }
 
+// assertConfig (re)applies the fetch refspec and gc backstop on an existing
+// mirror, healing mirrors left partial by a crash or created before the
+// config was passed atomically on clone.
+func assertConfig(ctx context.Context, dir, fullName string) error {
+	if _, err := runGit(ctx, nil, "-C", dir, "config", "--replace-all", "remote.origin.fetch", "+refs/heads/*:refs/heads/*"); err != nil {
+		return fmt.Errorf("configuring fetch refspec for %s: %w", fullName, err)
+	}
+	if _, err := runGit(ctx, nil, "-C", dir, "config", "gc.auto", "0"); err != nil {
+		return fmt.Errorf("disabling auto-gc for %s: %w", fullName, err)
+	}
+	return nil
+}
+
 // HeadCommit returns the commit SHA at the tip of the default branch.
-func (m *Manager) HeadCommit(dir, defaultBranch string) (string, error) {
-	sha, err := runGit(context.Background(), nil, "-C", dir, "rev-parse", "refs/heads/"+defaultBranch)
+func (m *Manager) HeadCommit(ctx context.Context, dir, defaultBranch string) (string, error) {
+	sha, err := runGit(ctx, nil, "-C", dir, "rev-parse", "refs/heads/"+defaultBranch)
 	if err != nil {
 		return "", fmt.Errorf("resolving head of %s in %s: %w", defaultBranch, dir, err)
 	}
@@ -83,8 +112,8 @@ func (m *Manager) HeadCommit(dir, defaultBranch string) (string, error) {
 
 // MarkIndexed records the indexed commit under refs/muninn/indexed,
 // keeping it reachable across upstream force-pushes and gc.
-func (m *Manager) MarkIndexed(dir, sha string) error {
-	if _, err := runGit(context.Background(), nil, "-C", dir, "update-ref", "refs/muninn/indexed", sha); err != nil {
+func (m *Manager) MarkIndexed(ctx context.Context, dir, sha string) error {
+	if _, err := runGit(ctx, nil, "-C", dir, "update-ref", "refs/muninn/indexed", sha); err != nil {
 		return fmt.Errorf("marking indexed commit in %s: %w", dir, err)
 	}
 	return nil
@@ -136,9 +165,9 @@ func (m *Manager) Remove(fullName string) error {
 // header via git config env vars, so it never appears in argv or on disk.
 // GitHub's git endpoint rejects Bearer for OAuth/gh tokens, so Basic auth
 // with the x-access-token username is used (works for all token types).
-// It returns nil for empty tokens and file:// URLs (used in tests).
-func authEnv(cloneURL, token string) []string {
-	if token == "" || strings.HasPrefix(cloneURL, "file://") {
+// It returns nil for empty tokens.
+func authEnv(token string) []string {
+	if token == "" {
 		return nil
 	}
 	credentials := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))

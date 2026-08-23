@@ -7,7 +7,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
+	"strings"
 	stdsync "sync"
 	"time"
 
@@ -31,8 +33,8 @@ type Discoverer interface {
 type Mirror interface {
 	Dir(fullName string) string
 	Ensure(ctx context.Context, repo discover.Repo, token string) (created bool, err error)
-	HeadCommit(dir, defaultBranch string) (string, error)
-	MarkIndexed(dir, sha string) error
+	HeadCommit(ctx context.Context, dir, defaultBranch string) (string, error)
+	MarkIndexed(ctx context.Context, dir, sha string) error
 	List() ([]string, error)
 	Remove(fullName string) error
 }
@@ -108,16 +110,8 @@ func Run(ctx context.Context, cfg *config.Config, deps Deps) (*status.SyncStatus
 
 	repos, err := deps.Discoverer.Discover(ctx, cfg, deps.Token)
 	if err != nil {
-		// Without the full desired list reconciliation cannot GC safely;
-		// abort, retaining the previous per-repo entries.
-		for name, rs := range prevRepos {
-			st.Repos[name] = rs
-		}
-		st.FinishedAt = time.Now()
-		if werr := status.Write(deps.StatusPath, st); werr != nil {
-			return st, fmt.Errorf("discovering repos: %w (also failed writing status: %v)", err, werr)
-		}
-		return st, fmt.Errorf("discovering repos: %w", err)
+		// Without the full desired list reconciliation cannot GC safely.
+		return abortRun(deps.StatusPath, st, prevRepos, fmt.Errorf("discovering repos: %w", err))
 	}
 
 	desired := make(map[string]bool, len(repos))
@@ -132,18 +126,19 @@ func Run(ctx context.Context, cfg *config.Config, deps Deps) (*status.SyncStatus
 		}
 	}
 
-	if err := reconcile(deps.Mirror, ix, desired); err != nil {
-		return nil, err
+	if err := reconcile(deps.Mirror, ix, desired, prevRepos, st); err != nil {
+		return abortRun(deps.StatusPath, st, prevRepos, err)
 	}
 	if err := ix.CleanTmp(); err != nil {
-		return nil, fmt.Errorf("cleaning stale tmp shards: %w", err)
+		return abortRun(deps.StatusPath, st, prevRepos, fmt.Errorf("cleaning stale tmp shards: %w", err))
 	}
 
 	fetchSem := make(chan struct{}, fetchN)
 	indexSem := make(chan struct{}, indexN)
 	var (
-		wg stdsync.WaitGroup
-		mu stdsync.Mutex // guards st.Repos and status file writes
+		wg          stdsync.WaitGroup
+		mu          stdsync.Mutex // guards st.Repos, incWriteErr, and status file writes
+		incWriteErr error
 	)
 	for _, repo := range repos {
 		wg.Add(1)
@@ -153,12 +148,18 @@ func Run(ctx context.Context, cfg *config.Config, deps Deps) (*status.SyncStatus
 			mu.Lock()
 			st.Repos[repo.FullName] = rs
 			// Incremental write (best effort): keeps a live MCP session's
-			// shard/status skew window to seconds, not the whole run.
-			_ = status.Write(deps.StatusPath, st)
+			// shard/status skew window to seconds, not the whole run. The
+			// first failure is recorded and surfaced after the run.
+			if werr := status.Write(deps.StatusPath, st); werr != nil && incWriteErr == nil {
+				incWriteErr = werr
+			}
 			mu.Unlock()
 		}(repo)
 	}
 	wg.Wait()
+	if incWriteErr != nil {
+		fmt.Fprintf(os.Stderr, "muninn: incremental status write failed: %v\n", incWriteErr)
+	}
 
 	st.FinishedAt = time.Now()
 	st.Success = true
@@ -174,10 +175,29 @@ func Run(ctx context.Context, cfg *config.Config, deps Deps) (*status.SyncStatus
 	return st, nil
 }
 
+// abortRun writes a failed status before returning err, retaining the
+// previous per-repo entries for any repo not already recorded, so an
+// aborted run is never silent (the spec requires every run to end with a
+// status write).
+func abortRun(path string, st *status.SyncStatus, prevRepos map[string]status.RepoStatus, err error) (*status.SyncStatus, error) {
+	for name, rs := range prevRepos {
+		if _, ok := st.Repos[name]; !ok {
+			st.Repos[name] = rs
+		}
+	}
+	st.FinishedAt = time.Now()
+	if werr := status.Write(path, st); werr != nil {
+		return st, fmt.Errorf("%w (also failed writing status: %v)", err, werr)
+	}
+	return st, err
+}
+
 // reconcile removes mirrors and shards for repos no longer desired. Actual
 // state is the union of mirrors on disk and indexed shards, so orphans of
-// either kind are collected.
-func reconcile(m Mirror, ix Indexer, desired map[string]bool) error {
+// either kind are collected. A per-repo removal failure does not abort the
+// run: it is recorded in st.Repos (retaining the repo's previous entry with
+// the error) and GC continues; only listing failures return an error.
+func reconcile(m Mirror, ix Indexer, desired map[string]bool, prevRepos map[string]status.RepoStatus, st *status.SyncStatus) error {
 	mirrored, err := m.List()
 	if err != nil {
 		return fmt.Errorf("listing mirrors: %w", err)
@@ -201,11 +221,17 @@ func reconcile(m Mirror, ix Indexer, desired map[string]bool) error {
 	}
 	sort.Strings(removed)
 	for _, name := range removed {
+		var errs []string
 		if err := m.Remove(name); err != nil {
-			return fmt.Errorf("removing mirror of %s: %w", name, err)
+			errs = append(errs, fmt.Sprintf("removing mirror: %v", err))
 		}
 		if err := ix.RemoveShards(name); err != nil {
-			return fmt.Errorf("removing shards of %s: %w", name, err)
+			errs = append(errs, fmt.Sprintf("removing shards: %v", err))
+		}
+		if len(errs) > 0 {
+			rs := prevRepos[name]
+			rs.Error = strings.Join(errs, "; ")
+			st.Repos[name] = rs
 		}
 	}
 	return nil
@@ -227,7 +253,7 @@ func syncRepo(ctx context.Context, deps Deps, ix Indexer, repo discover.Repo, pr
 	rs.Fetched = true
 
 	dir := deps.Mirror.Dir(repo.FullName)
-	head, err := deps.Mirror.HeadCommit(dir, repo.DefaultBranch)
+	head, err := deps.Mirror.HeadCommit(ctx, dir, repo.DefaultBranch)
 	if err != nil {
 		rs.Error = err.Error()
 		return rs
@@ -243,7 +269,7 @@ func syncRepo(ctx context.Context, deps Deps, ix Indexer, repo discover.Repo, pr
 		rs.Error = err.Error()
 		return rs
 	}
-	if err := deps.Mirror.MarkIndexed(dir, head); err != nil {
+	if err := deps.Mirror.MarkIndexed(ctx, dir, head); err != nil {
 		rs.Error = err.Error()
 		return rs
 	}

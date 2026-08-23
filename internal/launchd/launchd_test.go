@@ -2,6 +2,7 @@ package launchd
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -106,7 +107,7 @@ func TestUninstall(t *testing.T) {
 	if err := Uninstall(lc, plistPath); err != nil {
 		t.Fatalf("Uninstall: %v", err)
 	}
-	if _, err := os.Stat(plistPath); !os.IsNotExist(err) {
+	if _, err := os.Stat(plistPath); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("plist still exists after uninstall (err = %v)", err)
 	}
 	want := []string{"bootout " + Label}

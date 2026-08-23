@@ -139,7 +139,7 @@ func runInstall(cmd *cobra.Command) error {
 	if err := launchd.Install(launchd.ExecLaunchctl{}, plistPath, plist); err != nil {
 		return err
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "installed launchd agent %s (%s); syncs every %d minutes, next run within %d minutes\n",
+	fmt.Fprintf(cmd.OutOrStdout(), "installed launchd agent %s (%s); syncs every %d minutes, first run in %d minutes\n",
 		launchd.Label, plistPath, cfg.Sync.IntervalMinutes, cfg.Sync.IntervalMinutes)
 	return nil
 }

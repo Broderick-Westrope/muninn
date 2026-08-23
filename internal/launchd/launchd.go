@@ -5,7 +5,9 @@ package launchd
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -130,7 +132,7 @@ func Install(lc Launchctl, plistPath string, plist []byte) error {
 // Uninstall boots the job out and removes the plist; idempotent.
 func Uninstall(lc Launchctl, plistPath string) error {
 	_ = lc.Bootout(Label) // errors when the job is not loaded; ignored
-	if err := os.Remove(plistPath); err != nil && !os.IsNotExist(err) {
+	if err := os.Remove(plistPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("removing plist %s: %w", plistPath, err)
 	}
 	return nil

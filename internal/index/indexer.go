@@ -5,7 +5,9 @@ package index
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -92,7 +94,7 @@ func (ix *Indexer) CleanTmp() error {
 		return fmt.Errorf("globbing tmp files in %s: %w", ix.IndexDir, err)
 	}
 	for _, tmp := range tmps {
-		if err := os.Remove(tmp); err != nil && !os.IsNotExist(err) {
+		if err := os.Remove(tmp); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf("removing tmp file %s: %w", tmp, err)
 		}
 	}
@@ -111,7 +113,7 @@ func (ix *Indexer) RemoveShards(fullName string) error {
 			return fmt.Errorf("listing files for shard %s: %w", shard, err)
 		}
 		for _, p := range paths {
-			if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
 				return fmt.Errorf("removing shard file %s: %w", p, err)
 			}
 		}

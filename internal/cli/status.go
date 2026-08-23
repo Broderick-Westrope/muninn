@@ -29,7 +29,9 @@ func newStatusCmd() *cobra.Command {
 			case err != nil:
 				return err
 			default:
-				printStatus(out, st)
+				if err := printStatus(out, st); err != nil {
+					return err
+				}
 			}
 			fmt.Fprintf(out, "launchd agent: %s\n", agentState())
 			return nil
@@ -37,7 +39,7 @@ func newStatusCmd() *cobra.Command {
 	}
 }
 
-func printStatus(out io.Writer, st *status.SyncStatus) {
+func printStatus(out io.Writer, st *status.SyncStatus) error {
 	if st.FinishedAt.IsZero() {
 		fmt.Fprintf(out, "last sync: started %s, not finished (in progress or interrupted)\n", st.StartedAt.Format(time.RFC1123))
 	} else {
@@ -60,8 +62,11 @@ func printStatus(out io.Writer, st *status.SyncStatus) {
 		for _, name := range failed {
 			fmt.Fprintf(w, "%s\t%s\n", name, st.Repos[name].Error)
 		}
-		w.Flush()
+		if err := w.Flush(); err != nil {
+			return fmt.Errorf("writing status table: %w", err)
+		}
 	}
+	return nil
 }
 
 // agentState reports whether the launchd agent's plist is installed.

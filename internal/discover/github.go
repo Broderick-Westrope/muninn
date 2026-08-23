@@ -35,11 +35,6 @@ type Client struct {
 	HTTPClient *http.Client
 }
 
-// Discover resolves all configured repositories using the default client.
-func Discover(ctx context.Context, cfg *config.Config, token string) ([]Repo, error) {
-	return (&Client{}).Discover(ctx, cfg, token)
-}
-
 // Discover lists org repositories and ad-hoc repos for every connection,
 // applies each connection's exclusions, and returns the deduplicated set
 // sorted by FullName.
@@ -168,8 +163,10 @@ func (e *apiError) Error() string {
 	return fmt.Sprintf("GET %s: HTTP %d: %s", e.URL, e.StatusCode, e.Body)
 }
 
-// get performs an authenticated GET, retrying once on 403/429 while
-// respecting the Retry-After header.
+// get performs an authenticated GET, retrying once on rate limiting while
+// respecting the Retry-After header. Rate limiting is 429, or 403 carrying
+// GitHub's rate-limit headers; a plain 403 (bad token, SAML enforcement)
+// fails fast.
 func (c *Client) get(ctx context.Context, url, token string) ([]byte, http.Header, error) {
 	for attempt := 0; ; attempt++ {
 		body, header, err := c.getOnce(ctx, url, token)
@@ -177,7 +174,7 @@ func (c *Client) get(ctx context.Context, url, token string) ([]byte, http.Heade
 		if err == nil || attempt > 0 || !errors.As(err, &apiErr) {
 			return body, header, err
 		}
-		if apiErr.StatusCode != http.StatusForbidden && apiErr.StatusCode != http.StatusTooManyRequests {
+		if !rateLimited(apiErr.StatusCode, header) {
 			return nil, nil, err
 		}
 		delay := time.Second
@@ -190,6 +187,19 @@ func (c *Client) get(ctx context.Context, url, token string) ([]byte, http.Heade
 		case <-time.After(delay):
 		}
 	}
+}
+
+// rateLimited reports whether the failed response indicates rate limiting
+// worth retrying: 429 always; 403 only when GitHub's rate-limit headers
+// say the quota is exhausted.
+func rateLimited(statusCode int, header http.Header) bool {
+	switch statusCode {
+	case http.StatusTooManyRequests:
+		return true
+	case http.StatusForbidden:
+		return header.Get("X-RateLimit-Remaining") == "0" || header.Get("Retry-After") != ""
+	}
+	return false
 }
 
 func (c *Client) getOnce(ctx context.Context, url, token string) ([]byte, http.Header, error) {
