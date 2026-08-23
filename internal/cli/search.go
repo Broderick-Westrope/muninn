@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"strings"
 	"time"
@@ -38,6 +39,9 @@ when piped); stats and truncation notices go to stderr.
 Exit codes follow grep: 0 with matches, 1 without, 2 on error.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Zoekt logs shard loading via the stdlib logger; that noise
+			// belongs in sync logs, not interactive search output.
+			log.SetOutput(io.Discard)
 			searcher, err := search.Open(xdg.IndexDir())
 			if err != nil {
 				return &ExitError{Code: 2, Err: err}
