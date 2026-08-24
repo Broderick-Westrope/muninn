@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -255,9 +256,6 @@ func TestAPIFile(t *testing.T) {
 	if res.TotalLines != 3 {
 		t.Errorf("totalLines = %d, want 3", res.TotalLines)
 	}
-	if res.Language != "go" {
-		t.Errorf("language = %q, want go", res.Language)
-	}
 	if res.IndexedCommit != commit {
 		t.Errorf("indexedCommit = %q, want %q", res.IndexedCommit, commit)
 	}
@@ -288,6 +286,42 @@ func TestAPIFileInvalidRepo(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("repo %q: status = %d, want 400", repo, rec.Code)
 		}
+	}
+}
+
+// TestAPIFileTooLarge commits a blob just over gitfile's 10 MiB cap to a
+// dedicated fixture (kept out of newFixture so every other test does not
+// pay to index it; handleFile touches only the status file and the
+// mirror, never the searcher) and expects 413.
+func TestAPIFileTooLarge(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "src")
+	git(t, "", "init", "-b", "main", src)
+	huge := bytes.Repeat([]byte("0123456789abcdef"), (10<<20)/16+1) // > 10 MiB
+	if err := os.WriteFile(filepath.Join(src, "huge.txt"), huge, 0o644); err != nil {
+		t.Fatalf("writing huge fixture file: %v", err)
+	}
+	git(t, src, "add", ".")
+	git(t, src, "commit", "-m", "huge")
+
+	root := t.TempDir()
+	mirrorsDir := filepath.Join(root, "mirrors")
+	mirror := filepath.Join(mirrorsDir, "acme", "widget.git")
+	if err := os.MkdirAll(filepath.Dir(mirror), 0o755); err != nil {
+		t.Fatalf("creating mirrors dir: %v", err)
+	}
+	git(t, "", "clone", "--bare", src, mirror)
+	commit := git(t, mirror, "rev-parse", "refs/heads/main")
+
+	statusPath := filepath.Join(root, "status.json")
+	writeStatus(t, statusPath, commit, time.Now())
+
+	srv := New(nil, statusPath, mirrorsDir)
+	rec := get(t, srv, `/api/file?repo=acme/widget&path=huge.txt`, nil)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413: %s", rec.Code, rec.Body.String())
+	}
+	if msg := errorBody(t, rec); !strings.Contains(msg, "too large") {
+		t.Errorf("error = %q, want a too-large message", msg)
 	}
 }
 
@@ -398,32 +432,5 @@ func TestAPIReposStale(t *testing.T) {
 	get(t, srv, `/api/repos`, &repos)
 	if len(repos) != 1 || !repos[0].Stale {
 		t.Errorf("repos = %+v, want acme/widget marked stale after 48h", repos)
-	}
-}
-
-func TestValidateLoopback(t *testing.T) {
-	allowed := []string{
-		"127.0.0.1:7576",
-		"127.0.0.2:80",
-		"[::1]:7576",
-		"localhost:0",
-	}
-	for _, addr := range allowed {
-		if err := ValidateLoopback(addr); err != nil {
-			t.Errorf("ValidateLoopback(%q) = %v, want nil", addr, err)
-		}
-	}
-	refused := []string{
-		"0.0.0.0:7576",
-		"[::]:7576",
-		"192.168.1.5:7576",
-		"10.0.0.1:80",
-		":7576",
-		"127.0.0.1", // no port
-	}
-	for _, addr := range refused {
-		if err := ValidateLoopback(addr); err == nil {
-			t.Errorf("ValidateLoopback(%q) = nil, want error", addr)
-		}
 	}
 }

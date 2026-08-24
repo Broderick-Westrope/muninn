@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
-	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -30,33 +29,6 @@ const (
 	// are reported stale.
 	staleAfter = 24 * time.Hour
 )
-
-// languageByExt maps file extensions (without the dot) to the language
-// name reported by the file API, used by the UI for syntax highlighting.
-var languageByExt = map[string]string{
-	"go":    "go",
-	"ts":    "typescript",
-	"tsx":   "tsx",
-	"js":    "javascript",
-	"py":    "python",
-	"rb":    "ruby",
-	"rs":    "rust",
-	"java":  "java",
-	"kt":    "kotlin",
-	"c":     "c",
-	"h":     "c",
-	"cpp":   "cpp",
-	"json":  "json",
-	"yaml":  "yaml",
-	"yml":   "yaml",
-	"md":    "markdown",
-	"sql":   "sql",
-	"sh":    "shell",
-	"proto": "protobuf",
-	"tf":    "terraform",
-	"html":  "html",
-	"css":   "css",
-}
 
 // searchResponse is the JSON shape of /api/search.
 type searchResponse struct {
@@ -93,7 +65,6 @@ type fileResponse struct {
 	// escaped by construction). It is empty when the file exceeds the
 	// highlighting caps, signalling the UI to fall back to a plain view.
 	Highlighted   string `json:"highlighted"`
-	Language      string `json:"language"`
 	IndexedCommit string `json:"indexedCommit"`
 	TotalLines    int    `json:"totalLines"`
 }
@@ -175,7 +146,6 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, fileResponse{
 		Content:       content,
 		Highlighted:   highlight(filePath, content, totalLines),
-		Language:      languageForPath(filePath),
 		IndexedCommit: commit,
 		TotalLines:    totalLines,
 	})
@@ -331,13 +301,6 @@ func isBinary(content string) bool {
 		head = head[:binarySniffBytes]
 	}
 	return bytes.IndexByte([]byte(head), 0) >= 0
-}
-
-// languageForPath derives a language name from the file extension for
-// client-side syntax highlighting; unknown extensions yield "".
-func languageForPath(p string) string {
-	ext := strings.TrimPrefix(path.Ext(p), ".")
-	return languageByExt[strings.ToLower(ext)]
 }
 
 // shortSHA abbreviates a commit SHA for display.

@@ -8,16 +8,24 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/broderick-westrope/muninn/internal/search"
 )
 
-// shutdownTimeout bounds how long graceful shutdown waits for in-flight
-// requests after the serve context is canceled.
-const shutdownTimeout = 3 * time.Second
+const (
+	// shutdownTimeout bounds how long graceful shutdown waits for
+	// in-flight requests after the serve context is canceled.
+	shutdownTimeout = 3 * time.Second
+	// readHeaderTimeout bounds how long a client may dribble request
+	// headers before the connection is dropped (slowloris guard).
+	readHeaderTimeout = 5 * time.Second
+)
 
 // Server holds the dependencies of the HTTP handlers. Handlers are plain
 // methods on a mux from Handler, so tests can hit them via httptest without
@@ -50,6 +58,45 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
+// hostCheck wraps next with DNS-rebinding protection: a malicious page can
+// point attacker-controlled DNS at 127.0.0.1 and drive a victim's browser
+// to this server under the attacker's origin, so requests whose Host
+// header is not localhost, a loopback IP literal, or the exact host the
+// listener was bound with are rejected with 403. It also sets
+// X-Content-Type-Options: nosniff on every response.
+func hostCheck(boundHost string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		if !hostAllowed(r.Host, boundHost) {
+			http.Error(w, "forbidden: unrecognized Host header", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// hostAllowed reports whether a request Host header (possibly host:port)
+// names this server: "localhost", any loopback IP literal, or the exact
+// bound host.
+func hostAllowed(hostport, boundHost string) bool {
+	host := hostport
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		host = h
+	}
+	// A bracketed IPv6 literal without a port fails SplitHostPort.
+	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	if host == "localhost" {
+		return true
+	}
+	if boundHost != "" && host == boundHost {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return true
+	}
+	return false
+}
+
 // Serve listens on addr and serves the API until ctx is canceled, then
 // shuts down gracefully. If ready is non-nil it is called once with the
 // server's URL after the listener is bound (useful with port 0).
@@ -62,7 +109,14 @@ func (s *Server) Serve(ctx context.Context, addr string, ready func(url string))
 		ready("http://" + ln.Addr().String())
 	}
 
-	httpSrv := &http.Server{Handler: s.Handler()}
+	boundHost, _, _ := net.SplitHostPort(addr)
+	httpSrv := &http.Server{
+		Handler:           hostCheck(boundHost, s.Handler()),
+		ReadHeaderTimeout: readHeaderTimeout,
+		// The global stdlib logger is discarded to silence zoekt's shard
+		// noise; keep the server's own error reporting visible.
+		ErrorLog: log.New(os.Stderr, "muninn web: ", log.LstdFlags),
+	}
 	errCh := make(chan error, 1)
 	go func() { errCh <- httpSrv.Serve(ln) }()
 
@@ -82,35 +136,37 @@ func (s *Server) Serve(ctx context.Context, addr string, ready func(url string))
 	}
 }
 
-// ValidateLoopback returns an error unless addr binds a loopback host
-// (127.0.0.0/8, ::1, or a name like localhost resolving only to loopback
-// addresses). The server exposes an unauthenticated index of private code,
-// so non-loopback binds require an explicit override.
-func ValidateLoopback(addr string) error {
-	host, _, err := net.SplitHostPort(addr)
+// ResolveListenAddr validates that addr binds a loopback host and returns
+// a concrete ip:port to listen on. The server exposes an unauthenticated
+// index of private code, so non-loopback binds require an explicit
+// override. Hostnames (like localhost) are resolved here, exactly once:
+// the returned address is an IP literal, so the subsequent Listen cannot
+// re-resolve the name to a different, unvetted address (TOCTOU).
+func ResolveListenAddr(addr string) (string, error) {
+	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
-		return fmt.Errorf("invalid listen address %q: %w", addr, err)
+		return "", fmt.Errorf("invalid listen address %q: %w", addr, err)
 	}
 	if host == "" {
-		return fmt.Errorf("listen address %q binds all interfaces", addr)
+		return "", fmt.Errorf("listen address %q binds all interfaces", addr)
 	}
 	if ip := net.ParseIP(host); ip != nil {
 		if ip.IsLoopback() {
-			return nil
+			return addr, nil
 		}
-		return fmt.Errorf("listen address %q is not loopback", addr)
+		return "", fmt.Errorf("listen address %q is not loopback", addr)
 	}
 	ips, err := net.LookupIP(host)
 	if err != nil {
-		return fmt.Errorf("resolving listen host %q: %w", host, err)
+		return "", fmt.Errorf("resolving listen host %q: %w", host, err)
 	}
 	if len(ips) == 0 {
-		return errors.New("listen host " + host + " resolved to no addresses")
+		return "", errors.New("listen host " + host + " resolved to no addresses")
 	}
 	for _, ip := range ips {
 		if !ip.IsLoopback() {
-			return fmt.Errorf("listen host %q resolves to non-loopback address %s", host, ip)
+			return "", fmt.Errorf("listen host %q resolves to non-loopback address %s", host, ip)
 		}
 	}
-	return nil
+	return net.JoinHostPort(ips[0].String(), port), nil
 }

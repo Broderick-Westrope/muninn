@@ -31,12 +31,18 @@ The server binds loopback only: it exposes an unauthenticated index of
 private code, so non-loopback addresses require --unsafe-listen.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if !unsafeListen {
-				if err := web.ValidateLoopback(addr); err != nil {
+				// Resolving here returns a vetted IP literal, so the
+				// later Listen cannot re-resolve a hostname to an
+				// unvetted address.
+				resolved, err := web.ResolveListenAddr(addr)
+				if err != nil {
 					return fmt.Errorf("%w (pass --unsafe-listen to serve an unauthenticated index of private code beyond this machine)", err)
 				}
+				addr = resolved
 			}
 			// Zoekt logs shard loading via the stdlib logger; keep the
-			// server's stderr free of that noise.
+			// server's stderr free of that noise. The http.Server gets
+			// its own ErrorLog (see web.Serve) so its errors stay visible.
 			log.SetOutput(io.Discard)
 			// Load the config up front so misconfiguration fails fast,
 			// even though the web server itself does not need it yet.
@@ -58,7 +64,12 @@ private code, so non-loopback addresses require --unsafe-listen.`,
 				if openBrowser {
 					// Best-effort: the URL is printed regardless, so a
 					// failed launch is not worth aborting the server.
-					_ = exec.Command("open", url).Start()
+					// `open` is the macOS launcher; muninn is macOS-only.
+					openCmd := exec.Command("open", url)
+					if err := openCmd.Start(); err == nil {
+						// Reap the child so it never lingers as a zombie.
+						go func() { _ = openCmd.Wait() }()
+					}
 				}
 			})
 		},

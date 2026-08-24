@@ -14,6 +14,7 @@ const DEBOUNCE_MS = 200;
 
 let debounceTimer = 0;
 let searchCtl = null; // AbortController for the in-flight search
+let fileCtl = null; // AbortController for the in-flight file fetch
 let currentFile = null; // {repo, path, line} when the file view is showing
 let savedScroll = 0; // results scroll position, restored on return
 
@@ -215,13 +216,19 @@ function parseFileHash(hash) {
 }
 
 async function showFile(loc) {
+  // Abort any in-flight fetch so a slow stale response can never render
+  // over a newer navigation (mirrors the search path).
+  if (fileCtl) fileCtl.abort();
+  fileCtl = new AbortController();
   fileEl.replaceChildren(fileHeader(loc, null), note('Loading…'));
   let data;
   try {
     data = await api(
       `/api/file?repo=${encodeURIComponent(loc.repo)}&path=${encodeURIComponent(loc.path)}`,
+      fileCtl.signal,
     );
   } catch (e) {
+    if (e.name === 'AbortError') return;
     fileEl.replaceChildren(fileHeader(loc, null), errorBox(friendlyFileError(e)));
     return;
   }
@@ -356,6 +363,7 @@ function route() {
     }
   }
   currentFile = null;
+  if (fileCtl) fileCtl.abort();
   document.body.dataset.view = 'results';
   fileEl.replaceChildren();
   requestAnimationFrame(() => window.scrollTo(0, savedScroll));
