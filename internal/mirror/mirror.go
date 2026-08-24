@@ -200,23 +200,27 @@ func (m *Manager) CleanTmp() error {
 // used (works for all token types). It also sets a low-speed abort so a
 // stalled transfer (dead connection, throttling) fails after a minute
 // instead of wedging a sync worker indefinitely — git/curl have no
-// default stall timeout. Auth is omitted for empty tokens; the low-speed
-// abort is always applied.
+// default stall timeout — and forces HTTP/1.1 because corporate network
+// appliances interfere with HTTP/2 git transfers (stream cancels, resets,
+// sub-1KB/s throttling; observed repeatedly against github.com). Auth is
+// omitted for empty tokens; the other settings are always applied.
 func authEnv(token string) []string {
 	env := []string{
 		"GIT_CONFIG_KEY_0=http.lowSpeedLimit",
 		"GIT_CONFIG_VALUE_0=1000",
 		"GIT_CONFIG_KEY_1=http.lowSpeedTime",
 		"GIT_CONFIG_VALUE_1=60",
+		"GIT_CONFIG_KEY_2=http.version",
+		"GIT_CONFIG_VALUE_2=HTTP/1.1",
 	}
 	if token == "" {
-		return append(env, "GIT_CONFIG_COUNT=2")
+		return append(env, "GIT_CONFIG_COUNT=3")
 	}
 	credentials := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))
 	return append(env,
-		"GIT_CONFIG_KEY_2=http.extraHeader",
-		"GIT_CONFIG_VALUE_2=Authorization: Basic "+credentials,
-		"GIT_CONFIG_COUNT=3",
+		"GIT_CONFIG_KEY_3=http.extraHeader",
+		"GIT_CONFIG_VALUE_3=Authorization: Basic "+credentials,
+		"GIT_CONFIG_COUNT=4",
 	)
 }
 

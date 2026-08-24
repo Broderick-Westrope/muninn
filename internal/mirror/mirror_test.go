@@ -237,11 +237,13 @@ func TestAuthEnv(t *testing.T) {
 		"GIT_CONFIG_VALUE_0=1000",
 		"GIT_CONFIG_KEY_1=http.lowSpeedTime",
 		"GIT_CONFIG_VALUE_1=60",
+		"GIT_CONFIG_KEY_2=http.version",
+		"GIT_CONFIG_VALUE_2=HTTP/1.1",
 	}
 	want := append(append([]string{}, lowSpeed...),
-		"GIT_CONFIG_KEY_2=http.extraHeader",
-		"GIT_CONFIG_VALUE_2=Authorization: Basic "+base64.StdEncoding.EncodeToString([]byte("x-access-token:"+token)),
-		"GIT_CONFIG_COUNT=3",
+		"GIT_CONFIG_KEY_3=http.extraHeader",
+		"GIT_CONFIG_VALUE_3=Authorization: Basic "+base64.StdEncoding.EncodeToString([]byte("x-access-token:"+token)),
+		"GIT_CONFIG_COUNT=4",
 	)
 	env := authEnv(token)
 	if !equal(env, want) {
@@ -252,7 +254,7 @@ func TestAuthEnv(t *testing.T) {
 			t.Errorf("raw token leaked into env entry %q", entry)
 		}
 	}
-	wantEmpty := append(append([]string{}, lowSpeed...), "GIT_CONFIG_COUNT=2")
+	wantEmpty := append(append([]string{}, lowSpeed...), "GIT_CONFIG_COUNT=3")
 	if env := authEnv(""); !equal(env, wantEmpty) {
 		t.Errorf("authEnv(\"\") = %v, want %v", env, wantEmpty)
 	}
