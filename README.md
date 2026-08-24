@@ -1,8 +1,10 @@
 # muninn
 
-A single Go binary that indexes your GitHub repos for code search and serves them to agents over MCP. It syncs bare mirrors on a schedule (via launchd), builds Zoekt search shards, and exposes grep, glob, file access, and symbol lookup tools over stdio — with an on-demand local web UI for interactive search and near-zero idle memory cost.
+A single Go binary that indexes your GitHub repos for code search and serves them to agents over MCP. It syncs bare mirrors on a schedule (via launchd), builds Zoekt search shards, and exposes grep, glob, file access, and symbol lookup tools over stdio. Includes an on-demand local web UI for interactive search.
 
 Named for Odin's raven that flies out over the world and brings back memory.
+
+**WHY?** I really enjoyed using [Sourcebot](https://github.com/sourcebot-dev/sourcebot) for many months. I ran it locally in Docker via compose. But I thought it was using too much memory and I was running pretty hot overall. So muninn has a much lower memory footprint. It doesn't need Redis or Postgres since it's more minimal and built for running locally rather than having to consider enterprise scale. It also gives me the ability to be flexible with the web UI which I'd like to integrate better with tools I use (namely GitHub and Cursor).
 
 ## Requirements
 
