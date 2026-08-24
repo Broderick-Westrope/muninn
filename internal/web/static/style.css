@@ -1,0 +1,340 @@
+/* muninn — dense, fast, keyboard-first code search. No external assets. */
+
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff;
+  --fg: #1f2328;
+  --muted: #59636e;
+  --border: #d1d9e0;
+  --card: #f6f8fa;
+  --accent: #0969da;
+  --mark: rgba(255, 208, 0, 0.45);
+  --target: rgba(255, 208, 0, 0.16);
+  --warn: #7d4e00;
+  --warn-bg: #fff8c5;
+  --warn-border: #d4a72c;
+  --error: #d1242f;
+  --error-bg: #ffebe9;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --header-h: 41px; /* .bar height + padding + border; .file-head sticks below it */
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117;
+    --fg: #e6edf3;
+    --muted: #8b949e;
+    --border: #30363d;
+    --card: #161b22;
+    --accent: #58a6ff;
+    --mark: rgba(210, 153, 34, 0.45);
+    --target: rgba(210, 153, 34, 0.16);
+    --warn: #d4a72c;
+    --warn-bg: #2b2300;
+    --warn-border: #5c4a00;
+    --error: #ff7b72;
+    --error-bg: #2d1418;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+/* ---- header ---------------------------------------------------------- */
+
+header {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: calc(var(--header-h) - 1px);
+  padding: 0 12px;
+}
+
+.brand {
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--fg);
+  text-decoration: none;
+}
+
+#q {
+  flex: 1;
+  max-width: 720px;
+  padding: 4px 8px;
+  font: 13px var(--mono);
+  color: var(--fg);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+#q:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+#repo-badge {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.stale {
+  padding: 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--warn);
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-border);
+  border-radius: 9px;
+}
+
+#hints {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 0 12px 6px;
+}
+
+.chip {
+  padding: 1px 7px;
+  font: 11px var(--mono);
+  color: var(--muted);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.chip:hover,
+.chip:focus-visible {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* ---- view switching --------------------------------------------------- */
+
+body[data-view="file"] #results,
+body[data-view="file"] #stats,
+body[data-view="file"] #hints {
+  display: none;
+}
+
+body[data-view="results"] #file {
+  display: none;
+}
+
+/* ---- results ----------------------------------------------------------- */
+
+main {
+  max-width: 1100px;
+  padding: 8px 12px 40px;
+}
+
+.repo-group h2 {
+  margin: 14px 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.card {
+  margin-bottom: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.card-path {
+  display: block;
+  padding: 4px 10px;
+  font: 12px var(--mono);
+  color: var(--accent);
+  text-decoration: none;
+  background: var(--card);
+  border-bottom: 1px solid var(--border);
+}
+
+.card-path:hover,
+.card-path:focus-visible {
+  text-decoration: underline;
+}
+
+.row {
+  display: flex;
+  font: 12px/1.6 var(--mono);
+  color: var(--fg);
+  text-decoration: none;
+}
+
+.row:hover,
+.row:focus-visible {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.row .num {
+  flex: none;
+  width: 3.5em;
+  padding-right: 8px;
+  text-align: right;
+  color: var(--muted);
+  user-select: none;
+  border-right: 1px solid var(--border);
+}
+
+.row code {
+  padding: 0 10px;
+  overflow: hidden;
+  white-space: pre;
+  text-overflow: ellipsis;
+}
+
+.row.symdef {
+  box-shadow: inset 2px 0 var(--accent);
+}
+
+mark {
+  padding: 0;
+  font-weight: 600;
+  color: inherit;
+  background: var(--mark);
+  border-radius: 2px;
+}
+
+/* ---- stats footer ------------------------------------------------------ */
+
+footer {
+  position: fixed;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  padding: 4px 12px;
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+}
+
+.trunc {
+  color: var(--warn);
+}
+
+/* ---- file view --------------------------------------------------------- */
+
+.file-head {
+  position: sticky;
+  top: var(--header-h);
+  z-index: 5;
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  padding: 6px 12px;
+  margin: 0 -12px;
+  font: 12px var(--mono);
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+
+.back {
+  color: var(--accent);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.back:hover,
+.back:focus-visible {
+  text-decoration: underline;
+}
+
+.file-name {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-meta {
+  margin-left: auto;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.file-body pre.chroma {
+  padding: 8px 0;
+  margin: 0;
+  overflow-x: auto;
+  font: 12px/1.6 var(--mono);
+  background: none; /* chroma.css sets a background; the page owns it */
+}
+
+.chroma .ln {
+  user-select: none;
+}
+
+.chroma .lnlinks {
+  display: inline-block;
+  width: 3.5em;
+  padding-right: 12px;
+  text-align: right;
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.chroma .lnlinks:hover {
+  color: var(--accent);
+}
+
+.chroma .line {
+  display: block;
+}
+
+.chroma .line.hl {
+  background: var(--target);
+  box-shadow: inset 2px 0 var(--accent);
+}
+
+/* ---- messages ---------------------------------------------------------- */
+
+.note {
+  padding: 40px 0;
+  text-align: center;
+  color: var(--muted);
+}
+
+.error {
+  padding: 8px 12px;
+  margin: 10px 0;
+  font: 12px var(--mono);
+  color: var(--error);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--error-bg);
+  border: 1px solid var(--error);
+  border-radius: 6px;
+}
+
+/* ---- small screens ------------------------------------------------------ */
+
+@media (max-width: 640px) {
+  #repo-badge {
+    display: none;
+  }
+}

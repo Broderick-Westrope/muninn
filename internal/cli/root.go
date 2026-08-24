@@ -1,16 +1,12 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 
 	"github.com/spf13/cobra"
 )
 
 var configPath string
-
-// errNotImplemented is returned by command stubs that are not yet built.
-var errNotImplemented = errors.New("not implemented")
 
 // ExitError carries a specific process exit code for main to use. Err may
 // be nil for silent exits (e.g. `muninn search` with no matches exits 1
