@@ -1,6 +1,6 @@
 # Muninn Implementation Plan
 
-> **Status:** DRAFT
+> **Status:** COMPLETED
 
 **Spec:** `plans/design-2026-08-23-muninn.md` — read it before executing any phase.
 

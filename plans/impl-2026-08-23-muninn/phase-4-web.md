@@ -1,6 +1,6 @@
 # Phase 4: Web UI
 
-> **Status:** DRAFT
+> **Status:** COMPLETED
 > **Spec:** `plans/design-2026-08-23-muninn.md`
 > **Depends on:** Phase 3 merged (search core + gitfile)
 
