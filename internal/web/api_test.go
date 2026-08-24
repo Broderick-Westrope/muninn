@@ -35,6 +35,10 @@ const banana = "yellow"
 // binaryContent contains NUL bytes so the file API's binary guard trips.
 const binaryContent = "\x00\x01\x02binary\x00garbage"
 
+// hugeText exceeds the highlighting line cap so the file API must return
+// an empty highlighted field (plain-view fallback).
+var hugeText = strings.Repeat("data\n", maxHighlightLines+1)
+
 // git runs a git command against dir (or without -C when dir is empty),
 // failing the test on error.
 func git(t *testing.T, dir string, args ...string) string {
@@ -62,6 +66,7 @@ func newFixture(t *testing.T) (*Server, string) {
 		"widget.go": widgetGo,
 		"other.go":  otherGo,
 		"data.bin":  binaryContent,
+		"big.txt":   hugeText,
 	}
 	for name, content := range files {
 		if err := os.WriteFile(filepath.Join(src, name), []byte(content), 0o644); err != nil {
@@ -294,6 +299,70 @@ func TestAPIFileBinary(t *testing.T) {
 	}
 	if msg := errorBody(t, rec); !strings.Contains(msg, "binary") {
 		t.Errorf("error = %q, want a binary-file message", msg)
+	}
+}
+
+func TestAPIFileHighlighted(t *testing.T) {
+	srv, _ := newFixture(t)
+	var res fileResponse
+	rec := get(t, srv, `/api/file?repo=acme/widget&path=other.go`, &res)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if res.Highlighted == "" {
+		t.Fatal("highlighted is empty, want chroma HTML for a .go file")
+	}
+	if !strings.Contains(res.Highlighted, `class="chroma"`) {
+		t.Errorf("highlighted = %q, want class-based chroma markup", res.Highlighted)
+	}
+	if !strings.Contains(res.Highlighted, `id="L3"`) {
+		t.Errorf("highlighted = %q, want linkable line-number anchors (id=\"L3\")", res.Highlighted)
+	}
+}
+
+func TestAPIFileHighlightCap(t *testing.T) {
+	srv, _ := newFixture(t)
+	var res fileResponse
+	rec := get(t, srv, `/api/file?repo=acme/widget&path=big.txt`, &res)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if res.Highlighted != "" {
+		t.Errorf("highlighted is non-empty for %d lines, want plain-view fallback past %d",
+			res.TotalLines, maxHighlightLines)
+	}
+	if res.Content != hugeText {
+		t.Error("content missing or wrong, want the full file even when highlighting is skipped")
+	}
+}
+
+// TestUIStaticAssets exercises the embedded UI routes on a zero Server:
+// the static handler and chroma stylesheet need no searcher or fixtures.
+func TestUIStaticAssets(t *testing.T) {
+	handler := (&Server{}).Handler()
+	tests := []struct {
+		path     string
+		wantType string
+		wantBody string
+	}{
+		{"/", "text/html", "<title>muninn"},
+		{"/app.js", "javascript", "runSearch"},
+		{"/style.css", "text/css", "prefers-color-scheme"},
+		{"/chroma.css", "text/css", "@media (prefers-color-scheme: dark)"},
+	}
+	for _, tt := range tests {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, tt.path, nil))
+		if rec.Code != http.StatusOK {
+			t.Errorf("GET %s: status = %d, want 200", tt.path, rec.Code)
+			continue
+		}
+		if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, tt.wantType) {
+			t.Errorf("GET %s: Content-Type = %q, want it to contain %q", tt.path, ct, tt.wantType)
+		}
+		if !strings.Contains(rec.Body.String(), tt.wantBody) {
+			t.Errorf("GET %s: body does not contain %q", tt.path, tt.wantBody)
+		}
 	}
 }
 

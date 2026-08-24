@@ -10,6 +10,7 @@ require (
 )
 
 require (
+	github.com/alecthomas/chroma/v2 v2.27.0
 	github.com/grafana/regexp v0.0.0-20240607082908-2cb410fa05da
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 )
@@ -28,6 +29,7 @@ require (
 	github.com/cockroachdb/logtags v0.0.0-20241215232642-bb51bb14a506 // indirect
 	github.com/cockroachdb/redact v1.1.5 // indirect
 	github.com/cyphar/filepath-securejoin v0.6.1 // indirect
+	github.com/dlclark/regexp2/v2 v2.2.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/emirpasic/gods v1.18.1 // indirect
 	github.com/fatih/color v1.18.0 // indirect

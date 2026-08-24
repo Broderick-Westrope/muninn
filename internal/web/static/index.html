@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>muninn — code search</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/chroma.css">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body data-view="results">
+<header>
+  <div class="bar">
+    <a class="brand" href="#/">muninn</a>
+    <input id="q" type="search" placeholder="search code — zoekt syntax, / to focus, Enter to run"
+           autofocus autocomplete="off" autocapitalize="off" spellcheck="false"
+           aria-label="Search query">
+    <span id="repo-badge"></span>
+  </div>
+  <div id="hints" aria-label="Query syntax hints"></div>
+</header>
+<main>
+  <div id="results" role="region" aria-label="Search results"></div>
+  <div id="file" role="region" aria-label="File view"></div>
+</main>
+<footer id="stats" hidden></footer>
+<script src="/app.js"></script>
+</body>
+</html>

@@ -38,12 +38,15 @@ func New(searcher *search.Searcher, statusPath, mirrorsDir string) *Server {
 	return &Server{searcher: searcher, statusPath: statusPath, mirrorsDir: mirrorsDir}
 }
 
-// Handler returns the HTTP handler serving the JSON API.
+// Handler returns the HTTP handler serving the JSON API, the generated
+// chroma stylesheet, and the embedded single-page UI at /.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/search", s.handleSearch)
 	mux.HandleFunc("GET /api/file", s.handleFile)
 	mux.HandleFunc("GET /api/repos", s.handleRepos)
+	mux.HandleFunc("GET /chroma.css", s.handleChromaCSS)
+	mux.Handle("GET /", staticHandler())
 	return mux
 }
 

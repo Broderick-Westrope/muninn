@@ -88,7 +88,11 @@ type statsJSON struct {
 
 // fileResponse is the JSON shape of /api/file.
 type fileResponse struct {
-	Content       string `json:"content"`
+	Content string `json:"content"`
+	// Highlighted is the whole file as chroma-generated HTML (class-based,
+	// escaped by construction). It is empty when the file exceeds the
+	// highlighting caps, signalling the UI to fall back to a plain view.
+	Highlighted   string `json:"highlighted"`
 	Language      string `json:"language"`
 	IndexedCommit string `json:"indexedCommit"`
 	TotalLines    int    `json:"totalLines"`
@@ -170,6 +174,7 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, fileResponse{
 		Content:       content,
+		Highlighted:   highlight(filePath, content, totalLines),
 		Language:      languageForPath(filePath),
 		IndexedCommit: commit,
 		TotalLines:    totalLines,
