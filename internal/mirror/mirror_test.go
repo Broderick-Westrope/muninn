@@ -232,11 +232,17 @@ func TestListRemove(t *testing.T) {
 
 func TestAuthEnv(t *testing.T) {
 	const token = "gho_secret123"
-	want := []string{
-		"GIT_CONFIG_COUNT=1",
-		"GIT_CONFIG_KEY_0=http.extraHeader",
-		"GIT_CONFIG_VALUE_0=Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:"+token)),
+	lowSpeed := []string{
+		"GIT_CONFIG_KEY_0=http.lowSpeedLimit",
+		"GIT_CONFIG_VALUE_0=1000",
+		"GIT_CONFIG_KEY_1=http.lowSpeedTime",
+		"GIT_CONFIG_VALUE_1=60",
 	}
+	want := append(append([]string{}, lowSpeed...),
+		"GIT_CONFIG_KEY_2=http.extraHeader",
+		"GIT_CONFIG_VALUE_2=Authorization: Basic "+base64.StdEncoding.EncodeToString([]byte("x-access-token:"+token)),
+		"GIT_CONFIG_COUNT=3",
+	)
 	env := authEnv(token)
 	if !equal(env, want) {
 		t.Errorf("authEnv = %v, want %v", env, want)
@@ -246,8 +252,9 @@ func TestAuthEnv(t *testing.T) {
 			t.Errorf("raw token leaked into env entry %q", entry)
 		}
 	}
-	if env := authEnv(""); env != nil {
-		t.Errorf("authEnv(\"\") = %v, want nil", env)
+	wantEmpty := append(append([]string{}, lowSpeed...), "GIT_CONFIG_COUNT=2")
+	if env := authEnv(""); !equal(env, wantEmpty) {
+		t.Errorf("authEnv(\"\") = %v, want %v", env, wantEmpty)
 	}
 }
 
@@ -261,4 +268,24 @@ func equal(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+func TestCleanTmp(t *testing.T) {
+	m := &Manager{BaseDir: t.TempDir()}
+	orphan := filepath.Join(m.BaseDir, "acme", "widget.git.tmp")
+	keep := filepath.Join(m.BaseDir, "acme", "widget.git")
+	for _, dir := range []string{orphan, keep} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := m.CleanTmp(); err != nil {
+		t.Fatalf("CleanTmp: %v", err)
+	}
+	if _, err := os.Stat(orphan); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("orphaned temp clone not removed: stat err = %v", err)
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Errorf("real mirror removed by CleanTmp: %v", err)
+	}
 }

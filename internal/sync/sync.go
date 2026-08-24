@@ -37,6 +37,7 @@ type Mirror interface {
 	MarkIndexed(ctx context.Context, dir, sha string) error
 	List() ([]string, error)
 	Remove(fullName string) error
+	CleanTmp() error
 }
 
 // Indexer manages Zoekt shards (implemented by *index.Indexer).
@@ -131,6 +132,9 @@ func Run(ctx context.Context, cfg *config.Config, deps Deps) (*status.SyncStatus
 	}
 	if err := ix.CleanTmp(); err != nil {
 		return abortRun(deps.StatusPath, st, prevRepos, fmt.Errorf("cleaning stale tmp shards: %w", err))
+	}
+	if err := deps.Mirror.CleanTmp(); err != nil {
+		return abortRun(deps.StatusPath, st, prevRepos, fmt.Errorf("cleaning orphaned temp clones: %w", err))
 	}
 
 	fetchSem := make(chan struct{}, fetchN)

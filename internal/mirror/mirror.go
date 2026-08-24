@@ -161,21 +161,63 @@ func (m *Manager) Remove(fullName string) error {
 	return nil
 }
 
-// authEnv returns the extra environment injecting the token as an HTTP
-// header via git config env vars, so it never appears in argv or on disk.
-// GitHub's git endpoint rejects Bearer for OAuth/gh tokens, so Basic auth
-// with the x-access-token username is used (works for all token types).
-// It returns nil for empty tokens.
-func authEnv(token string) []string {
-	if token == "" {
+// CleanTmp removes orphaned temp clone directories left behind by
+// interrupted or killed clones. Safe to call only while no clone is in
+// flight (sync calls it before starting the worker pool).
+func (m *Manager) CleanTmp() error {
+	owners, err := os.ReadDir(m.BaseDir)
+	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
-	credentials := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))
-	return []string{
-		"GIT_CONFIG_COUNT=1",
-		"GIT_CONFIG_KEY_0=http.extraHeader",
-		"GIT_CONFIG_VALUE_0=Authorization: Basic " + credentials,
+	if err != nil {
+		return fmt.Errorf("reading mirrors directory %s: %w", m.BaseDir, err)
 	}
+	for _, owner := range owners {
+		if !owner.IsDir() {
+			continue
+		}
+		ownerDir := filepath.Join(m.BaseDir, owner.Name())
+		entries, err := os.ReadDir(ownerDir)
+		if err != nil {
+			return fmt.Errorf("reading owner directory %s: %w", owner.Name(), err)
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() || !strings.HasSuffix(entry.Name(), ".git.tmp") {
+				continue
+			}
+			if err := os.RemoveAll(filepath.Join(ownerDir, entry.Name())); err != nil {
+				return fmt.Errorf("removing orphaned temp clone %s: %w", entry.Name(), err)
+			}
+		}
+	}
+	return nil
+}
+
+// authEnv returns the extra environment for network git operations. It
+// injects the token as an HTTP header via git config env vars, so it
+// never appears in argv or on disk. GitHub's git endpoint rejects Bearer
+// for OAuth/gh tokens, so Basic auth with the x-access-token username is
+// used (works for all token types). It also sets a low-speed abort so a
+// stalled transfer (dead connection, throttling) fails after a minute
+// instead of wedging a sync worker indefinitely — git/curl have no
+// default stall timeout. Auth is omitted for empty tokens; the low-speed
+// abort is always applied.
+func authEnv(token string) []string {
+	env := []string{
+		"GIT_CONFIG_KEY_0=http.lowSpeedLimit",
+		"GIT_CONFIG_VALUE_0=1000",
+		"GIT_CONFIG_KEY_1=http.lowSpeedTime",
+		"GIT_CONFIG_VALUE_1=60",
+	}
+	if token == "" {
+		return append(env, "GIT_CONFIG_COUNT=2")
+	}
+	credentials := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))
+	return append(env,
+		"GIT_CONFIG_KEY_2=http.extraHeader",
+		"GIT_CONFIG_VALUE_2=Authorization: Basic "+credentials,
+		"GIT_CONFIG_COUNT=3",
+	)
 }
 
 func runGit(ctx context.Context, extraEnv []string, args ...string) (string, error) {
