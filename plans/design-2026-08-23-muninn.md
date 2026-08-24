@@ -69,18 +69,18 @@ Out (v1, possible later):
 
 **Success Criteria:**
 
-- [ ] `muninn sync` reconciles all non-excluded `eucalyptusvc` repos: clones/fetches bare mirrors, builds Zoekt shards including symbols, and GCs removed/renamed/archived repos (mirrors + shards).
-- [ ] `muninn sync --install` registers a launchd agent that keeps the index fresh without user intervention, with ctags path and token validated and baked in at install time.
-- [ ] A failed scheduled sync is visible: status file + log written, `muninn status` reports it, and the MCP server warns about a stale index.
-- [ ] One failing repo does not abort a sync run; failures are recorded per repo.
-- [ ] Peak sync RSS stays bounded via capped index-job concurrency; full-org sync completes in a reasonable time (measure; target <15 min warm, indexing only changed repos).
-- [ ] MCP server exposes all 7 v1 tools and works end-to-end with an agent (e.g. answering "where is X defined?" across the org).
-- [ ] Idle footprint is zero (no resident processes between agent sessions / web sessions / sync runs).
-- [ ] Typical grep/symbol queries over the full index return in <1s warm (cold first-query after reboot may page in shards and take longer; measure both).
-- [ ] `read_file` line numbers always match `grep` results (reads pinned to indexed commit).
-- [ ] `muninn web` serves a usable search UI with Zoekt query syntax, snippets, and a file viewer.
-- [ ] Config file migration from the existing Sourcebot `config.json` requires only trivial edits.
-- [ ] Sourcebot Docker stack can be shut down with no loss for the primary workflows.
+- [x] `muninn sync` reconciles all non-excluded `eucalyptusvc` repos: clones/fetches bare mirrors, builds Zoekt shards including symbols, and GCs removed/renamed/archived repos (mirrors + shards).
+- [x] `muninn sync --install` registers a launchd agent that keeps the index fresh without user intervention, with ctags path and token validated and baked in at install time.
+- [x] A failed scheduled sync is visible: status file + log written, `muninn status` reports it, and the MCP server warns about a stale index.
+- [x] One failing repo does not abort a sync run; failures are recorded per repo.
+- [x] Peak sync RSS stays bounded via capped index-job concurrency; full-org sync completes in a reasonable time (measure; target <15 min warm, indexing only changed repos).
+- [x] MCP server exposes all 7 v1 tools and works end-to-end with an agent (e.g. answering "where is X defined?" across the org).
+- [x] Idle footprint is zero (no resident processes between agent sessions / web sessions / sync runs).
+- [x] Typical grep/symbol queries over the full index return in <1s warm (cold first-query after reboot may page in shards and take longer; measure both).
+- [x] `read_file` line numbers always match `grep` results (reads pinned to indexed commit).
+- [x] `muninn web` serves a usable search UI with Zoekt query syntax, snippets, and a file viewer.
+- [x] Config file migration from the existing Sourcebot `config.json` requires only trivial edits.
+- [x] Sourcebot Docker stack can be shut down with no loss for the primary workflows.
 
 **Design Decisions:**
 
