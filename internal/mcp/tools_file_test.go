@@ -133,3 +133,15 @@ func TestToolLimitClamps(t *testing.T) {
 		}
 	}
 }
+
+func TestClampNote(t *testing.T) {
+	if note := clampNote(300, 200); !strings.Contains(note, "300") || !strings.Contains(note, "200") {
+		t.Errorf("clampNote(300, 200) = %q, want mention of both limits", note)
+	}
+	if note := clampNote(200, 200); note != "" {
+		t.Errorf("clampNote(200, 200) = %q, want empty", note)
+	}
+	if note := clampNote(0, 200); note != "" {
+		t.Errorf("clampNote(0, 200) = %q, want empty (unset limit)", note)
+	}
+}

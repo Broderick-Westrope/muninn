@@ -29,7 +29,9 @@ The pattern is a zoekt query, so these atoms can be combined with the regex (spa
 - case:yes|no|auto  case sensitivity (default: smart case)
 - -<atom>       negate an atom (e.g. -file:_test\.go)
 
-Results are capped at 'limit' line matches (default 50, max 200); a truncation notice reports how many more matches were omitted. Output lines are 'repo/path:line: content'.`
+IMPORTANT: a space-separated pattern like 'func main' is NOT a phrase match — the tokens are ANDed at file level, so result lines may match only one token. For an exact phrase, quote it ("func main") or set literal:true.
+
+Results are capped at 'limit' line matches (default 50, max 200); a truncation notice reports how many more matches were omitted. Truncation is file-granular, so fewer than 'limit' lines may be returned even when more matches exist. Output lines are 'repo/path:line: content'.`
 
 const globDescription = `Find files by path glob across all indexed repos. Supports *, ?, ** and {a,b} alternation; matching is case-insensitive against the full path within each repo (e.g. '**/*.go', 'src/**/*.{ts,tsx}'). Results are capped at 'limit' files (default 100, max 500) and grouped by repo.`
 
@@ -77,7 +79,7 @@ func (s *Server) Grep(ctx context.Context, args GrepArgs) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return formatGrep(res, limit, args.GroupByRepo), nil
+	return formatGrep(res, limit, args.GroupByRepo) + clampNote(args.Limit, maxGrepLimit), nil
 }
 
 // GlobArgs are the parameters of the glob tool.
@@ -129,7 +131,7 @@ func (s *Server) Glob(ctx context.Context, args GlobArgs) (string, error) {
 		fmt.Fprintf(&b, "\n[truncated: more files match; narrow the glob or raise limit]\n")
 	}
 	fmt.Fprintf(&b, "\n%d files", len(res.Files))
-	return b.String(), nil
+	return b.String() + clampNote(args.Limit, maxGlobLimit), nil
 }
 
 // ListReposArgs are the parameters of the list_repos tool.
@@ -225,7 +227,7 @@ outer:
 		if omitted < 1 {
 			omitted = 1
 		}
-		fmt.Fprintf(&b, "\n[truncated: at least %d more matches omitted; narrow the pattern or use repo:/file: filters]\n", omitted)
+		fmt.Fprintf(&b, "\n[truncated: at least %d more matches omitted; truncation is file-granular so fewer than the limit may be shown; narrow the pattern or use repo:/file: filters]\n", omitted)
 	}
 	fmt.Fprintf(&b, "\n%d matches in %d files (%d files considered, %s)",
 		shown, filesShown, res.Stats.FilesConsidered, res.Stats.Duration.Round(time.Millisecond))
@@ -297,6 +299,15 @@ func clampLimit(limit, def, maxLimit int) int {
 		return maxLimit
 	}
 	return limit
+}
+
+// clampNote returns a notice when the requested limit exceeded the hard
+// maximum and was silently reduced, so callers learn the effective cap.
+func clampNote(requested, maxLimit int) string {
+	if requested > maxLimit {
+		return fmt.Sprintf("\n[note: requested limit %d exceeds the maximum; using %d]", requested, maxLimit)
+	}
+	return ""
 }
 
 // shortSHA abbreviates a commit SHA for display.

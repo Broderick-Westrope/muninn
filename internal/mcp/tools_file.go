@@ -69,7 +69,7 @@ func (s *Server) ReadFile(ctx context.Context, args ReadFileArgs) (string, error
 		}
 		out += fmt.Sprintf("\n[truncated: %d more lines; use offset to page]", totalLines-end)
 	}
-	return out, nil
+	return out + clampNote(args.Limit, maxReadFileLimit), nil
 }
 
 // ListTreeArgs are the parameters of the list_tree tool.

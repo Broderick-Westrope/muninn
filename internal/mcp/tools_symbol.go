@@ -48,7 +48,7 @@ func (s *Server) FindSymbolDefinitions(ctx context.Context, args FindDefinitions
 	if len(res.Files) == 0 {
 		return fmt.Sprintf("no definitions found for %q (note: symbol search requires the index to be built with universal-ctags)", args.Symbol), nil
 	}
-	return formatGrep(res, limit, false), nil
+	return formatGrep(res, limit, false) + clampNote(args.Limit, maxDefinitionsLimit), nil
 }
 
 // FindReferencesArgs are the parameters of the find_symbol_references tool.
@@ -139,7 +139,7 @@ func (s *Server) FindSymbolReferences(ctx context.Context, args FindReferencesAr
 	}
 	fmt.Fprintf(&b, "\n%d references (approximate; definition sites excluded) (%d files considered, %s)",
 		len(shown), res.Stats.FilesConsidered, res.Stats.Duration.Round(time.Millisecond))
-	return b.String(), nil
+	return b.String() + clampNote(args.Limit, maxReferencesLimit), nil
 }
 
 // symbolQuery builds a word-boundary, case-sensitive query for an exact
