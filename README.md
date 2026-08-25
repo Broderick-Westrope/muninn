@@ -15,6 +15,8 @@ Named for Odin's raven that flies out over the world and brings back memory.
 ## Install
 
 ```bash
+brew install broderick-westrope/tap/muninn
+# OR
 go install github.com/broderick-westrope/muninn@latest
 ```
 
