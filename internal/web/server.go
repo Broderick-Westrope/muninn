@@ -37,13 +37,28 @@ type Server struct {
 	searcher   *search.Searcher
 	statusPath string
 	mirrorsDir string
+	// checkouts maps lowercased "owner/name" to a local checkout path
+	// (from ScanCheckouts); may be nil when no editor roots are
+	// configured.
+	checkouts map[string]string
+	// editorScheme is the URL scheme for open-in-editor links ("cursor"
+	// or "vscode").
+	editorScheme string
 }
 
 // New returns a Server that searches with searcher, resolves indexed
 // commits from the status file at statusPath, and reads pinned file
-// content from the bare mirrors under mirrorsDir.
-func New(searcher *search.Searcher, statusPath, mirrorsDir string) *Server {
-	return &Server{searcher: searcher, statusPath: statusPath, mirrorsDir: mirrorsDir}
+// content from the bare mirrors under mirrorsDir. checkouts (may be nil)
+// maps lowercased "owner/name" repos to local checkout paths used for
+// open-in-editor links with editorScheme.
+func New(searcher *search.Searcher, statusPath, mirrorsDir string, checkouts map[string]string, editorScheme string) *Server {
+	return &Server{
+		searcher:     searcher,
+		statusPath:   statusPath,
+		mirrorsDir:   mirrorsDir,
+		checkouts:    checkouts,
+		editorScheme: editorScheme,
+	}
 }
 
 // Handler returns the HTTP handler serving the JSON API, the generated

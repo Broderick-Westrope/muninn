@@ -17,9 +17,10 @@ type Config struct {
 	Schema      string                `json:"$schema,omitempty"`
 	Connections map[string]Connection `json:"connections"`
 	// Muninn-specific, written by `sync --install` / first run:
-	Auth  AuthConfig  `json:"auth,omitempty"`
-	Ctags CtagsConfig `json:"ctags,omitempty"`
-	Sync  SyncConfig  `json:"sync,omitempty"`
+	Auth   AuthConfig   `json:"auth,omitempty"`
+	Ctags  CtagsConfig  `json:"ctags,omitempty"`
+	Sync   SyncConfig   `json:"sync,omitempty"`
+	Editor EditorConfig `json:"editor,omitempty"`
 }
 
 type Connection struct {
@@ -49,6 +50,15 @@ type CtagsConfig struct {
 
 type SyncConfig struct {
 	IntervalMinutes int `json:"intervalMinutes,omitempty"`
+}
+
+type EditorConfig struct {
+	// Scheme is the URL scheme for open-in-editor links ("cursor" or
+	// "vscode"); default "cursor".
+	Scheme string `json:"scheme,omitempty"`
+	// Roots are directories scanned (2 levels deep) for local git
+	// checkouts of indexed repos, e.g. "~/dev".
+	Roots []string `json:"roots,omitempty"`
 }
 
 const defaultSyncIntervalMinutes = 60
@@ -87,6 +97,9 @@ func validate(c *Config) error {
 	if !hasTarget {
 		return errors.New("no orgs or repos configured across connections")
 	}
+	if s := c.Editor.Scheme; s != "" && s != "cursor" && s != "vscode" {
+		return fmt.Errorf("editor.scheme %q: must be \"cursor\" or \"vscode\"", s)
+	}
 	return nil
 }
 
@@ -94,6 +107,29 @@ func applyDefaults(c *Config) {
 	if c.Sync.IntervalMinutes <= 0 {
 		c.Sync.IntervalMinutes = defaultSyncIntervalMinutes
 	}
+	if c.Editor.Scheme == "" {
+		c.Editor.Scheme = "cursor"
+	}
+	for i, root := range c.Editor.Roots {
+		c.Editor.Roots[i] = expandTilde(root)
+	}
+}
+
+// expandTilde expands a leading "~/" (or a bare "~") to the current
+// user's home directory. Paths without the prefix are returned unchanged,
+// as are paths when the home directory cannot be determined.
+func expandTilde(path string) string {
+	if path != "~" && !strings.HasPrefix(path, "~/") {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+	if path == "~" {
+		return home
+	}
+	return filepath.Join(home, path[2:])
 }
 
 // ResolveToken returns the GitHub token using the following precedence:

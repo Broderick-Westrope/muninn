@@ -44,9 +44,10 @@ private code, so non-loopback addresses require --unsafe-listen.`,
 			// server's stderr free of that noise. The http.Server gets
 			// its own ErrorLog (see web.Serve) so its errors stay visible.
 			log.SetOutput(io.Discard)
-			// Load the config up front so misconfiguration fails fast,
-			// even though the web server itself does not need it yet.
-			if _, err := config.Load(resolveConfigPath()); err != nil {
+			// Load the config up front so misconfiguration fails fast;
+			// the editor section feeds open-in-editor links.
+			cfg, err := config.Load(resolveConfigPath())
+			if err != nil {
 				return err
 			}
 			searcher, err := search.Open(xdg.IndexDir())
@@ -58,7 +59,8 @@ private code, so non-loopback addresses require --unsafe-listen.`,
 			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
 
-			srv := web.New(searcher, xdg.StatusPath(), xdg.MirrorsDir())
+			checkouts := web.ScanCheckouts(cfg.Editor.Roots)
+			srv := web.New(searcher, xdg.StatusPath(), xdg.MirrorsDir(), checkouts, cfg.Editor.Scheme)
 			return srv.Serve(ctx, addr, func(url string) {
 				fmt.Fprintf(cmd.ErrOrStderr(), "muninn web serving at %s (Ctrl-C to stop)\n", url)
 				if openBrowser {

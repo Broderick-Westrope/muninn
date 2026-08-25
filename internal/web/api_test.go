@@ -104,7 +104,7 @@ func newFixture(t *testing.T) (*Server, string) {
 	}
 	t.Cleanup(searcher.Close)
 
-	return New(searcher, statusPath, mirrorsDir), commit
+	return New(searcher, statusPath, mirrorsDir, nil, ""), commit
 }
 
 // writeStatus writes a successful sync status for acme/widget finished at
@@ -315,7 +315,7 @@ func TestAPIFileTooLarge(t *testing.T) {
 	statusPath := filepath.Join(root, "status.json")
 	writeStatus(t, statusPath, commit, time.Now())
 
-	srv := New(nil, statusPath, mirrorsDir)
+	srv := New(nil, statusPath, mirrorsDir, nil, "")
 	rec := get(t, srv, `/api/file?repo=acme/widget&path=huge.txt`, nil)
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status = %d, want 413: %s", rec.Code, rec.Body.String())
@@ -432,5 +432,58 @@ func TestAPIReposStale(t *testing.T) {
 	get(t, srv, `/api/repos`, &repos)
 	if len(repos) != 1 || !repos[0].Stale {
 		t.Errorf("repos = %+v, want acme/widget marked stale after 48h", repos)
+	}
+}
+
+func TestAPIFileLocalPath(t *testing.T) {
+	srv, _ := newFixture(t)
+	checkout := t.TempDir()
+	if err := os.WriteFile(filepath.Join(checkout, "other.go"), []byte(otherGo), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv.checkouts = map[string]string{"acme/widget": checkout}
+	srv.editorScheme = "cursor"
+
+	var res fileResponse
+	rec := get(t, srv, `/api/file?repo=acme/widget&path=other.go`, &res)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if want := filepath.Join(checkout, "other.go"); res.LocalPath != want {
+		t.Errorf("localPath = %q, want %q", res.LocalPath, want)
+	}
+	if res.EditorScheme != "cursor" {
+		t.Errorf("editorScheme = %q, want cursor", res.EditorScheme)
+	}
+}
+
+func TestAPIFileLocalPathMissingFile(t *testing.T) {
+	srv, _ := newFixture(t)
+	// The checkout exists but does not contain the requested file (e.g.
+	// it is on an older commit).
+	srv.checkouts = map[string]string{"acme/widget": t.TempDir()}
+	srv.editorScheme = "cursor"
+
+	var res fileResponse
+	rec := get(t, srv, `/api/file?repo=acme/widget&path=other.go`, &res)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if res.LocalPath != "" || res.EditorScheme != "" {
+		t.Errorf("localPath = %q, editorScheme = %q; want both empty when the file is missing locally",
+			res.LocalPath, res.EditorScheme)
+	}
+}
+
+func TestAPIFileLocalPathUnmappedRepo(t *testing.T) {
+	srv, _ := newFixture(t)
+	var res fileResponse
+	rec := get(t, srv, `/api/file?repo=acme/widget&path=other.go`, &res)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if res.LocalPath != "" || res.EditorScheme != "" {
+		t.Errorf("localPath = %q, editorScheme = %q; want both empty with no checkout map",
+			res.LocalPath, res.EditorScheme)
 	}
 }

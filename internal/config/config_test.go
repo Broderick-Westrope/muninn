@@ -91,6 +91,56 @@ func TestLoadKeepsExplicitInterval(t *testing.T) {
 	}
 }
 
+func TestLoadEditorDefaults(t *testing.T) {
+	c, err := Load(writeConfigFile(t, `{"connections": {"c": {"type": "github", "orgs": ["x"]}}}`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.Editor.Scheme != "cursor" {
+		t.Errorf("Editor.Scheme = %q, want default cursor", c.Editor.Scheme)
+	}
+}
+
+func TestLoadEditorKeepsExplicitScheme(t *testing.T) {
+	c, err := Load(writeConfigFile(t, `{"connections": {"c": {"type": "github", "orgs": ["x"]}}, "editor": {"scheme": "vscode"}}`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.Editor.Scheme != "vscode" {
+		t.Errorf("Editor.Scheme = %q, want vscode", c.Editor.Scheme)
+	}
+}
+
+func TestLoadEditorInvalidScheme(t *testing.T) {
+	_, err := Load(writeConfigFile(t, `{"connections": {"c": {"type": "github", "orgs": ["x"]}}, "editor": {"scheme": "emacs"}}`))
+	if err == nil {
+		t.Fatal("Load succeeded, want error for invalid editor.scheme")
+	}
+	if !strings.Contains(err.Error(), "editor.scheme") {
+		t.Errorf("error %q does not mention editor.scheme", err)
+	}
+}
+
+func TestLoadEditorRootTildeExpansion(t *testing.T) {
+	c, err := Load(writeConfigFile(t, `{"connections": {"c": {"type": "github", "orgs": ["x"]}}, "editor": {"roots": ["~/dev", "/abs/path", "relative"]}}`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("UserHomeDir: %v", err)
+	}
+	want := []string{filepath.Join(home, "dev"), "/abs/path", "relative"}
+	if len(c.Editor.Roots) != len(want) {
+		t.Fatalf("Editor.Roots = %v, want %v", c.Editor.Roots, want)
+	}
+	for i := range want {
+		if c.Editor.Roots[i] != want[i] {
+			t.Errorf("Editor.Roots[%d] = %q, want %q", i, c.Editor.Roots[i], want[i])
+		}
+	}
+}
+
 func TestResolveTokenPrecedence(t *testing.T) {
 	base := func() *Config {
 		return &Config{

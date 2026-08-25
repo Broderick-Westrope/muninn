@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -67,6 +68,8 @@ type fileResponse struct {
 	Highlighted   string `json:"highlighted"`
 	IndexedCommit string `json:"indexedCommit"`
 	TotalLines    int    `json:"totalLines"`
+	LocalPath     string `json:"localPath,omitempty"`    // abs path in a local checkout, when found
+	EditorScheme  string `json:"editorScheme,omitempty"` // "cursor" or "vscode", set when LocalPath is
 }
 
 // repoJSON is one entry of /api/repos.
@@ -142,13 +145,33 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("%q looks like a binary file and cannot be displayed", filePath))
 		return
 	}
+	localPath, scheme := s.localFile(repo, filePath)
 
 	writeJSON(w, http.StatusOK, fileResponse{
 		Content:       content,
 		Highlighted:   highlight(filePath, content, totalLines),
 		IndexedCommit: commit,
 		TotalLines:    totalLines,
+		LocalPath:     localPath,
+		EditorScheme:  scheme,
 	})
+}
+
+// localFile resolves a repo-relative path to an absolute path inside a
+// scanned local checkout, returning it with the editor scheme when the
+// file exists on disk. The checkout may be on a different commit than
+// the index, so line numbers derived from indexed content are
+// best-effort; the UI discloses this to the user.
+func (s *Server) localFile(repo, filePath string) (localPath, scheme string) {
+	checkout, ok := s.checkouts[strings.ToLower(repo)]
+	if !ok {
+		return "", ""
+	}
+	abs := filepath.Join(checkout, filepath.FromSlash(filePath))
+	if info, err := os.Stat(abs); err != nil || info.IsDir() {
+		return "", ""
+	}
+	return abs, s.editorScheme
 }
 
 // handleRepos serves GET /api/repos: every indexed repo with its branch,
