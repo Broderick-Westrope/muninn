@@ -11,11 +11,13 @@ const repoBadge = $('#repo-badge');
 
 const SEARCH_LIMIT = 100;
 const DEBOUNCE_MS = 200;
+const COPY_FEEDBACK_MS = 1000;
 
 let debounceTimer = 0;
 let searchCtl = null; // AbortController for the in-flight search
 let fileCtl = null; // AbortController for the in-flight file fetch
 let currentFile = null; // {repo, path, line} when the file view is showing
+let currentFileData = null; // /api/file response for the showing file
 let savedScroll = 0; // results scroll position, restored on return
 
 // ---------------------------------------------------------------------------
@@ -96,6 +98,58 @@ function markMatches(el, text, tokens) {
 }
 
 // ---------------------------------------------------------------------------
+// Copy affordances (inline SVG, currentColor so themes work; icon markup is
+// static — user data still flows through textContent everywhere)
+
+const ICONS = {
+  copy:
+    '<path fill="none" stroke="currentColor" stroke-width="1.5" d="M5.75 5.75h7.5a1 1 0 0 1 1 1v7.5a1 1 0 0 1-1 1h-7.5a1 1 0 0 1-1-1v-7.5a1 1 0 0 1 1-1Z"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="1.5" d="M10.25 5.75v-3a1 1 0 0 0-1-1h-6.5a1 1 0 0 0-1 1v6.5a1 1 0 0 0 1 1h3"/>',
+  check: '<path fill="none" stroke="currentColor" stroke-width="2" d="m2.75 8.75 3.5 3.5 7-8.5"/>',
+  link:
+    '<path fill="none" stroke="currentColor" stroke-width="1.5" d="M6.5 9.5a3 3 0 0 0 4.4.2l2.2-2.2a3 3 0 1 0-4.3-4.2L7.6 4.5"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="1.5" d="M9.5 6.5a3 3 0 0 0-4.4-.2L2.9 8.5a3 3 0 1 0 4.3 4.2l1.2-1.2"/>',
+};
+
+function icon(name) {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 16 16');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.innerHTML = ICONS[name]; // static markup from ICONS only, never user data
+  return svg;
+}
+
+// copyBtn returns an icon button that copies text (a string, or a function
+// evaluated at click time) and briefly swaps to a checkmark to confirm.
+function copyBtn(text, title, iconName = 'copy') {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'copy-btn';
+  b.title = title;
+  b.setAttribute('aria-label', title);
+  b.append(icon(iconName));
+  let timer = 0;
+  b.addEventListener('click', async (e) => {
+    // Copy buttons live inside result-row anchors; never navigate.
+    e.preventDefault();
+    e.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(typeof text === 'function' ? text() : text);
+    } catch {
+      return; // clipboard unavailable — leave the button inert
+    }
+    b.replaceChildren(icon('check'));
+    b.classList.add('copied');
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      b.replaceChildren(icon(iconName));
+      b.classList.remove('copied');
+    }, COPY_FEEDBACK_MS);
+  });
+  return b;
+}
+
+// ---------------------------------------------------------------------------
 // Search
 
 function fileHash(repo, path, line) {
@@ -159,10 +213,13 @@ function renderResults(data, tokens) {
 function fileCard(f, tokens) {
   const card = document.createElement('article');
   card.className = 'card';
-  const head = document.createElement('a');
-  head.className = 'card-path';
-  head.href = fileHash(f.repo, f.path, f.lines[0]?.lineNumber);
-  head.textContent = f.path;
+  const head = document.createElement('div');
+  head.className = 'card-head';
+  const path = document.createElement('a');
+  path.className = 'card-path';
+  path.href = fileHash(f.repo, f.path, f.lines[0]?.lineNumber);
+  path.textContent = f.path;
+  head.append(path, copyBtn(`${f.repo}/${f.path}`, 'Copy repo/path'));
   card.append(head);
   for (const l of f.lines) {
     const row = document.createElement('a');
@@ -173,7 +230,7 @@ function fileCard(f, tokens) {
     num.textContent = l.lineNumber;
     const code = document.createElement('code');
     markMatches(code, l.line, tokens);
-    row.append(num, code);
+    row.append(num, code, copyBtn(`${f.repo}/${f.path}:${l.lineNumber}`, 'Copy repo/path:line'));
     card.append(row);
   }
   return card;
@@ -220,6 +277,7 @@ async function showFile(loc) {
   // over a newer navigation (mirrors the search path).
   if (fileCtl) fileCtl.abort();
   fileCtl = new AbortController();
+  currentFileData = null;
   fileEl.replaceChildren(fileHeader(loc, null), note('Loading…'));
   let data;
   try {
@@ -232,6 +290,7 @@ async function showFile(loc) {
     fileEl.replaceChildren(fileHeader(loc, null), errorBox(friendlyFileError(e)));
     return;
   }
+  currentFileData = data;
   const body = document.createElement('div');
   body.className = 'file-body';
   if (data.highlighted) {
@@ -257,6 +316,7 @@ function fileHeader(loc, data) {
   name.textContent = `${loc.repo}/${loc.path}`;
   bar.append(back, name);
   if (data) {
+    bar.append(fileActions(loc, data));
     const meta = document.createElement('span');
     meta.className = 'file-meta';
     meta.textContent =
@@ -265,6 +325,57 @@ function fileHeader(loc, data) {
     bar.append(meta);
   }
   return bar;
+}
+
+const EDITOR_LABELS = { cursor: 'Cursor', vscode: 'VS Code' };
+
+function githubUrl(loc, data) {
+  const p = loc.path.split('/').map(encodeURIComponent).join('/');
+  const anchor = loc.line ? `#L${loc.line}` : '';
+  return `https://github.com/${loc.repo}/blob/${data.indexedCommit}/${p}${anchor}`;
+}
+
+function editorUrl(loc, data) {
+  const p = data.localPath.split('/').map(encodeURIComponent).join('/');
+  return `${data.editorScheme}://file${p}:${loc.line || 1}`;
+}
+
+// fileActions builds the compact header action group: copy path, GitHub
+// permalink (link + copy), and open-in-editor when a local checkout exists.
+function fileActions(loc, data) {
+  const acts = document.createElement('span');
+  acts.className = 'file-actions';
+  acts.append(
+    copyBtn(() => {
+      const f = currentFile || loc;
+      return `${f.repo}/${f.path}` + (f.line ? `:L${f.line}` : '');
+    }, 'Copy path'),
+  );
+  const gh = document.createElement('a');
+  gh.className = 'act gh';
+  gh.href = githubUrl(loc, data);
+  gh.target = '_blank';
+  gh.rel = 'noopener';
+  gh.textContent = 'GitHub';
+  acts.append(gh, copyBtn(() => gh.href, 'Copy GitHub permalink', 'link'));
+  if (data.localPath) {
+    const ed = document.createElement('a');
+    ed.className = 'act editor';
+    ed.href = editorUrl(loc, data);
+    ed.textContent = EDITOR_LABELS[data.editorScheme] || data.editorScheme;
+    ed.title = 'Opens your local checkout — may be on a different commit than the index';
+    acts.append(ed);
+  }
+  return acts;
+}
+
+// refreshFileActions re-points the header links at the active target line.
+function refreshFileActions() {
+  if (!currentFile || !currentFileData) return;
+  const gh = $('.file-actions .gh', fileEl);
+  if (gh) gh.href = githubUrl(currentFile, currentFileData);
+  const ed = $('.file-actions .editor', fileEl);
+  if (ed) ed.href = editorUrl(currentFile, currentFileData);
 }
 
 // plainPre renders unhighlighted content in the same DOM shape chroma
@@ -335,6 +446,7 @@ fileEl.addEventListener('click', (e) => {
     location.pathname + location.search + fileHash(currentFile.repo, currentFile.path, n),
   );
   targetLine(n, false);
+  refreshFileActions();
 });
 
 // ---------------------------------------------------------------------------
@@ -353,6 +465,7 @@ function route() {
       ) {
         currentFile = loc;
         if (loc.line) targetLine(loc.line, true);
+        refreshFileActions();
         return;
       }
       if (document.body.dataset.view === 'results') savedScroll = window.scrollY;
@@ -363,6 +476,7 @@ function route() {
     }
   }
   currentFile = null;
+  currentFileData = null;
   if (fileCtl) fileCtl.abort();
   document.body.dataset.view = 'results';
   fileEl.replaceChildren();
