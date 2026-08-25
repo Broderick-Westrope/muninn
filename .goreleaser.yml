@@ -1,0 +1,62 @@
+version: 2
+
+project_name: muninn
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - binary: muninn
+    main: .
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+    goarch:
+      - arm64
+      - amd64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X github.com/broderick-westrope/muninn/internal/cli.Version={{ .Version }}
+
+archives:
+  - name_template: "{{ .Binary }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE*
+
+release:
+  prerelease: auto
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+
+brews:
+  - repository:
+      owner: "Broderick-Westrope"
+      name: homebrew-tap
+      token: "{{ .Env.GITHUB_TOKEN }}"
+    commit_author:
+      name: "Brodie Westrope"
+      email: "brodie.westrope@gmail.com"
+    homepage: "https://github.com/Broderick-Westrope/muninn"
+    description: "Code search index and MCP server for your GitHub repos"
+    license: "MIT"
+    dependencies:
+      - name: git
+      - name: universal-ctags
+    caveats: |
+      Create ~/.config/muninn/config.json (see the README for the schema), then:
+        muninn sync             # first sync: clone mirrors + build the index
+        muninn sync --install   # schedule hourly syncs via launchd
+
+      Add to your agent's MCP config:
+        { "command": "muninn", "args": ["mcp"] }
+    test: |
+      system "#{bin}/muninn", "--version"

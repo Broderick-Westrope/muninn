@@ -8,6 +8,10 @@ import (
 
 var configPath string
 
+// Version is the release version, overridden at build time via ldflags
+// (-X github.com/broderick-westrope/muninn/internal/cli.Version=...).
+var Version = "dev"
+
 // ExitError carries a specific process exit code for main to use. Err may
 // be nil for silent exits (e.g. `muninn search` with no matches exits 1
 // without an error message, following grep).
@@ -29,6 +33,7 @@ func newRootCmd() *cobra.Command {
 	rootCmd := &cobra.Command{
 		Use:           "muninn",
 		Short:         "Code search index and MCP server for your GitHub repos",
+		Version:       Version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
