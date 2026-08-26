@@ -65,9 +65,6 @@ The repo has no JavaScript test infrastructure (no `package.json`, no runner) an
 
 ### Facets
 
-
-### Facets
-
 - [ ] `/api/search` returns a `facets` block with repo and extension values and counts, computed from a facet-free pass that ignores the request's own facet params.
 - [ ] Facet counts are unaffected by the facet selection: selecting a repo does not change any facet count.
 - [ ] A facet count is never lower than the number of results displayed for that value.
