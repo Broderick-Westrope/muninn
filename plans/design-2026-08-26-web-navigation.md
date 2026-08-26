@@ -15,7 +15,7 @@
 
 - **Sidebar shell.** Layout changes from two mutually exclusive views (`body[data-view]` toggling `#results`/`#file`) to a persistent shell: sidebar + content pane. Sidebar content is view-coupled and swaps with `data-view`.
 - **File tree** (file view only), rooted at the open file's repo, expanded to reveal the open file, lazily fetched one directory at a time.
-- **Result facets** (results view only): repo and file-extension, multi-select and toggleable, with a stable facet list drawn from a facet-free search (see Design Decisions).
+- **Result facets** (results view only): repo and file-extension, multi-select and toggleable, with a stable facet list computed server-side from a facet-free pass (see Design Decisions).
 - **Repo prominence**: strengthened, sticky result group headers with match counts.
 - **Open-in-editor via the editor CLI**, so the repo is loaded in the target window.
 - **`app.js` split into ES modules.** It is 593 lines today; this change adds a sidebar shell, tree rendering, facet rendering, and the open-in-editor call, which would push a single file past ~900 lines. Split along the seams already marked by its section comments. `static.go` embeds the whole directory and serves via `http.FileServer`, which maps `.js` to `text/javascript` — acceptable for modules, so no build step and no MIME change. `index.html:28` changes to `<script type="module" src="/main.js">`.
@@ -27,7 +27,7 @@
 - Standalone repo browsing (a tree with no file open, or a repo picker in the results view). The tree is a navigation aid within a repo reached via search, not a general file browser.
 - Path-prefix facets (top-level directory within a repo). Useful in a monorepo, but only meaningful once a single repo is selected; revisit after the sidebar exists.
 - Bidirectional sync between typed query atoms and facet chips. Facet state lives in its own URL params and never rewrites the query string (see Design Decisions).
-- Facet counts computed over the full uncapped match set. Counts describe the returned (capped) result set only.
+- Facet counts computed over the whole index. Counts describe matches within the aggregation cap.
 - Strictly per-category facet-excluding counts. A single facet-free universe is used instead; see Design Decisions.
 - Forced `--new-window` on editor launch.
 - Any editor CLI option surface beyond the single fixed argv below.
@@ -44,72 +44,82 @@
 
 ## Success Criteria
 
-Automated unless marked *(manual)*.
+The repo has no JavaScript test infrastructure (no `package.json`, no runner) and the no-npm constraint above rules out adding a headless-browser harness, so **client-side behaviour is verified manually** and marked *(manual)*. Unmarked criteria are Go tests: handler tests via `httptest` against `Handler()`, and `gitfile` tests against a fixture mirror. This split is deliberate — the Go boundary is where the contracts worth regression-testing live.
 
 ### Tree
 
-- [ ] Opening a file from search results shows a tree in the sidebar, rooted at that file's repo, with every ancestor directory of the file expanded and the file itself marked as current.
-- [ ] Clicking a file in the tree navigates to it without a full page reload, and the tree keeps its expansion state across that navigation.
-- [ ] Expanding a directory fetches only that directory's immediate children.
+- [ ] Opening a file from search results shows a tree in the sidebar, rooted at that file's repo, with every ancestor directory of the file expanded and the file itself marked as current. *(manual)*
+- [ ] Clicking a file in the tree navigates to it without a full page reload, and the tree keeps its expansion state across that navigation. *(manual)*
+- [ ] Expanding a directory fetches only that directory's immediate children. *(manual)*
 - [ ] A tree listing against a monorepo-scale repo issues a non-recursive `git ls-tree` and returns only that directory's entries.
 - [ ] `gitfile.ListTree`'s existing behaviour is unchanged: `TestListTreeDepth` and the MCP `list_tree` tool output are unaffected.
-- [ ] Navigating rapidly between files in different repos never renders a stale repo's tree.
-- [ ] Navigating to a file in a different repo resets the tree; navigating within the same repo preserves expansion state.
-- [ ] A repo with no local checkout still renders a full tree.
+- [ ] Navigating rapidly between files in different repos never renders a stale repo's tree. *(manual)*
+- [ ] Navigating to a file in a different repo resets the tree; navigating within the same repo preserves expansion state and any in-flight expand. *(manual)*
+- [ ] A repo with no local checkout still renders a full tree. *(manual)*
 - [ ] `ListDir` uses a trailing-slash pathspec and returns repo-relative child paths, excluding the anchor directory itself.
-- [ ] `ListDir` on a nonexistent directory returns `fs.ErrNotExist`; `/api/tree` with a `path` naming a file returns 400.
-- [ ] A directory exceeding the entry cap returns a truncation signal and the client discloses it on that node.
-- [ ] A failed directory expand shows an inline error with a retry on that node, not an empty directory.
-- [ ] Returning to the results view replaces the tree with facets; no tree is shown when no file is open.
+- [ ] `ListDir` returns `fs.ErrNotExist` for a nonexistent path and `ErrNotDir` for a path naming a file; `/api/tree` maps them to 404 and 400.
+- [ ] `/api/tree` maps `ErrIndexMismatch` to 409.
+- [ ] A directory exceeding `maxEntries` returns `truncated: true`, and the client discloses it on that node. *(server: automated; disclosure: manual)*
+- [ ] A failed directory expand shows an inline error with a retry on that node, not an empty directory. *(manual)*
+- [ ] Returning to the results view replaces the tree with facets; no tree is shown when no file is open. *(manual)*
 
 ### Facets
 
-- [ ] The results sidebar lists every repo present in the current results with a match count, and every file extension present with a match count.
-- [ ] Clicking a repo facet narrows results to that repo; clicking it again restores the unfiltered results.
-- [ ] After selecting one repo facet, the other repo facets remain listed in the sidebar and are still clickable.
+
+### Facets
+
+- [ ] `/api/search` returns a `facets` block with repo and extension values and counts, computed from a facet-free pass that ignores the request's own facet params.
+- [ ] Facet counts are unaffected by the facet selection: selecting a repo does not change any facet count.
+- [ ] A facet count is never lower than the number of results displayed for that value.
+- [ ] A file with no dot in its basename and a dotfile such as `.gitignore` both fall in the "no extension" bucket; `.GO` and `.go` share one bucket.
+- [ ] The results sidebar renders every repo and extension in the `facets` block with its count. *(manual)*
+- [ ] Clicking a repo facet narrows results to that repo; clicking it again restores the unfiltered results. *(manual)*
+- [ ] After selecting one repo facet, the other repo facets remain listed and clickable. *(manual)*
 - [ ] Selecting two repo facets by clicking, one after the other, returns results from both (OR within a category).
 - [ ] Selecting a repo facet and an extension facet returns only files matching both (AND across categories).
-- [ ] A facet combination that yields zero results still renders the selected chips, so the selection can be undone without editing the URL.
-- [ ] Loading a URL whose `repo` value does not match the query still renders that value as a deselectable chip.
-- [ ] With no facets selected, a search issues exactly one search; with any facet selected, exactly two.
+- [ ] A facet combination that yields zero results still renders the selected chips, so the selection can be undone without editing the URL. *(manual)*
+- [ ] Loading a URL whose `repo` value does not match the query still renders that value as a deselectable chip. *(manual)*
+- [ ] A facet toggle re-searches without waiting for the input debounce, and reuses the single existing `AbortController`. *(manual)*
+- [ ] `facets.truncated` is reported separately from the results-level `truncated`, and the sidebar discloses it. *(server: automated; disclosure: manual)*
 - [ ] A facet applied to a query containing a top-level `or` filters *both* sides of the disjunction.
 - [ ] A repo whose name contains a regex metacharacter filters to exactly that repo.
 - [ ] Facet params beyond the documented caps are rejected with 400.
-- [ ] Facet selections survive a page reload and are present in the shareable URL.
-- [ ] The search input is never programmatically rewritten by a facet interaction.
+- [ ] Facet selections survive a page reload and are present in the shareable URL. *(manual)*
+- [ ] The search input is never programmatically rewritten by a facet interaction. *(manual)*
 - [ ] A hand-typed `repo:` atom in the query composes with facet selections rather than conflicting with them.
 
 ### Repo prominence
 
 - [ ] Result group headers render at a higher contrast and larger size than the `.card-path` links beneath them, with the owner segment de-emphasised relative to the name. *(manual)*
-- [ ] A group header remains visible while scrolling past its own file cards.
-- [ ] Each group header shows the repo's match count within the current results.
+- [ ] A group header remains visible while scrolling past its own file cards, and is not obscured by the `#hints` row. *(manual)*
+- [ ] Each group header shows the repo's match count within the current results. *(manual)*
 
 ### Open in editor
 
 - [ ] Clicking the editor action opens the file in an editor window with the repo's checkout loaded as the workspace folder, scrolled to the target line. *(manual)*
 - [ ] With `editor.scheme: "vscode"`, the launched binary is `code`, not `vscode`.
 - [ ] Clicking the editor action twice for two files in the same repo reuses one window rather than spawning two. *(manual — depends on the user's `window.openFoldersInNewWindow` setting)*
-- [ ] With the editor CLI absent from `PATH`, the endpoint returns 501 and the client falls back to the URL scheme with a tooltip disclosing the degraded behaviour.
-- [ ] A resolved path containing `:` returns 501 and takes the URL-scheme fallback rather than opening the wrong file.
-- [ ] A file absent from the local checkout returns 404 with a distinct message, not an exec failure.
-- [ ] With the editor CLI present but failing to launch, the endpoint returns 500 and the UI surfaces the error without falling back.
-- [ ] A cross-origin `POST` to the open endpoint is rejected with 403 and a message telling the user to reload.
+- [ ] Every row of the status table is reachable and returns the stated code: 400 validation, 501 CLI-missing, 501 colon-in-path, 403 containment, 404 file-absent, 500 exec-failure, 403 CSRF.
+- [ ] With the editor CLI absent from `PATH`, the client falls back to the URL scheme with a tooltip disclosing the degraded behaviour. *(manual)*
+- [ ] A 403 renders a message telling the user to reload, not an opaque failure. *(manual)*
 - [ ] A `POST` with no `Sec-Fetch-Site` header is rejected.
 - [ ] A `POST` with a non-JSON content type is rejected.
-- [ ] The open endpoint refuses a repo absent from the scanned checkouts, refuses a path that resolves outside its checkout directory, and refuses a path that escapes via a symlink.
+- [ ] The CSRF guard is enforced inside `Handler()`, so `httptest` requests exercise it.
 - [ ] Containment is enforced on a path-separator boundary: a checkout at `/dev/repo` does not admit `/dev/repo-other`.
 - [ ] The path passed to `--goto` is the symlink-resolved path that was validated.
 - [ ] No editor process is launched from a shell string; the argv is fixed and built server-side.
 
 ### Layout and structure
 
-- [ ] `main` carries no `max-width`, so a result line renders more characters before ellipsis at a 1600px viewport than at 1100px.
-- [ ] Below a ~900px viewport the sidebar is hidden and the content pane uses the full width.
-- [ ] The sidebar stays fixed while the content pane scrolls, with `<body>` still the scroll container.
-- [ ] Returning from a file to results restores the previous results scroll position (`savedScroll` still works).
+- [ ] `main` carries no `max-width`, so a result line renders more characters before ellipsis at a 1600px viewport than at 1100px. *(manual)*
+- [ ] Below a ~900px viewport the sidebar is hidden and the content pane uses the full width. *(manual)*
+- [ ] The sidebar stays fixed while the content pane scrolls, with `<body>` still the scroll container. *(manual)*
+- [ ] A tree taller than the viewport scrolls within the sidebar rather than scrolling the sidebar out of view. *(manual)*
+- [ ] Sticky offsets use `--sticky-top`, which differs between the results and file views; no new rule uses `--header-h` directly.
+- [ ] The stats footer is not obscured by the sidebar. *(manual)*
+- [ ] Returning from a file to results restores the previous results scroll position (`savedScroll` still works). *(manual)*
 - [ ] `app.js` is replaced by focused ES modules, each under ~250 lines, loaded via `<script type="module">`.
-- [ ] Existing tests pass; new endpoints have handler tests covering success, validation failure, and rejection paths.
+- [ ] Existing Go tests pass; both new endpoints have handler tests covering success, validation failure, and rejection paths.
 
 ## Design Decisions
 
@@ -137,11 +147,24 @@ Per-node state is explicit: a directory being expanded shows a loading indicator
 
 So `ListTree` is left untouched, and the tree endpoint uses a new `ListDir(ctx, mirrorDir, commit, path)` returning immediate children only, non-recursive, without a self-entry. "Children of this directory" is a genuinely different contract from `ListTree`'s "everything within N levels of this anchor, anchor included" — a separate function is clearer than a mode flag, breaks no existing caller or test, and keeps MCP output stable. It reuses `checkCommit` and `parseTreeEntry`.
 
-**The pathspec needs a trailing slash.** Verified against this repo: `git ls-tree --long <commit> -- internal/web` returns exactly one entry, the `internal/web` tree itself, and no children. `git ls-tree --long <commit> -- internal/web/` returns the children, with **repo-relative** paths. So the argv is `ls-tree -z --long <commit> -- <prefix>/`, with the pathspec omitted entirely for the repo root. The subtree-object form (`<commit>:internal/web`) is rejected: it returns basenames relative to the subtree, which would break the client's repo-relative path model.
+**The pathspec needs a trailing slash, and the anchor needs a separate probe.** Verified against this repo: `git ls-tree --long <commit> -- internal/web` returns exactly one entry, the `internal/web` tree itself, and no children. `git ls-tree --long <commit> -- internal/web/` returns the children, with **repo-relative** paths. So children come from `ls-tree -z --long <commit> -- <prefix>/`, with the pathspec omitted entirely for the repo root. The subtree-object form (`<commit>:internal/web`) is rejected: it returns basenames relative to the subtree, which would break the client's repo-relative path model.
 
-`fs.ErrNotExist` for a missing directory uses the same inference `ListTree` already makes (gitfile.go:168-174): git cannot store empty directories, so empty output for a non-empty prefix means the path does not exist. A `path` that names a **file** rather than a directory returns `400` — a non-recursive listing of a blob pathspec returns the blob, which would otherwise render as a directory containing only itself.
+But the trailing slash makes "does this path exist, and is it a directory?" unanswerable from the children call alone — a blob pathspec with a slash appended matches nothing, which is indistinguishable from a missing directory. So for a non-empty path `ListDir` first probes the anchor with the **slash-free** form, which returns exactly one entry carrying its type, and returns:
 
-**`ListDir` caps entries** and reports truncation, for the same reason the whole-tree fetch was declined: a single generated directory with tens of thousands of entries would otherwise produce an unbounded payload and DOM. The client discloses truncation on the node.
+- `fs.ErrNotExist` when the probe is empty — handler maps to `404`;
+- a distinct `ErrNotDir` sentinel when the probe reports a blob — handler maps to `400`, so a file path cannot render as a directory containing only itself.
+
+Two git calls per expand, one for the root. Expands are user-driven, one per click, against a local mirror.
+
+**`ListDir` takes a `maxEntries` parameter** mirroring `ListTree` (gitfile.go:125) rather than hard-coding, and the handler passes 2000. A single generated directory with tens of thousands of entries would otherwise produce an unbounded payload and DOM. Truncation is reported in the response and the client discloses it on the node.
+
+**Response shape**, following the `searchResponse`/`fileResponse` precedent (api.go:34-73):
+
+```
+{ entries: [{path, type, size}], truncated: bool }
+```
+
+**Error contract:** `400` invalid repo or path-names-a-file, `404` missing repo/commit/directory, `409` `ErrIndexMismatch` (reachable via `checkCommit`, mapped exactly as `handleFile` does at api.go:133-135, with per-node client copy mirroring app.js:424-425), `500` otherwise.
 
 Symlinks are git blob entries and surface as files, consistent with `parseTreeEntry`'s existing fallback for non-tree/non-blob objects (gitfile.go:200-203). Empty directories cannot exist in git, so no special case is needed.
 
@@ -169,30 +192,47 @@ Extension rather than zoekt `lang:` — extension is derivable from the path wit
 
 *Accepted seam:* a hand-typed `repo:helse/gql-admin` filters correctly and composes with facet selections, but does not light up the corresponding facet chip. The two mechanisms are independent rather than in conflict.
 
-### Facet values come from a facet-free search, not the filtered results
+### Facet values are computed server-side from a facet-free pass
 
-The naive version of this — derive facet values from the response you just rendered — collapses on the second click. Selecting repo A filters the search to repo A, so the next response contains only repo A, so every other repo facet **disappears from the sidebar**. Multi-select becomes impossible to build by clicking (falsifying the two-repo criterion above), and selecting a repo/extension pair with no overlap empties the sidebar entirely, leaving the active selections with no chip to click to undo them — an unrecoverable dead end short of hand-editing the URL.
+The naive version — derive facet values from the response you just rendered — collapses on the second click. Selecting repo A filters the search to repo A, so the next response contains only repo A, so every other repo facet **disappears from the sidebar**. Multi-select becomes impossible to build by clicking, and selecting a repo/extension pair with no overlap empties the sidebar entirely, leaving the active selections with no chip to undo them — an unrecoverable dead end short of hand-editing the URL.
 
-So the facet universe and the results come from **two different searches**:
+So the facet universe must ignore the facet selection. It is computed **server-side, inside the single `/api/search` request**, which returns a new `facets` block alongside `files`:
 
-- **Results** — the query with all facet filters ANDed in. What the content pane renders.
-- **Facet universe** — the same query with **no facet filters**, used only for its repo/extension buckets and counts.
+```
+facets: {
+  repos: [{value, count}],
+  exts:  [{value, count}],
+  truncated: bool
+}
+```
 
-This is two searches when any facet is selected and one when none is (the facet-free search is exactly the search already being run), independent of how many categories or values are active. In exchange, the facet list is **stable** — it does not shift under the cursor as you toggle — which is the behaviour that makes multi-select usable at all.
+The handler runs two zoekt passes: the **results** pass (query + facet filters ANDed) and a **facet-free aggregation** pass (query only). Aggregation runs at its own, higher cap — independent of the 100/200 display limits (api.go:24-25) — because it needs breadth of coverage, not content, and returns counts only.
 
-**Selected values are always rendered as chips,** as the union of the selection and the universe. The universe makes every selected value present by construction in the normal case, but a URL carrying `repo=X` where `X` does not match the query would not, so the union is what actually guarantees a selection is always deselectable. No dead end is reachable.
+**One request, not two.** This was the deciding factor over a second client-side `fetch`, and it resolves five things at once that a client-side universe leaves dangling:
 
-Deliberate imprecision: a strictly correct implementation excludes only the *same* category when computing that category's universe (repo counts should respect an extension selection but ignore the repo selection), which costs one search per selected category. A single facet-free universe means counts are slightly broader than the filtered view. That is a good trade for a stable, predictable list at a fixed cost of two searches, and the counts remain honest about what they are: matches for the query, not for the query-plus-other-facets.
+- **Abort and debounce** — one `searchCtl` (app.js:17, 166-172) keeps working unchanged. A facet toggle re-searches through a path that bypasses the 200ms input debounce (app.js:559-562), since it is a click, not typing.
+- **Partial failure** — impossible. One request either succeeds or fails; there is no state where the results rendered but the sidebar did not.
+- **Stats footer** — one `data.stats` and one `data.truncated`, so `renderStats` (app.js:239-253) needs no precedence rule between two responses.
+- **No redundant work** — the universe depends only on `q`, so a client-side version would re-fetch an identical universe on every toggle and re-render an identical list (flicker), and double zoekt work on every debounce tick.
+- **Counts cannot invert** — with a client-side universe capped at 100, selecting a repo whose universe share is 12 could display "12" beside up to 100 result rows. A higher aggregation cap keeps the count ≥ what is displayed.
 
-Extension values derive from the path suffix of the universe response; repo values from its `repo` field. Neither needs new backend aggregation. Counts describe the capped result set, not index-wide totals; the existing `truncated` warning (app.js:248-253) already discloses capping and no second disclosure is added.
+**Selected values are always rendered as chips,** as the union of the selection and the returned facet values. The universe makes every selected value present in the normal case, but a URL carrying `repo=X` where `X` does not match the query would not, so the union is what guarantees a selection is always deselectable. No dead end is reachable.
+
+**The facet list is still bounded, and says so.** Aggregation is capped, so for a very broad query the value list is the repos and extensions found within that cap, not every repo in the index. `facets.truncated` carries this and the sidebar discloses it — distinct from the results-level `truncated` warning, because the two describe different caps.
+
+Extension bucketing rules, since the edges are ambiguous: extension is the suffix after the last dot in the **basename**, lowercased. A basename with no dot (`Makefile`, `LICENSE`) and a dotfile whose only dot is leading (`.gitignore`) both have **no extension** and are grouped under one explicit "no extension" bucket, which is selectable like any other. Lowercasing matches zoekt's default case-insensitive `file:` behaviour.
+
+Deliberate imprecision: strictly correct faceting excludes only the *same* category when computing that category's universe (repo counts should respect an extension selection but ignore the repo selection), costing one pass per selected category. A single facet-free universe means counts are slightly broader than the filtered view — honest about what they are: matches for the query, not the query-plus-other-facets.
 
 *Alternative declined — derive facets from the filtered results and merely pin the selected chips:* fixes the dead end but not discovery. You still cannot find a second repo to add, so multi-select stays unbuildable.
 
+*Alternative declined — a second client-side search for the universe:* leaves limit, abort, partial failure, stats precedence and count inversion all to be re-decided in the client, for no gain.
+
 *Alternative declined — repo facets from `/api/repos`:* listing all indexed repos means a long list of mostly zero-match options for any given query.
 
-*Alternative declined — per-category facet-excluding aggregation:* strictly correct counts, but one extra search per selected category and a more complex contract, for a precision difference users will not notice.
+*Alternative declined — per-category facet-excluding aggregation:* strictly correct counts at one extra pass per selected category, for a precision difference users will not notice.
 
-*Alternative declined — server-side uncapped aggregation for true counts:* requires an uncapped zoekt pass on every search.
+*Alternative declined — uncapped aggregation for index-wide true counts:* an uncapped zoekt pass on every search.
 
 ### Open-in-editor shells out to the editor CLI
 
@@ -227,11 +267,15 @@ Deliberately no option surface: no `--new-window`, no configurable flags, no pas
 
 | Condition | Status | Client behaviour |
 | --- | --- | --- |
+| Unknown repo, non-positive `line`, malformed body | `400` | Inline error |
 | CLI not on `PATH` | `501` | URL-scheme fallback + tooltip |
 | Resolved path contains `:` | `501` | URL-scheme fallback + tooltip |
+| Path escapes the checkout (including via symlink) | `403` | Inline error |
 | File absent from the checkout (checkout on a different commit, or deleted since the startup scan) | `404` | Inline message: file not in local checkout |
 | CLI found but exec failed | `500` | Inline error, no fallback |
 | CSRF guard rejection | `403` | Inline message: reload the page |
+
+The guard itself lives **inside `Handler()`** (server.go:66-74), not in the `Serve` middleware chain where `hostCheck` is applied (server.go:129). Otherwise `httptest` tests that exercise `Handler()` bypass it entirely and the rejection criteria are untestable.
 
 The `404` case is expected in normal use, not exceptional: the local checkout is frequently on a different commit than the index, which `localFile` already accounts for on the GET path (api.go:160-175). `filepath.EvalSymlinks` returns `fs.ErrNotExist` for it, so it surfaces as validation rather than an exec failure. The `403` needs its own copy because Safari before 16.4 sends no `Sec-Fetch-Site` and those users get an otherwise-opaque failure.
 
@@ -242,7 +286,7 @@ The `404` case is expected in normal use, not exceptional: the local checkout is
 
 ### Repo prominence: stronger and sticky
 
-Raise `.repo-group h2` to full-strength colour and a slightly larger size so it outranks the `var(--accent)` paths beneath it; de-emphasise the owner relative to the name (`helse/` muted, `pilot-engine` strong) so the distinguishing half wins the glance. Add the repo's match count. Stick the header below the existing header bar, following the precedent already set by `.file-head` at `top: var(--header-h)` (style.css:304). Sticky is the part that fixes the scroll problem; the sidebar reinforces repo identity in a second place.
+Raise `.repo-group h2` to full-strength colour and a slightly larger size so it outranks the `var(--accent)` paths beneath it; de-emphasise the owner relative to the name (`helse/` muted, `pilot-engine` strong) so the distinguishing half wins the glance. Add the repo's match count. Stick the header below the visible header bar using `--sticky-top` (see the layout decision below — **not** `--header-h`, which excludes the `#hints` row that is visible in this view). Sticky is the part that fixes the scroll problem; the sidebar reinforces repo identity in a second place.
 
 *Alternative declined — inline repo on every file card:* repeats the repo on every card and discards the grouping `renderResults` already builds (app.js:193-208).
 
@@ -254,7 +298,13 @@ The 1100px `main` cap is a prose-readability convention, and there is no prose h
 
 With the cap gone, a ~260px sidebar costs nothing worth a toggle on a normal display, so the sidebar is always visible — no toggle, no persisted collapse state, no keyboard binding. Below a ~900px viewport, where 260px is a real bite, a media query hides the sidebar and gives the content pane full width.
 
-**The shell keeps `<body>` as the scroll container,** with the sidebar `position: sticky`. Two existing behaviours depend on this and would break under independently-scrolling panes: `.file-head` sticks at `top: var(--header-h)` (style.css:304), which is measured against the body scroll, and `savedScroll` reads and writes `window.scrollY`/`window.scrollTo` to restore the results position (app.js:21, 471, 483). A sticky sidebar in a body-scrolled shell gets the desired effect — sidebar stays put, content scrolls — without touching either. The new sticky group headers use the same `top: var(--header-h)` origin for the same reason.
+**The shell keeps `<body>` as the scroll container,** with the sidebar `position: sticky`. Two existing behaviours depend on this and would break under independently-scrolling panes: `.file-head` sticks at `top: var(--header-h)` (style.css:304), which is measured against the body scroll, and `savedScroll` reads and writes `window.scrollY`/`window.scrollTo` to restore the results position (app.js:21, 471, 483). A sticky sidebar in a body-scrolled shell gets the desired effect — sidebar stays put, content scrolls — without touching either.
+
+**`--header-h` is the wrong sticky origin in the results view, and must not be reused.** It is 41px, documented as `.bar` height + padding + border (style.css:19). `#hints` sits *inside* the sticky `<header>` below `.bar` (index.html:21, style.css:110-115) and is only `display: none` in the **file** view (style.css:135-139) — which is the sole reason `.file-head`'s use of the value is correct. Group headers exist only in the results view, where `#hints` is visible, so sticking them at 41px slides them under the chips row. The fix is a `--sticky-top` variable set per view: `var(--header-h)` in the file view, the full bar-plus-hints height in the results view. Both the sticky group headers and the sticky sidebar use `--sticky-top`, never `--header-h` directly.
+
+**The sidebar scrolls internally.** An expanded tree easily exceeds viewport height, and a sticky element taller than the viewport scrolls away — defeating the point. The sidebar gets `max-height: calc(100vh - var(--sticky-top))` and `overflow-y: auto`. The per-directory entry cap bounds one listing, not the accumulated tree.
+
+**The stats footer needs a left offset.** `footer` is `position: fixed; left: 0` (style.css:284-294) and would otherwise run underneath the sidebar. It is the one existing element the shell change breaks.
 
 *Alternative declined — collapsible sidebar with persisted state:* only necessary if the content pane were starved, which removing the cap prevents. Skipping it avoids a toggle control, a `localStorage` key, and a breakpoint-versus-user-intent conflict.
 
@@ -273,10 +323,10 @@ With the cap gone, a ~260px sidebar costs nothing worth a toggle on a normal dis
 - `internal/mcp/tools_search.go` — `regexp.QuoteMeta` alternation precedent (269)
 - `internal/web/static/app.js` — module split source: search render (192-256), file view (258-450), routing (452-484), header chips (486-540)
 - `internal/web/static/index.html` — shell markup for the sidebar
-- `internal/web/static/style.css` — `main` cap (147-150), group headers (152-157), row overflow (213-218), sticky precedent (304), view switching (133-143)
+- `internal/web/static/style.css` — `main` cap (147-150), group headers (152-157), row overflow (213-218), `--header-h` and why it excludes `#hints` (19, 110-115, 135-143), sticky precedent (304), fixed footer (284-294)
 - `internal/web/static.go` — embedded asset serving (ES module MIME types)
 - `internal/search/types.go` — `Options.RepoFilter`, and the new `FileFilter` for extension facets
-- `internal/search/search.go` — `Search` query composition via `query.NewAnd` (54-64), the pattern facets must follow
+- `internal/search/search.go` — `Search` query composition via `query.NewAnd` (54-64), the pattern facets must follow; the facet-free aggregation pass hangs off the same entry point
 - `internal/config/config.go` — `EditorConfig.Scheme` / `.Roots`, and the scheme→binary map the open endpoint needs (`vscode`→`code`)
 - `internal/cli/web.go` — server construction and wiring
 - `internal/web/api_test.go`, `server_test.go`, `checkouts_test.go` — existing test patterns
