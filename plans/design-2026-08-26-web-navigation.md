@@ -18,7 +18,8 @@
 - **Result facets** (results view only): repo and file-extension, derived from the current result set, multi-select and toggleable.
 - **Repo prominence**: strengthened, sticky result group headers with match counts.
 - **Open-in-editor via the editor CLI**, so the repo is loaded in the target window.
-- **`app.js` split into ES modules.** It is 593 lines today; this change adds a sidebar shell, tree rendering, facet rendering, and the open-in-editor call, which would push a single file past ~900 lines. Split along the seams already marked by its section comments. `static.go` embeds the whole directory, so native ES modules need no build step.
+- **`app.js` split into ES modules.** It is 593 lines today; this change adds a sidebar shell, tree rendering, facet rendering, and the open-in-editor call, which would push a single file past ~900 lines. Split along the seams already marked by its section comments. `static.go` embeds the whole directory and serves via `http.FileServer`, which maps `.js` to `text/javascript` — acceptable for modules, so no build step and no MIME change. `index.html:28` changes to `<script type="module" src="/main.js">`.
+- **`gitfile.ListDir`**, a new function returning the immediate children of one directory (non-recursive `ls-tree`, no self-entry). See Design Decisions.
 - **`main` max-width cap removed** (style.css:148).
 
 **Out:**
@@ -45,12 +46,19 @@
 - [ ] Opening a file from search results shows a tree in the sidebar, rooted at that file's repo, with every ancestor directory of the file expanded and the file itself marked as current.
 - [ ] Clicking a file in the tree navigates to it without a full page reload, and the tree keeps its expansion state across that navigation.
 - [ ] Expanding a directory fetches only that directory's immediate children.
-- [ ] A depth-1 tree request against a monorepo-scale repo issues a non-recursive `git ls-tree` and returns only that directory's entries.
+- [ ] A tree listing against a monorepo-scale repo issues a non-recursive `git ls-tree` and returns only that directory's entries.
+- [ ] `gitfile.ListTree`'s existing behaviour is unchanged: `TestListTreeDepth` and the MCP `list_tree` tool output are unaffected.
+- [ ] Navigating rapidly between files in different repos never renders a stale repo's tree.
+- [ ] Navigating to a file in a different repo resets the tree; navigating within the same repo preserves expansion state.
+- [ ] A repo with no local checkout still renders a full tree.
 - [ ] Returning to the results view replaces the tree with facets; no tree is shown when no file is open.
 - [ ] The results sidebar lists every repo present in the current results with a match count, and every file extension present with a match count.
 - [ ] Clicking a repo facet narrows results to that repo; clicking it again restores the unfiltered results.
 - [ ] Selecting two repo facets returns results from both (OR within a category).
 - [ ] Selecting a repo facet and an extension facet returns only files matching both (AND across categories).
+- [ ] A facet applied to a query containing a top-level `or` filters *both* sides of the disjunction.
+- [ ] A repo whose name contains a regex metacharacter filters to exactly that repo.
+- [ ] Facet params beyond the documented caps are rejected with 400.
 - [ ] Facet selections survive a page reload and are present in the shareable URL.
 - [ ] The search input is never programmatically rewritten by a facet interaction.
 - [ ] A hand-typed `repo:` atom in the query composes with facet selections rather than conflicting with them.
@@ -59,8 +67,11 @@
 - [ ] Clicking the editor action opens the file in an editor window with the repo's checkout loaded as the workspace folder, scrolled to the target line.
 - [ ] Clicking the editor action twice for two files in the same repo reuses one window rather than spawning two.
 - [ ] With the editor CLI absent from `PATH`, the editor action falls back to the `cursor://`/`vscode://` URL scheme and the UI discloses the degraded behaviour.
+- [ ] With the editor CLI present but failing to launch, the UI surfaces the error and does not fall back.
 - [ ] A cross-origin `POST` to the open endpoint is rejected.
-- [ ] The open endpoint refuses a repo absent from the scanned checkouts, and refuses a path that resolves outside its checkout directory.
+- [ ] A `POST` with no `Sec-Fetch-Site` header is rejected.
+- [ ] A `POST` with a non-JSON content type is rejected.
+- [ ] The open endpoint refuses a repo absent from the scanned checkouts, refuses a path that resolves outside its checkout directory, and refuses a path that escapes via a symlink.
 - [ ] No editor process is launched from a shell string; the argv is fixed and built server-side.
 - [ ] Matching lines in results use the full window width, showing more of each line than the previous 1100px cap allowed.
 - [ ] Below a ~900px viewport the sidebar is hidden and the content pane uses the full width.
@@ -83,17 +94,31 @@ New endpoint `GET /api/tree?repo=<owner/name>&path=<dir>` returns the immediate 
 
 Paths are rarely deeper than 5-6 segments and the requests are parallel against a local mirror, so the N-requests-on-open cost is acceptable. If it proves slow, a server-side spine walk returning all ancestors in one response is a drop-in change — the client's per-directory data shape is unchanged.
 
+**Tree requests share one `AbortController`,** matching the existing `searchCtl`/`fileCtl` discipline (app.js:17-18, 166, 278). Without it, a fan-out for repo A followed by fast navigation to repo B lets stale A responses land in B's sidebar. Navigating to a file in a **different repo resets the tree**; expansion state is preserved only within the same repo.
+
 *Alternative declined — whole tree in one request:* a monorepo root at full depth is a multi-MB payload and a slow `ls-tree`, and it makes `ListTree`'s `maxEntries` truncation a routine user-facing failure rather than an edge case.
 
-**Targeted fix to code being built on:** `gitfile.ListTree` always runs `git ls-tree -r -t` and filters by depth afterwards (gitfile.go:136, 154-156), so a depth-1 listing walks the entire tree. Add a non-recursive path (omit `-r`) when depth is 1. This is a fix to the function this feature depends on, not unrelated refactoring.
+**New `gitfile.ListDir` rather than a fast path inside `ListTree`.** `ListTree` runs `git ls-tree -r -t` and filters by depth afterwards (gitfile.go:136, 154-156), so a depth-1 listing walks the whole tree. But it cannot simply drop `-r` when depth is 1: without `-r`, git never emits the anchor directory itself, and `ListTree`'s current contract *includes* it — `relativeDepth("a", "a")` returns 1 (gitfile.go:210-216), so listing `"a"` at depth 1 yields `a`, `a/b`, `a/d.txt`. `TestListTreeDepth` asserts exactly that count (gitfile_test.go:234-241), and the MCP `list_tree` tool (mcp/tools_file.go:96) shares the contract.
+
+So `ListTree` is left untouched, and the tree endpoint uses a new `ListDir(ctx, mirrorDir, commit, path)` returning immediate children only, non-recursive, without a self-entry. "Children of this directory" is a genuinely different contract from `ListTree`'s "everything within N levels of this anchor, anchor included" — a separate function is clearer than a mode flag, breaks no existing caller or test, and keeps MCP output stable. It reuses `checkCommit` and `parseTreeEntry`.
+
+Symlinks are git blob entries and surface as files, consistent with `parseTreeEntry`'s existing fallback for non-tree/non-blob objects (gitfile.go:200-203). Empty directories cannot exist in git, so no special case is needed.
+
+The tree reads from the bare mirror and is independent of local checkouts: it renders identically for a repo with no checkout (only the editor action is unavailable). A mid-session sync that changes the indexed commit is an accepted transient inconsistency — `resolveIndexedCommit` re-reads the status file per request, so already-rendered nodes reflect the old commit while new expands reflect the new one. Reloading the file view resolves it; the tree does not attempt commit-change detection.
 
 ### Facet state lives in dedicated URL params, not in the query string
 
 Facets serialise to their own params — `?q=useQuery&repo=helse/pilot-engine,helse/gql-admin&ext=go` — and `/api/search` gains `repo` and `ext` params that the server ANDs into the zoekt query it builds. `search.Options` already carries `RepoFilter` for exactly this purpose (search/types.go:10-11). The search input displays only what the user typed and is never rewritten.
 
-Semantics: **OR within a category, AND across categories.** Multiple repos become a single alternation; repo and extension selections are ANDed. The query is composed server-side where the syntax is known-correct, rather than assembled by string concatenation in the client.
+Semantics: **OR within a category, AND across categories.** Multiple repos become a single alternation; repo and extension selections are ANDed.
 
-Extension rather than zoekt `lang:` — extension is derivable from the path with no backend involvement and maps to what "file type" means to a user. The server translates an extension facet to a `file:\.go$`-style atom, which also avoids zoekt's language detection disagreeing with the displayed label.
+**Composition is AST-level, never string concatenation.** This is a correctness requirement, not a style preference: zoekt's `or` binds looser than implicit AND, so appending ` file:\.go$` to the user query `foo or bar` parses as `foo OR (bar AND file:\.go$)` — the facet silently fails to filter half the results. `RepoFilter` already avoids this by parsing first and then `query.NewAnd`-ing a `&query.Repo{}` node (search.go:54-64). Extension facets get the same treatment via a new `Options.FileFilter` composed the identical way, so both facet categories are ANDed against the *whole* parsed user query regardless of its shape.
+
+**Facet values are `regexp.QuoteMeta`-escaped** before being joined into an alternation, following the existing precedent at mcp/tools_search.go:269. Unescaped, a repo named `acme/my.library` would match characters it should not.
+
+**Facet params are validated and capped** — at most 50 repo values and 20 extension values, `400` beyond that, and extension values constrained to a conservative character class. An unbounded param list otherwise compiles an arbitrarily large regex on every search.
+
+Extension rather than zoekt `lang:` — extension is derivable from the path with no backend involvement and maps to what "file type" means to a user. Using a `file:`-style regex atom also avoids zoekt's language detection disagreeing with the displayed label.
 
 *Alternative declined — facets rewrite the query string (append-only or reserved-region):* both require an atom-aware query parser and serialiser in the client. Round-tripping arbitrary zoekt syntax — grouped alternations, negations, quoting — back into toggle state is error-prone, and getting it wrong leaves facet chips disagreeing with the results on screen. Dedicated params give one-way data flow (facet state → request) and delete the parser entirely.
 
@@ -119,15 +144,24 @@ The URL scheme cannot express a workspace folder, so a new-window-with-repo-load
 <scheme> <checkoutDir> --goto <absFile>:<line>
 ```
 
-`exec.Command` with an argv slice, never a shell string. `checkoutDir` comes from `s.checkouts[strings.ToLower(repo)]` — the same map `localFile` already uses (api.go:165-175) — never from the request. The client sends a repo/path pair, the server resolves it, and rejects the request if the repo is absent from the checkouts map or if the resolved absolute path escapes the checkout directory.
+`exec.Command` with an argv slice, never a shell string. `checkoutDir` comes from `s.checkouts[strings.ToLower(repo)]` — the same map `localFile` already uses (api.go:165-175) — never from the request. The client sends a repo/path pair and the server resolves it, rejecting the request when:
+
+- the repo is absent from the checkouts map;
+- the resolved path escapes the checkout directory **after `filepath.EvalSymlinks`** on both the checkout dir and the target, so a symlink inside the checkout cannot redirect the launch outside it (containment compared on cleaned, symlink-resolved paths);
+- `line` is not a positive integer.
+
+Argv injection is structurally prevented rather than filtered: `checkoutDir` and the target path are both absolute (leading `/`), so neither can be read as an option flag, and `line` is an integer. No request value ever becomes an argv element on its own.
 
 Deliberately no option surface: no `--new-window`, no configurable flags, no pass-through arguments. Now that the server invokes a CLI, that invocation stays a constant.
 
 **Folder reuse, not forced new window.** Given a bare folder argument, the VS Code/Cursor CLI focuses an existing window already holding that folder and spawns one only if none exists. The stated intent — a window with the repo loaded — is satisfied without accumulating one window per click, which `--new-window` would do.
 
-**Fallback.** The editor CLI is a separately-installed shell command that many users never set up. When it is not on `PATH` the endpoint reports that distinctly and the client falls back to the existing URL-scheme link, with a tooltip explaining the degraded behaviour. Silently doing nothing on click would be inexplicable.
+**Fallback, and only for CLI-not-found.** The editor CLI is a separately-installed shell command that many users never set up. When it is not on `PATH` the endpoint reports that as a distinct condition and the client falls back to the existing URL-scheme link, with a tooltip explaining the degraded behaviour. Silently doing nothing on click would be inexplicable. A CLI that *is* found but fails to exec (editor crash, checkout deleted since the startup scan) is a different case: it returns an error the UI surfaces directly, with no fallback, because the URL scheme would not fix it.
 
-**CSRF is a genuinely new risk and needs its own guard.** The server currently only reads; this endpoint lets an unauthenticated loopback server launch local processes. `hostCheck` (server.go:76-91) does **not** protect it: a form POST from a malicious page to `127.0.0.1:7576` carries an allowed `Host` header. Guard with `Sec-Fetch-Site: same-origin` (browser-set, not forgeable by page script) plus a JSON content-type requirement, which together defeat simple form POSTs.
+**CSRF is a genuinely new risk and needs its own guard.** The server currently only reads; this endpoint lets an unauthenticated loopback server launch local processes. `hostCheck` (server.go:76-91) does **not** protect it: a form POST from a malicious page to `127.0.0.1:7576` carries an allowed `Host` header. Guard with two checks:
+
+1. `Sec-Fetch-Site` must be present **and** equal `same-origin`. Absent is rejected, not allowed — otherwise any client that omits the header (older browsers, non-browser HTTP clients) bypasses the guard entirely. The header is browser-set and not forgeable by page script.
+2. `Content-Type` must be JSON, which blocks simple form POSTs and forces a CORS preflight for cross-origin `fetch`.
 
 ### Repo prominence: stronger and sticky
 
@@ -152,12 +186,16 @@ With the cap gone, a ~260px sidebar costs nothing worth a toggle on a normal dis
 - `internal/web/server.go` — `Server` struct and deps, route table in `Handler` (new `/api/tree`, `/api/open`), `hostCheck` (CSRF context)
 - `internal/web/api.go` — handler patterns, `resolveIndexedCommit`, `validRepoPart`, `localFile`, `trimResult`, `writeJSON`/`writeError`
 - `internal/web/checkouts.go` — `ScanCheckouts`, the lowercased `owner/name` → checkout path map keying the open endpoint
-- `internal/gitfile/gitfile.go` — `ListTree`, `TreeEntry`, the `-r -t` depth-1 fast path
+- `internal/gitfile/gitfile.go` — new `ListDir`; existing `ListTree`/`TreeEntry`/`checkCommit`/`parseTreeEntry`/`relativeDepth` (contract to preserve)
+- `internal/gitfile/gitfile_test.go` — `TestListTreeDepth` (the contract the new function must not disturb)
+- `internal/mcp/tools_file.go` — `list_tree`, the other `ListTree` caller
+- `internal/mcp/tools_search.go` — `regexp.QuoteMeta` alternation precedent (269)
 - `internal/web/static/app.js` — module split source: search render (192-256), file view (258-450), routing (452-484), header chips (486-540)
 - `internal/web/static/index.html` — shell markup for the sidebar
 - `internal/web/static/style.css` — `main` cap (147-150), group headers (152-157), row overflow (213-218), sticky precedent (304), view switching (133-143)
 - `internal/web/static.go` — embedded asset serving (ES module MIME types)
-- `internal/search/types.go` — `Options.RepoFilter` for server-side facet composition
+- `internal/search/types.go` — `Options.RepoFilter`, and the new `FileFilter` for extension facets
+- `internal/search/search.go` — `Search` query composition via `query.NewAnd` (54-64), the pattern facets must follow
 - `internal/config/config.go` — `EditorConfig.Scheme` / `.Roots`
 - `internal/cli/web.go` — server construction and wiring
 - `internal/web/api_test.go`, `server_test.go`, `checkouts_test.go` — existing test patterns
