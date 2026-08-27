@@ -264,13 +264,15 @@ Deliberately no option surface: no `--new-window`, no configurable flags, no pas
 
 | Condition | Status | Client behaviour |
 | --- | --- | --- |
-| Unknown repo, non-positive `line`, malformed body | `400` | Inline error |
+| Non-positive `line`, malformed body | `400` | Inline error |
+| Unknown repo (absent from the scanned checkouts) | `404` | Inline message: no local checkout for this repo |
 | CLI not on `PATH` | `501` | URL-scheme fallback + tooltip |
 | Resolved path contains `:` | `501` | URL-scheme fallback + tooltip |
 | Path escapes the checkout (including via symlink) | `403` | Inline error |
 | File absent from the checkout (checkout on a different commit, or deleted since the startup scan) | `404` | Inline message: file not in local checkout |
 | CLI found but exec failed | `500` | Inline error, no fallback |
 | CSRF guard rejection | `403` | Inline message: reload the page |
+| Success | `204` | No UI change |
 
 The guard itself lives **inside `Handler()`** (server.go:66-74), not in the `Serve` middleware chain where `hostCheck` is applied (server.go:129). Otherwise `httptest` tests that exercise `Handler()` bypass it entirely and the rejection criteria are untestable.
 
