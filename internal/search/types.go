@@ -17,22 +17,22 @@ type Options struct {
 	// MaxResults is the hard cap on returned line matches; 0 means
 	// defaultMaxResults.
 	MaxResults int
-	// PerShardMatchLimit, when non-zero, bounds matches per index shard and
-	// lifts the cross-shard budget instead of capping total matches. Use it
-	// for aggregation, where the returned *set* has to be stable.
+	// Exhaustive lifts every match cap so the search visits every shard and
+	// returns every match. Use it for aggregation, where the returned set and
+	// its counts have to be exact and stable.
 	//
-	// zoekt's TotalMaxMatchCount is a budget shared across shards: the
-	// search stops once it is exhausted, so which shards contributed
-	// depends on which happened to finish first. Two identical searches can
-	// therefore report different repos. A per-shard cap is applied by each
-	// shard independently and never halts the search, so every shard is
-	// always visited and the result is deterministic — and coverage is
-	// broader, since one heavily-matching repo can no longer consume the
-	// whole budget.
-	//
-	// It must stay >= maxSearchLimit so an aggregated count can never fall
-	// below the number of rows a capped search displays for that value.
-	PerShardMatchLimit int
+	// Capping aggregation is not a safe shortcut. zoekt's TotalMaxMatchCount
+	// is a budget shared across shards, so a truncated search returns
+	// whichever shards finished first: two identical searches disagree about
+	// which repos matched. A per-shard cap is deterministic but distorts
+	// counts by shard spread rather than match volume, which inverts the
+	// ranking the facet sidebar sorts by. Only an exhaustive pass is both
+	// stable and correct, so cost is bounded by Deadline instead.
+	Exhaustive bool
+	// Deadline bounds wall time for an Exhaustive search. On expiry zoekt
+	// returns what it has, with Result.Partial set: the results are a subset,
+	// not a wrong answer. Zero means no deadline.
+	Deadline time.Duration
 	// GroupByRepo sorts the returned files by repo name (stable, keeping
 	// zoekt's relevance order within each repo).
 	GroupByRepo bool
@@ -46,6 +46,11 @@ type Result struct {
 	// Truncated reports that more matches exist than were returned
 	// (a display or search limit was hit).
 	Truncated bool
+	// Partial reports that the search did not visit every shard, so the
+	// result is a subset of what exists rather than a complete answer. Set
+	// when an Exhaustive search hits its Deadline. Distinct from Truncated,
+	// which means matches were found and then dropped for display.
+	Partial bool
 	// Stats summarizes the work zoekt did for this search.
 	Stats Stats
 }
@@ -101,9 +106,12 @@ type RepoInfo struct {
 // search displays. Truncated reports that the cap was hit, meaning the value
 // list is not exhaustive.
 type Facets struct {
-	Repos     []FacetValue
-	Exts      []FacetValue
-	Truncated bool
+	Repos []FacetValue
+	Exts  []FacetValue
+	// Partial reports that aggregation hit its deadline, so counts cover
+	// only the shards that were visited. Repos discovered afterwards carry
+	// a zero count.
+	Partial bool
 }
 
 // FacetValue is one facet bucket: a value and how many matching lines carry

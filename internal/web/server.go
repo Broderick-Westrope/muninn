@@ -78,6 +78,7 @@ func New(searcher *search.Searcher, statusPath, mirrorsDir string, checkouts map
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/search", s.handleSearch)
+	mux.HandleFunc("GET /api/facets", s.handleFacets)
 	mux.HandleFunc("GET /api/file", s.handleFile)
 	mux.HandleFunc("GET /api/tree", s.handleTree)
 	mux.HandleFunc("GET /api/repos", s.handleRepos)

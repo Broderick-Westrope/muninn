@@ -9,6 +9,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	// zoekt query atoms take regexps from the grafana fork, not stdlib.
@@ -89,13 +90,14 @@ func (s *Searcher) Search(ctx context.Context, opts Options) (*Result, error) {
 		MaxDocDisplayCount:   maxResults,
 		MaxMatchDisplayCount: maxResults,
 	}
-	if opts.PerShardMatchLimit > 0 {
-		// Per-shard cap instead of a cross-shard budget: deterministic, and
-		// every shard is visited. See Options.PerShardMatchLimit.
-		zOpts.ShardMaxMatchCount = opts.PerShardMatchLimit
+	if opts.Exhaustive {
+		// Every cap lifted, so no shard is skipped and no match is dropped.
+		// See Options.Exhaustive for why a cheaper cap is not correct here.
+		zOpts.ShardMaxMatchCount = math.MaxInt32
 		zOpts.TotalMaxMatchCount = math.MaxInt32
 		zOpts.MaxDocDisplayCount = math.MaxInt32
 		zOpts.MaxMatchDisplayCount = math.MaxInt32
+		zOpts.MaxWallTime = opts.Deadline
 	}
 
 	res, err := s.z.Search(ctx, q, zOpts)
@@ -133,6 +135,11 @@ func (s *Searcher) Search(ctx context.Context, opts Options) (*Result, error) {
 	// through, or when it stopped searching early because a limit was hit.
 	result.Truncated = returnedLines < res.Stats.MatchCount ||
 		res.Stats.FilesSkipped > 0 || res.Stats.ShardsSkipped > 0
+	// Skipped shards mean whole repos went unvisited. zoekt reports this in
+	// Stats rather than as an error — a deadline-expired search returns
+	// partial results with err == nil — so it has to be surfaced explicitly
+	// or the caller cannot tell a subset from a complete answer.
+	result.Partial = res.Stats.ShardsSkipped > 0
 
 	if opts.GroupByRepo {
 		sort.SliceStable(result.Files, func(i, j int) bool {
@@ -187,22 +194,19 @@ func hasSymbolInfo(lm zoekt.LineMatch) bool {
 	return false
 }
 
-// Aggregate runs q with no facet filters and buckets the matches by repo and
-// by file extension. It exists so the facet sidebar stays stable: deriving
-// facet values from a filtered search would make every unselected value
-// disappear on the first click, leaving multi-select unbuildable and a
-// zero-result selection with no chip to undo.
+// Aggregate buckets the matches for q by repo and by file extension, with
+// no facet filters applied. The facet sidebar needs that: derived from a
+// filtered search, every unselected value would vanish on the first click,
+// leaving multi-select unbuildable and a zero-result selection with no chip
+// to undo.
 //
-// perShardLimit bounds the work per index shard. It must not be turned into
-// a total-match cap: that budget is shared across shards, so a truncated
-// aggregation returns whichever repos won the race and the facet list
-// reshuffles between identical searches. See Options.PerShardMatchLimit.
+// The pass is exhaustive, so counts are exact and the value list is stable
+// between identical searches. deadline bounds the cost; on expiry
+// Facets.Partial reports that some shards went unvisited.
 //
-// Counts are line matches, matching what the UI renders as rows. They
-// saturate for a repo with more than perShardLimit matches in one shard,
-// which Facets.Truncated discloses.
-func (s *Searcher) Aggregate(ctx context.Context, q string, perShardLimit int) (*Facets, error) {
-	res, err := s.Search(ctx, Options{Query: q, PerShardMatchLimit: perShardLimit})
+// Counts are line matches, matching what the UI renders as rows.
+func (s *Searcher) Aggregate(ctx context.Context, q string, deadline time.Duration) (*Facets, error) {
+	res, err := s.Search(ctx, Options{Query: q, Exhaustive: true, Deadline: deadline})
 	if err != nil {
 		return nil, err
 	}
@@ -217,11 +221,45 @@ func (s *Searcher) Aggregate(ctx context.Context, q string, perShardLimit int) (
 		repos[f.Repo] += n
 		exts[extOf(f.Path)] += n
 	}
-	return &Facets{
-		Repos:     sortedFacets(repos),
-		Exts:      sortedFacets(exts),
-		Truncated: res.Truncated,
-	}, nil
+
+	facets := &Facets{
+		Repos:   sortedFacets(repos),
+		Exts:    sortedFacets(exts),
+		Partial: res.Partial,
+	}
+	if res.Partial {
+		// A deadline-expired search skipped whole shards, so repos are
+		// missing from the list entirely. List answers "which repos match"
+		// without transporting match content, so it restores the full value
+		// set in a millisecond or two; the repos it adds get no count, which
+		// is honest — their matches were never counted.
+		if err := s.fillMissingRepos(ctx, q, repos, facets); err != nil {
+			return nil, err
+		}
+	}
+	return facets, nil
+}
+
+// fillMissingRepos appends repos that match q but were skipped by a
+// deadline-expired aggregation, with a zero count to mark them uncounted.
+func (s *Searcher) fillMissingRepos(ctx context.Context, q string, counted map[string]int, facets *Facets) error {
+	parsed, err := query.Parse(q)
+	if err != nil {
+		return fmt.Errorf("parsing query %q: %w", q, err)
+	}
+	res, err := s.z.List(ctx, parsed, nil)
+	if err != nil {
+		return fmt.Errorf("listing repos for %q: %w", q, err)
+	}
+	var missing []FacetValue
+	for _, entry := range res.Repos {
+		if _, ok := counted[entry.Repository.Name]; !ok {
+			missing = append(missing, FacetValue{Value: entry.Repository.Name})
+		}
+	}
+	sort.Slice(missing, func(i, j int) bool { return missing[i].Value < missing[j].Value })
+	facets.Repos = append(facets.Repos, missing...)
+	return nil
 }
 
 // extOf returns the lowercased extension of a path's basename, or "" when it

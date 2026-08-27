@@ -716,64 +716,84 @@ func searchPaths(body searchResponse) []string {
 	return out
 }
 
-func TestAPISearchFacets(t *testing.T) {
+func TestAPIFacets(t *testing.T) {
 	srv := newFacetFixture(t)
-	var body searchResponse
-	get(t, srv, `/api/search?q=kiwi`, &body)
+	var body facetsJSON
+	get(t, srv, `/api/facets?q=kiwi`, &body)
 
-	repos := facetCounts(body.Facets.Repos)
+	repos := facetCounts(body.Repos)
 	if repos["acme/widget"] == 0 || repos["acme/my.lib"] == 0 {
-		t.Errorf("repo facets = %+v, want both repos", body.Facets.Repos)
+		t.Errorf("repo facets = %+v, want both repos", body.Repos)
 	}
-	exts := facetCounts(body.Facets.Exts)
+	exts := facetCounts(body.Exts)
 	for _, want := range []string{"go", "ts", ""} {
 		if exts[want] == 0 {
-			t.Errorf("ext facets = %+v, want a bucket for %q", body.Facets.Exts, want)
+			t.Errorf("ext facets = %+v, want a bucket for %q", body.Exts, want)
 		}
+	}
+	if body.Partial {
+		t.Error("partial = true for a fixture that fits inside the deadline")
 	}
 }
 
-// TestAPISearchFacetsIgnoreSelection is the guard against computing facets
-// from the filtered results, which would make every unselected value vanish
-// on the first click. A deliberately tiny limit forces the results pass and
-// the aggregation pass to disagree, so reusing the former would show up.
-func TestAPISearchFacetsIgnoreSelection(t *testing.T) {
+func TestAPIFacetsMissingQuery(t *testing.T) {
 	srv := newFacetFixture(t)
-	var unfiltered, filtered searchResponse
-	get(t, srv, `/api/search?q=kiwi&limit=1`, &unfiltered)
-	get(t, srv, `/api/search?q=kiwi&limit=1&repo=acme/widget`, &filtered)
-
-	before, after := facetCounts(unfiltered.Facets.Repos), facetCounts(filtered.Facets.Repos)
-	if len(after) != len(before) {
-		t.Fatalf("repo facets changed on selection: %+v then %+v", unfiltered.Facets.Repos, filtered.Facets.Repos)
-	}
-	for value, count := range before {
-		if after[value] != count {
-			t.Errorf("facet %q count changed on selection: %d then %d", value, count, after[value])
-		}
-	}
-	// The selection must still have narrowed the results themselves.
-	for _, f := range filtered.Files {
-		if f.Repo != "acme/widget" {
-			t.Errorf("file from %q survived repo=acme/widget", f.Repo)
-		}
+	rec := get(t, srv, `/api/facets`, nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rec.Code)
 	}
 }
 
-func TestAPISearchFacetCountNotBelowRows(t *testing.T) {
+func TestAPIFacetsParseError(t *testing.T) {
 	srv := newFacetFixture(t)
-	var body searchResponse
-	get(t, srv, `/api/search?q=Frobnicate&repo=acme/widget`, &body)
+	rec := get(t, srv, `/api/facets?q=`+url.QueryEscape("repo:["), nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestAPIFacetsIgnoreFacetParams pins that the endpoint ignores a facet
+// selection: the sidebar's value list must not shrink as the user clicks.
+func TestAPIFacetsIgnoreFacetParams(t *testing.T) {
+	srv := newFacetFixture(t)
+	var plain, filtered facetsJSON
+	get(t, srv, `/api/facets?q=kiwi`, &plain)
+	get(t, srv, `/api/facets?q=kiwi&repo=`+url.QueryEscape("acme/widget")+`&ext=go`, &filtered)
+
+	if len(plain.Repos) != len(filtered.Repos) || len(plain.Exts) != len(filtered.Exts) {
+		t.Errorf("facets changed with facet params: %+v then %+v", plain, filtered)
+	}
+}
+
+// TestAPISearchOmitsFacets pins the split: aggregation is exhaustive and
+// therefore far slower than the capped results pass, so it must not ride
+// along on every keystroke's search.
+func TestAPISearchOmitsFacets(t *testing.T) {
+	srv := newFacetFixture(t)
+	rec := get(t, srv, `/api/search?q=kiwi`, nil)
+	if body := rec.Body.String(); strings.Contains(body, `"facets"`) {
+		t.Errorf("search response still carries a facets block: %s", body)
+	}
+}
+
+// TestAPIFacetCountNotBelowRows pins that an exact aggregated count is never
+// lower than the rows a capped search displays for that value.
+func TestAPIFacetCountNotBelowRows(t *testing.T) {
+	srv := newFacetFixture(t)
+	var results searchResponse
+	var facets facetsJSON
+	get(t, srv, `/api/search?q=Frobnicate&repo=`+url.QueryEscape("acme/widget"), &results)
+	get(t, srv, `/api/facets?q=Frobnicate`, &facets)
 
 	rows := 0
-	for _, f := range body.Files {
+	for _, f := range results.Files {
 		if n := len(f.Lines); n > 0 {
 			rows += n
 		} else {
 			rows++
 		}
 	}
-	if got := facetCounts(body.Facets.Repos)["acme/widget"]; got < rows {
+	if got := facetCounts(facets.Repos)["acme/widget"]; got < rows {
 		t.Errorf("facet count %d is below the %d rows displayed for it", got, rows)
 	}
 }

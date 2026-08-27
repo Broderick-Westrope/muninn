@@ -1,5 +1,8 @@
 'use strict';
 
+import { api } from './api.js';
+import { errorBox, note } from './dom.js';
+
 // Facet state lives in its own URL params, never in ?q= — the search input
 // is never rewritten behind the user's back, and a hand-typed repo: atom
 // composes with a facet selection instead of fighting it.
@@ -11,6 +14,19 @@
 let facetsEl = null;
 let onToggle = () => {};
 
+// The facet universe, kept across loads so the panel never blanks while a
+// slower aggregation is in flight, and the query it was loaded for.
+let universe = null;
+let universeQuery = null;
+let facetCtl = null; // AbortController for the in-flight aggregation
+let facetTimer = 0;
+let loading = false;
+
+// Aggregation is exhaustive, so it costs far more than the capped results
+// search for a broad query. Its own longer debounce keeps typing free of it,
+// and each keystroke aborts the last request rather than queueing work.
+const FACET_DEBOUNCE_MS = 400;
+
 const selected = { repo: new Set(), ext: new Set() };
 
 // NO_EXT is the sentinel for files with no extension. The server reads an
@@ -21,6 +37,51 @@ export function initFacets(opts) {
   facetsEl = opts.facetsEl;
   onToggle = opts.onToggle;
   readFacetsFromURL();
+}
+
+// loadFacets fetches the universe for a query on its own debounce. Results
+// never wait on this: the caller fires it alongside a search and moves on.
+export function loadFacets(q, immediate) {
+  clearTimeout(facetTimer);
+  if (!q) {
+    if (facetCtl) facetCtl.abort();
+    universe = null;
+    universeQuery = null;
+    loading = false;
+    render();
+    return;
+  }
+  // The universe depends only on the query, so a facet toggle re-renders
+  // from what is already loaded. Refetching would re-run the whole
+  // aggregation — seconds, for a broad query — to produce identical data.
+  if (q === universeQuery) {
+    render();
+    return;
+  }
+  if (facetCtl) facetCtl.abort();
+  const go = async () => {
+    facetCtl = new AbortController();
+    loading = true;
+    render(); // keeps the previous values on screen, dimmed
+    let data;
+    try {
+      data = await api(`/api/facets?q=${encodeURIComponent(q)}`, facetCtl.signal);
+    } catch (e) {
+      if (e.name === 'AbortError') return; // superseded; the next load renders
+      loading = false;
+      universe = null;
+      universeQuery = null;
+      render(e.message);
+      return;
+    }
+    loading = false;
+    universe = data;
+    universeQuery = q;
+    render();
+  };
+  // A facet toggle re-runs the same query, so there is nothing to wait for.
+  if (immediate) go();
+  else facetTimer = setTimeout(go, FACET_DEBOUNCE_MS);
 }
 
 export function readFacetsFromURL() {
@@ -59,6 +120,10 @@ function toggle(kind, value) {
   if (selected[kind].has(value)) selected[kind].delete(value);
   else selected[kind].add(value);
   syncURL();
+  // Re-render at once so the chip responds to the click without waiting for
+  // the search to come back. The universe does not depend on the selection,
+  // so it needs no refetch.
+  render();
   // A click, not typing, so re-search immediately rather than waiting out
   // the input debounce.
   onToggle();
@@ -74,18 +139,23 @@ export function clearFacets() {
   selected.repo.clear();
   selected.ext.clear();
   syncURL();
+  render();
   onToggle();
 }
 
-// renderFacets draws the panel from the server's facet universe, which is
-// aggregated without the facet filters applied. Selected values are unioned
-// in, so a value that the universe does not contain (a shared URL naming a
-// repo the query does not match) still renders a chip that can be clicked
-// to remove it.
-export function renderFacets(facets) {
+// render draws the panel from the last loaded universe. Selected values are
+// unioned in, so a value the universe does not contain (a shared URL naming
+// a repo the query does not match) still gets a chip that can be clicked to
+// remove it.
+function render(errMsg) {
   if (!facetsEl) return;
-  if (!facets) {
-    facetsEl.replaceChildren();
+  if (errMsg) {
+    facetsEl.replaceChildren(errorBox(errMsg));
+    return;
+  }
+  if (!universe) {
+    // Nothing loaded yet: show a placeholder only while actually waiting.
+    facetsEl.replaceChildren(loading ? note('Loading filters…') : document.createDocumentFragment());
     return;
   }
   const frag = document.createDocumentFragment();
@@ -93,16 +163,19 @@ export function renderFacets(facets) {
   // a permanently dead control.
   if (activeCount() > 0) frag.append(clearBar());
   frag.append(
-    group('Repository', 'repo', facets.repos),
-    group('File type', 'ext', facets.exts),
+    group('Repository', 'repo', universe.repos),
+    group('File type', 'ext', universe.exts),
   );
-  if (facets.truncated) {
-    const note = document.createElement('p');
-    note.className = 'facet-note';
-    note.textContent = 'Some values may be missing — too many matches to scan.';
-    frag.append(note);
+  if (universe.partial) {
+    const p = document.createElement('p');
+    p.className = 'facet-note';
+    p.textContent = 'Too many matches to count them all — some counts are missing.';
+    frag.append(p);
   }
   facetsEl.replaceChildren(frag);
+  // Dim rather than blank while refreshing: the old values stay readable and
+  // clickable, so the panel does not flicker on every keystroke.
+  facetsEl.classList.toggle('loading', loading);
 }
 
 // clearBar reports how many filters are active and clears them all. Undoing
@@ -170,3 +243,4 @@ function chip(kind, value, count) {
   b.addEventListener('click', () => toggle(kind, value));
   return b;
 }
+

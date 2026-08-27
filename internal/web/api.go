@@ -35,13 +35,12 @@ const (
 	// becomes a branch of a regex alternation compiled on each search.
 	maxFacetRepos = 50
 	maxFacetExts  = 20
-	// facetShardLimit bounds the facet aggregation pass per index shard
-	// rather than in total. A total cap is a budget shared across shards, so
-	// a truncated aggregation reports whichever repos finished first and the
-	// facet list visibly reshuffles between identical searches. Kept at
-	// maxSearchLimit or above so an aggregated count can never fall below
-	// the rows displayed for that value.
-	facetShardLimit = 500
+	// facetDeadline bounds the exhaustive facet aggregation. Every match cap
+	// is unsafe there (see search.Options.Exhaustive), so wall time is the
+	// backstop instead: it keeps one pathological query — a single letter
+	// against every repo — from pinning a core, while every realistic query
+	// completes well inside it and gets exact counts.
+	facetDeadline = 1500 * time.Millisecond
 )
 
 // searchResponse is the JSON shape of /api/search.
@@ -49,17 +48,17 @@ type searchResponse struct {
 	Files     []fileMatchesJSON `json:"files"`
 	Truncated bool              `json:"truncated"`
 	Stats     statsJSON         `json:"stats"`
-	Facets    facetsJSON        `json:"facets"`
 }
 
-// facetsJSON is the sidebar's facet universe: repo and extension buckets
-// aggregated from the query with no facet filters applied.
+// facetsJSON is the JSON shape of /api/facets: the repo and extension
+// buckets for a query, with no facet filters applied.
 type facetsJSON struct {
 	Repos []facetValueJSON `json:"repos"`
 	Exts  []facetValueJSON `json:"exts"`
-	// Truncated reports that the aggregation cap was hit, so the value
-	// list is not exhaustive. Distinct from the results-level Truncated.
-	Truncated bool `json:"truncated"`
+	// Partial reports that aggregation hit its deadline, so counts cover
+	// only the shards visited and some values carry a zero count. Distinct
+	// from the results-level truncation flag.
+	Partial bool `json:"partial"`
 }
 
 // facetValueJSON is one facet bucket. Value is "" in Exts for files with no
@@ -130,10 +129,10 @@ type treeEntryJSON struct {
 // show them inline; the query is the only free-form input, so failures are
 // user-attributable.
 //
-// The repo and ext facet params filter the results but deliberately do not
-// touch the facet block, which is aggregated from the same query with no
-// facet filters. Deriving facet values from the filtered results would make
-// every unselected value vanish on the first click.
+// Facets live on their own endpoint rather than here. Aggregation is
+// exhaustive so its counts are exact, which for a very broad query costs
+// far more than the capped results pass; sharing a request would make every
+// keystroke wait on work the results do not need.
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query().Get("q")
 	if q == "" {
@@ -177,20 +176,30 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Always a separate pass, never reusing res: it runs at a lower cap, so
-	// counts taken from it would change the moment a facet is selected —
-	// exactly the instability this design exists to avoid.
-	facets, err := s.searcher.Aggregate(r.Context(), q, facetShardLimit)
-	if err != nil {
-		// The query already parsed for the results pass, so a failure here
-		// is a server fault rather than bad input.
-		writeError(w, http.StatusInternalServerError, err.Error())
+	writeJSON(w, http.StatusOK, trimResult(res, limit))
+}
+
+// handleFacets serves GET /api/facets?q=<query>: the repo and extension
+// buckets for a query, with no facet filters applied.
+//
+// Ignoring the caller's own facet selection is the point. Aggregated from
+// the filtered results instead, every unselected value would disappear on
+// the first click — multi-select would be unbuildable by clicking, and a
+// zero-result combination would strand the selection with no chip to undo.
+func (s *Server) handleFacets(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query().Get("q")
+	if q == "" {
+		writeError(w, http.StatusBadRequest, "missing query parameter q")
 		return
 	}
-
-	out := trimResult(res, limit)
-	out.Facets = toFacetsJSON(facets)
-	writeJSON(w, http.StatusOK, out)
+	facets, err := s.searcher.Aggregate(r.Context(), q, facetDeadline)
+	if err != nil {
+		// Same parser, same input as /api/search, so a parse failure is
+		// user-attributable here too.
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, toFacetsJSON(facets))
 }
 
 // parseFacetParam splits a comma-separated facet param into its values,
@@ -265,9 +274,9 @@ func facetExtFilter(exts []string) string {
 // toFacetsJSON maps aggregated facets to the response shape.
 func toFacetsJSON(f *search.Facets) facetsJSON {
 	out := facetsJSON{
-		Repos:     make([]facetValueJSON, 0, len(f.Repos)),
-		Exts:      make([]facetValueJSON, 0, len(f.Exts)),
-		Truncated: f.Truncated,
+		Repos:   make([]facetValueJSON, 0, len(f.Repos)),
+		Exts:    make([]facetValueJSON, 0, len(f.Exts)),
+		Partial: f.Partial,
 	}
 	for _, v := range f.Repos {
 		out.Repos = append(out.Repos, facetValueJSON{Value: v.Value, Count: v.Count})

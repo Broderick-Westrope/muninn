@@ -604,6 +604,13 @@ footer {
 
 /* ---- facets ------------------------------------------------------------ */
 
+/* Dimmed while a slower aggregation is in flight: the previous values stay
+   readable and clickable instead of the panel blanking on each keystroke. */
+#sidebar-facets.loading {
+  opacity: 0.5;
+  transition: opacity 0.15s;
+}
+
 .facet-clear-bar {
   display: flex;
   gap: 8px;

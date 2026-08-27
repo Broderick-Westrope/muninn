@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/broderick-westrope/muninn/internal/ctags"
 	"github.com/broderick-westrope/muninn/internal/index"
@@ -401,7 +402,7 @@ func TestSearchFileFilterNoExtension(t *testing.T) {
 func TestAggregateIgnoresFilters(t *testing.T) {
 	s := openMultiRepoSearcher(t)
 
-	facets, err := s.Aggregate(context.Background(), "kiwi", 1000)
+	facets, err := s.Aggregate(context.Background(), "kiwi", 0)
 	if err != nil {
 		t.Fatalf("Aggregate: %v", err)
 	}
@@ -429,7 +430,7 @@ func TestAggregateCountsLines(t *testing.T) {
 
 	// Frobnicate is on four lines of widget.go: the doc comment, the
 	// definition, and two calls. Counting files would report 1.
-	facets, err := s.Aggregate(context.Background(), "Frobnicate", 1000)
+	facets, err := s.Aggregate(context.Background(), "Frobnicate", 0)
 	if err != nil {
 		t.Fatalf("Aggregate: %v", err)
 	}
@@ -453,7 +454,7 @@ func TestAggregateIsDeterministic(t *testing.T) {
 
 	var first string
 	for i := 0; i < 8; i++ {
-		facets, err := s.Aggregate(context.Background(), "kiwi", 500)
+		facets, err := s.Aggregate(context.Background(), "kiwi", 0)
 		if err != nil {
 			t.Fatalf("Aggregate: %v", err)
 		}
@@ -474,39 +475,69 @@ func TestAggregateIsDeterministic(t *testing.T) {
 	}
 }
 
-// TestAggregateVisitsEverySaturatedShard pins that a per-shard cap low
-// enough to saturate does not drop repos: every shard is still visited, so
-// the value list stays complete. A cross-shard budget this small would
-// return only whichever repo won the race.
-func TestAggregateVisitsEverySaturatedShard(t *testing.T) {
-	s := openMultiRepoSearcher(t)
+// TestAggregateIsExhaustive pins that aggregation counts every match rather
+// than stopping at a cap. A capped pass distorts counts by shard spread
+// instead of match volume, which inverts the ranking the facet sidebar
+// sorts by.
+func TestAggregateIsExhaustive(t *testing.T) {
+	s, _ := openSearcher(t, "")
 
-	for i := 0; i < 8; i++ {
-		facets, err := s.Aggregate(context.Background(), "kiwi", 1)
-		if err != nil {
-			t.Fatalf("Aggregate: %v", err)
-		}
-		got := map[string]bool{}
-		for _, v := range facets.Repos {
-			got[v.Value] = true
-		}
-		if !got["acme/widget"] || !got["acme/my.lib"] {
-			t.Fatalf("run %d: repos = %+v, want both repos even with a saturating cap", i, facets.Repos)
-		}
+	facets, err := s.Aggregate(context.Background(), "kiwi", 0)
+	if err != nil {
+		t.Fatalf("Aggregate: %v", err)
+	}
+	if facets.Partial {
+		t.Error("Partial = true for a fixture that fits well inside any deadline")
+	}
+	// kiwi appears once in each of other.go, other.ts, and Makefile.
+	total := 0
+	for _, v := range facets.Exts {
+		total += v.Count
+	}
+	if total != 3 {
+		t.Errorf("total ext counts = %d, want 3 (one per fixture file)", total)
 	}
 }
 
-// TestSearchPerShardLimitLiftsTotalBudget pins that a per-shard limit does
-// not also cap total matches: a cap of 1 must not reduce the whole search to
-// a single match.
-func TestSearchPerShardLimitLiftsTotalBudget(t *testing.T) {
+// TestAggregateDeadlineReportsPartial pins that an expired deadline is
+// disclosed rather than silently returning a subset. zoekt returns partial
+// results with err == nil when MaxWallTime expires, so Partial has to be
+// derived from skipped-shard stats or the caller cannot tell.
+func TestAggregateDeadlineReportsPartial(t *testing.T) {
 	s := openMultiRepoSearcher(t)
 
-	res, err := s.Search(context.Background(), Options{Query: "kiwi", PerShardMatchLimit: 1})
+	// A deadline this small cannot complete, but must not error.
+	facets, err := s.Aggregate(context.Background(), "kiwi", time.Nanosecond)
+	if err != nil {
+		t.Fatalf("Aggregate with an expired deadline: %v", err)
+	}
+	if !facets.Partial {
+		t.Skip("fixture completed inside a 1ns deadline; nothing to assert")
+	}
+	// Even when counting is cut short, the repo value list stays complete:
+	// List backfills the repos whose shards went unvisited.
+	got := map[string]bool{}
+	for _, v := range facets.Repos {
+		got[v.Value] = true
+	}
+	if !got["acme/widget"] || !got["acme/my.lib"] {
+		t.Errorf("repos = %+v, want both repos even when partial", facets.Repos)
+	}
+}
+
+// TestSearchExhaustiveLiftsCaps pins that Exhaustive returns every match
+// rather than stopping at the default display limit.
+func TestSearchExhaustiveLiftsCaps(t *testing.T) {
+	s := openMultiRepoSearcher(t)
+
+	res, err := s.Search(context.Background(), Options{Query: "kiwi", Exhaustive: true})
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
 	if len(res.Files) < 2 {
 		t.Errorf("files = %d, want matches from more than one shard", len(res.Files))
+	}
+	if res.Truncated || res.Partial {
+		t.Errorf("truncated = %v, partial = %v; want a complete result", res.Truncated, res.Partial)
 	}
 }

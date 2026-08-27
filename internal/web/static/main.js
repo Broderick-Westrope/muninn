@@ -1,7 +1,7 @@
 'use strict';
 
 import { $, note } from './dom.js';
-import { clearFacets, facetParams, initFacets, renderFacets } from './facets.js';
+import { clearFacets, facetParams, initFacets, loadFacets } from './facets.js';
 import {
   getCurrentFile,
   initFile,
@@ -70,7 +70,15 @@ function route() {
 
 // search takes facet params as an argument, so search.js never imports
 // facets.js and facets.js never imports search.js.
-const search = (fromUser) => runSearch(searchInput.value.trim(), fromUser, facetParams());
+//
+// Results and facets are fired independently and never await each other:
+// aggregation is exhaustive and can take far longer than the capped results
+// pass, so coupling them would make every keystroke wait on it.
+function search(fromUser, facetsImmediate) {
+  const q = searchInput.value.trim();
+  runSearch(q, fromUser, facetParams());
+  loadFacets(q, facetsImmediate);
+}
 
 searchInput.addEventListener('input', () => {
   clearTimeout(debounceTimer);
@@ -108,12 +116,13 @@ document.addEventListener('keydown', (e) => {
 // ---------------------------------------------------------------------------
 // Init
 
-initSearch({ resultsEl, statsEl, onFacets: renderFacets });
+initSearch({ resultsEl, statsEl });
 initFile(fileEl);
 initTree(treeEl);
 // A facet toggle re-searches immediately: it is a click, not typing, so it
-// must not wait out the input debounce.
-initFacets({ facetsEl, onToggle: () => search(false) });
+// must not wait out the input debounce. The universe does not depend on the
+// selection, so its refetch is immediate and cheap (same query).
+initFacets({ facetsEl, onToggle: () => search(false, true) });
 initHints(hintsEl, searchInput);
 
 const initialQ = new URLSearchParams(location.search).get('q') || '';
@@ -121,7 +130,11 @@ searchInput.value = initialQ;
 loadRepos(repoBadge);
 // initFacets has already read the URL, so a reloaded filtered link searches
 // with its facets applied rather than briefly showing everything.
-if (initialQ) runSearch(initialQ, false, facetParams());
-else resultsEl.replaceChildren(note('Type to search across all indexed repos.'));
+if (initialQ) {
+  runSearch(initialQ, false, facetParams());
+  loadFacets(initialQ, true);
+} else {
+  resultsEl.replaceChildren(note('Type to search across all indexed repos.'));
+}
 route();
 window.addEventListener('hashchange', route);
