@@ -1,7 +1,7 @@
 'use strict';
 
 import { $, note } from './dom.js';
-import { facetParams, initFacets, renderFacets } from './facets.js';
+import { clearFacets, facetParams, initFacets, renderFacets } from './facets.js';
 import {
   getCurrentFile,
   initFile,
@@ -94,6 +94,14 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
     searchInput.focus();
     searchInput.select();
+  } else if (e.key === 'Backspace' && e.shiftKey) {
+    // Shift-modified so it still works with the search input focused,
+    // where a bare Backspace has to keep editing the query. Esc is already
+    // taken by the file view, and clearing filters from there would act on
+    // a sidebar the user cannot see.
+    if (document.body.dataset.view !== 'results') return;
+    e.preventDefault();
+    clearFacets();
   }
 });
 

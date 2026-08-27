@@ -64,6 +64,19 @@ function toggle(kind, value) {
   onToggle();
 }
 
+// activeCount is how many facet values are selected across all categories.
+const activeCount = () => selected.repo.size + selected.ext.size;
+
+// clearFacets drops every selection at once. Exported so a keyboard
+// shortcut can reach it without going through the button.
+export function clearFacets() {
+  if (activeCount() === 0) return;
+  selected.repo.clear();
+  selected.ext.clear();
+  syncURL();
+  onToggle();
+}
+
 // renderFacets draws the panel from the server's facet universe, which is
 // aggregated without the facet filters applied. Selected values are unioned
 // in, so a value that the universe does not contain (a shared URL naming a
@@ -76,6 +89,9 @@ export function renderFacets(facets) {
     return;
   }
   const frag = document.createDocumentFragment();
+  // Only shown when something is selected: with nothing active it would be
+  // a permanently dead control.
+  if (activeCount() > 0) frag.append(clearBar());
   frag.append(
     group('Repository', 'repo', facets.repos),
     group('File type', 'ext', facets.exts),
@@ -87,6 +103,26 @@ export function renderFacets(facets) {
     frag.append(note);
   }
   facetsEl.replaceChildren(frag);
+}
+
+// clearBar reports how many filters are active and clears them all. Undoing
+// a multi-category selection chip by chip re-runs a search per click, and
+// with the sidebar hidden below the mobile breakpoint the only other way out
+// is editing the URL.
+function clearBar() {
+  const bar = document.createElement('div');
+  bar.className = 'facet-clear-bar';
+  const n = activeCount();
+  const count = document.createElement('span');
+  count.textContent = `${n} ${n === 1 ? 'filter' : 'filters'}`;
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'facet-clear';
+  b.textContent = 'Clear';
+  b.title = 'Clear all filters (Shift+Backspace)';
+  b.addEventListener('click', clearFacets);
+  bar.append(count, b);
+  return bar;
 }
 
 function group(title, kind, values) {

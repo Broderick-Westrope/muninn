@@ -604,6 +604,33 @@ footer {
 
 /* ---- facets ------------------------------------------------------------ */
 
+.facet-clear-bar {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  font-size: 11px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+}
+
+.facet-clear {
+  margin-left: auto;
+  padding: 1px 7px;
+  font: 11px var(--mono);
+  color: var(--accent);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.facet-clear:hover,
+.facet-clear:focus-visible {
+  border-color: var(--accent);
+}
+
 .facet-group {
   margin-bottom: 14px;
 }
