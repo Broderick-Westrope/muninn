@@ -192,6 +192,98 @@ main {
   }
 }
 
+/* ---- file tree --------------------------------------------------------- */
+
+.tree-head {
+  padding: 4px 0 6px;
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree-list {
+  margin: 0;
+  padding: 0 0 0 10px;
+  list-style: none;
+}
+
+/* The root list aligns with the header rather than indenting. */
+#sidebar-tree > .tree-list {
+  padding-left: 0;
+}
+
+.tree-dir,
+.tree-file {
+  display: block;
+  width: 100%;
+  padding: 1px 4px;
+  overflow: hidden;
+  font: 12px var(--mono);
+  color: var(--fg);
+  text-align: left;
+  text-decoration: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: none;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.tree-dir::before {
+  display: inline-block;
+  width: 12px;
+  color: var(--muted);
+  content: "\203A"; /* rotates to point down when open */
+  transition: transform 0.1s;
+}
+
+.tree-dir.open::before {
+  transform: rotate(90deg);
+}
+
+/* Files sit where a directory's disclosure marker would be. */
+.tree-file {
+  padding-left: 16px;
+}
+
+.tree-dir:hover,
+.tree-file:hover,
+.tree-dir:focus-visible,
+.tree-file:focus-visible {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.tree-file.current {
+  font-weight: 600;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.tree-loading,
+.tree-trunc {
+  padding: 1px 4px 1px 16px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.tree-error {
+  padding: 2px 0;
+  font-size: 11px;
+}
+
+.tree-retry {
+  margin-top: 2px;
+  padding: 1px 7px;
+  font: 11px var(--mono);
+  color: var(--accent);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
 /* ---- results ----------------------------------------------------------- */
 
 .repo-group h2 {

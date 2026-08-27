@@ -81,6 +81,19 @@ type repoJSON struct {
 	Stale       bool   `json:"stale"`
 }
 
+// treeResponse is the JSON shape of /api/tree.
+type treeResponse struct {
+	Entries   []treeEntryJSON `json:"entries"`
+	Truncated bool            `json:"truncated"`
+}
+
+// treeEntryJSON is one child of a listed directory.
+type treeEntryJSON struct {
+	Path string `json:"path"` // repo-relative
+	Type string `json:"type"` // "file" or "dir"
+	Size int64  `json:"size"` // 0 for directories
+}
+
 // handleSearch serves GET /api/search?q=<query>&limit=<n>. Search errors
 // are reported as 400 with the parser message so the UI can show them
 // inline; the query is the only input, so failures are user-attributable.
@@ -172,6 +185,61 @@ func (s *Server) localFile(repo, filePath string) (localPath, scheme string) {
 		return "", ""
 	}
 	return abs, s.editorScheme
+}
+
+// handleTree serves GET /api/tree?repo=<owner/name>&path=<dir>, listing one
+// directory's immediate children pinned to the repo's indexed commit.
+func (s *Server) handleTree(w http.ResponseWriter, r *http.Request) {
+	repo := r.URL.Query().Get("repo")
+	dir := r.URL.Query().Get("path") // "" lists the repo root
+	if !validTreePath(dir) {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid path %q", dir))
+		return
+	}
+	mirrorDir, commit, herr := s.resolveIndexedCommit(repo)
+	if herr != nil {
+		writeError(w, herr.code, herr.msg)
+		return
+	}
+
+	entries, total, err := gitfile.ListDir(r.Context(), mirrorDir, commit, dir, s.maxTreeEntries)
+	switch {
+	case errors.Is(err, gitfile.ErrNotDir):
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	case errors.Is(err, fs.ErrNotExist):
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	case errors.Is(err, gitfile.ErrIndexMismatch):
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	out := treeResponse{Entries: make([]treeEntryJSON, 0, len(entries))}
+	for _, e := range entries {
+		out.Entries = append(out.Entries, treeEntryJSON{Path: e.Path, Type: e.Type, Size: e.Size})
+	}
+	out.Truncated = total > len(entries)
+	writeJSON(w, http.StatusOK, out)
+}
+
+// validTreePath rejects tree paths reaching a dot segment or git pathspec
+// magic, which stays active even after "--". This is not a filesystem escape
+// (the path addresses a tree object, not disk), but ".." deserves a 400
+// rather than a git error surfacing as a 500.
+func validTreePath(p string) bool {
+	if strings.HasPrefix(p, ":") {
+		return false
+	}
+	for _, seg := range strings.Split(p, "/") {
+		if seg == "." || seg == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 // handleRepos serves GET /api/repos: every indexed repo with its branch,

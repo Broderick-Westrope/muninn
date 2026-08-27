@@ -14,6 +14,7 @@ import { initHints } from './query.js';
 import { loadRepos } from './repos.js';
 import { parseFileHash } from './routes.js';
 import { initSearch, runSearch } from './search.js';
+import { initTree, showTree } from './tree.js';
 
 const searchInput = $('#q');
 const hintsEl = $('#hints');
@@ -21,6 +22,7 @@ const resultsEl = $('#results');
 const fileEl = $('#file');
 const statsEl = $('#stats');
 const repoBadge = $('#repo-badge');
+const treeEl = $('#sidebar-tree');
 
 const DEBOUNCE_MS = 200;
 
@@ -45,12 +47,14 @@ function route() {
         setCurrentFile(loc);
         if (loc.line) targetLine(loc.line, true);
         refreshFileActions();
+        showTree(loc);
         return;
       }
       if (document.body.dataset.view === 'results') savedScroll = window.scrollY;
       setCurrentFile(loc);
       document.body.dataset.view = 'file';
       showFile(loc);
+      showTree(loc);
       return;
     }
   }
@@ -92,6 +96,7 @@ document.addEventListener('keydown', (e) => {
 
 initSearch({ resultsEl, statsEl });
 initFile(fileEl);
+initTree(treeEl);
 initHints(hintsEl, searchInput);
 
 const initialQ = new URLSearchParams(location.search).get('q') || '';

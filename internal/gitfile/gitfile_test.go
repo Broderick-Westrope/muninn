@@ -277,3 +277,88 @@ func TestListTreeIndexMismatch(t *testing.T) {
 		t.Fatalf("err = %v, want ErrIndexMismatch", err)
 	}
 }
+
+func TestListDirRoot(t *testing.T) {
+	mirror, commit1, _ := fixtureMirror(t)
+
+	entries, total, err := ListDir(context.Background(), mirror, commit1, "", 0)
+	if err != nil {
+		t.Fatalf("ListDir of root: %v", err)
+	}
+	got := entriesByPath(entries)
+	if len(got) != 3 || total != 3 {
+		t.Fatalf("root entries = %+v (total %d), want a, file.txt, top.txt", entries, total)
+	}
+	if e := got["a"]; e.Type != "dir" {
+		t.Errorf("a = %+v, want dir", e)
+	}
+	if e := got["file.txt"]; e.Type != "file" {
+		t.Errorf("file.txt = %+v, want file", e)
+	}
+	// Non-recursive: nothing below the listed directory.
+	if _, ok := got["a/d.txt"]; ok {
+		t.Error("a/d.txt listed from root, want excluded")
+	}
+}
+
+func TestListDirSubdir(t *testing.T) {
+	mirror, commit1, _ := fixtureMirror(t)
+
+	entries, _, err := ListDir(context.Background(), mirror, commit1, "a", 0)
+	if err != nil {
+		t.Fatalf("ListDir of a: %v", err)
+	}
+	got := entriesByPath(entries)
+	// Contrast with ListTree, which includes the anchor: 2 entries, not 3.
+	if len(got) != 2 {
+		t.Fatalf("entries under a = %+v, want a/b and a/d.txt only", entries)
+	}
+	if _, ok := got["a"]; ok {
+		t.Error("anchor entry a listed, want excluded")
+	}
+	if e := got["a/b"]; e.Type != "dir" {
+		t.Errorf("a/b = %+v, want dir", e)
+	}
+	if _, ok := got["a/b/c.txt"]; ok {
+		t.Error("a/b/c.txt listed, want excluded (non-recursive)")
+	}
+}
+
+func TestListDirNotFound(t *testing.T) {
+	mirror, commit1, _ := fixtureMirror(t)
+
+	_, _, err := ListDir(context.Background(), mirror, commit1, "nope", 0)
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("ListDir of missing path: err = %v, want fs.ErrNotExist", err)
+	}
+}
+
+func TestListDirNotDir(t *testing.T) {
+	mirror, commit1, _ := fixtureMirror(t)
+
+	_, _, err := ListDir(context.Background(), mirror, commit1, "file.txt", 0)
+	if !errors.Is(err, ErrNotDir) {
+		t.Errorf("ListDir of a file: err = %v, want ErrNotDir", err)
+	}
+}
+
+func TestListDirMaxEntries(t *testing.T) {
+	mirror, commit1, _ := fixtureMirror(t)
+
+	entries, total, err := ListDir(context.Background(), mirror, commit1, "", 2)
+	if err != nil {
+		t.Fatalf("ListDir with cap: %v", err)
+	}
+	if len(entries) != 2 || total != 3 {
+		t.Errorf("entries = %d, total = %d; want 2 and 3", len(entries), total)
+	}
+}
+
+func TestListDirIndexMismatch(t *testing.T) {
+	mirror, _, _ := fixtureMirror(t)
+
+	_, _, err := ListDir(context.Background(), mirror, "0000000000000000000000000000000000000000", "", 0)
+	if !errors.Is(err, ErrIndexMismatch) {
+		t.Errorf("ListDir at unreachable commit: err = %v, want ErrIndexMismatch", err)
+	}
+}

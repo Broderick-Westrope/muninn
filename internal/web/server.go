@@ -25,6 +25,8 @@ const (
 	// readHeaderTimeout bounds how long a client may dribble request
 	// headers before the connection is dropped (slowloris guard).
 	readHeaderTimeout = 5 * time.Second
+	// defaultMaxTreeEntries caps one directory listing served by /api/tree.
+	defaultMaxTreeEntries = 2000
 )
 
 // Server holds the dependencies of the HTTP handlers. Handlers are plain
@@ -44,6 +46,11 @@ type Server struct {
 	// editorScheme is the URL scheme for open-in-editor links ("cursor"
 	// or "vscode").
 	editorScheme string
+	// maxTreeEntries caps one /api/tree listing, bounding the payload and
+	// the DOM for a pathological generated directory. A field rather than
+	// a const so tests can reach the truncation path without a fixture of
+	// thousands of files.
+	maxTreeEntries int
 }
 
 // New returns a Server that searches with searcher, resolves indexed
@@ -53,11 +60,12 @@ type Server struct {
 // open-in-editor links with editorScheme.
 func New(searcher *search.Searcher, statusPath, mirrorsDir string, checkouts map[string]string, editorScheme string) *Server {
 	return &Server{
-		searcher:     searcher,
-		statusPath:   statusPath,
-		mirrorsDir:   mirrorsDir,
-		checkouts:    checkouts,
-		editorScheme: editorScheme,
+		searcher:       searcher,
+		statusPath:     statusPath,
+		mirrorsDir:     mirrorsDir,
+		checkouts:      checkouts,
+		editorScheme:   editorScheme,
+		maxTreeEntries: defaultMaxTreeEntries,
 	}
 }
 
@@ -67,6 +75,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/search", s.handleSearch)
 	mux.HandleFunc("GET /api/file", s.handleFile)
+	mux.HandleFunc("GET /api/tree", s.handleTree)
 	mux.HandleFunc("GET /api/repos", s.handleRepos)
 	mux.HandleFunc("GET /chroma.css", s.handleChromaCSS)
 	mux.Handle("GET /", staticHandler())

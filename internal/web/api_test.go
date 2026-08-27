@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -31,6 +32,14 @@ func callerTwo() int { return Frobnicate() }
 const otherGo = `package widget
 
 const banana = "yellow"
+`
+
+// subGo lives in a subdirectory so tree listings have a dir entry to
+// return. Its contents are distinct from the other fixture files so search
+// assertions stay unambiguous.
+const subGo = `package sub
+
+const kiwi = "green"
 `
 
 // binaryContent contains NUL bytes so the file API's binary guard trips.
@@ -68,9 +77,15 @@ func newFixture(t *testing.T) (*Server, string) {
 		"other.go":  otherGo,
 		"data.bin":  binaryContent,
 		"big.txt":   hugeText,
+		// A subdirectory so tree listings can exercise dir entries.
+		"pkg/sub.go": subGo,
 	}
 	for name, content := range files {
-		if err := os.WriteFile(filepath.Join(src, name), []byte(content), 0o644); err != nil {
+		path := filepath.Join(src, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("creating fixture directory for %s: %v", name, err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 			t.Fatalf("writing fixture file %s: %v", name, err)
 		}
 	}
@@ -486,5 +501,117 @@ func TestAPIFileLocalPathUnmappedRepo(t *testing.T) {
 	if res.LocalPath != "" || res.EditorScheme != "" {
 		t.Errorf("localPath = %q, editorScheme = %q; want both empty with no checkout map",
 			res.LocalPath, res.EditorScheme)
+	}
+}
+
+// treeEntryTypes maps a tree response's entries to path -> type.
+func treeEntryTypes(entries []treeEntryJSON) map[string]string {
+	byPath := make(map[string]string, len(entries))
+	for _, e := range entries {
+		byPath[e.Path] = e.Type
+	}
+	return byPath
+}
+
+func TestAPITree(t *testing.T) {
+	srv, _ := newFixture(t)
+	var body treeResponse
+	rec := get(t, srv, `/api/tree?repo=acme/widget`, &body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	got := treeEntryTypes(body.Entries)
+	for _, name := range []string{"widget.go", "other.go", "data.bin", "big.txt"} {
+		if got[name] != "file" {
+			t.Errorf("%s = %q, want file", name, got[name])
+		}
+	}
+	if got["pkg"] != "dir" {
+		t.Errorf("pkg = %q, want dir", got["pkg"])
+	}
+	// Non-recursive: the subdirectory's contents are not in a root listing.
+	if _, ok := got["pkg/sub.go"]; ok {
+		t.Error("pkg/sub.go listed at root, want excluded")
+	}
+	if body.Truncated {
+		t.Error("truncated = true, want false")
+	}
+}
+
+func TestAPITreeSubdir(t *testing.T) {
+	srv, _ := newFixture(t)
+	var body treeResponse
+	get(t, srv, `/api/tree?repo=acme/widget&path=pkg`, &body)
+	got := treeEntryTypes(body.Entries)
+	if len(got) != 1 || got["pkg/sub.go"] != "file" {
+		t.Fatalf("entries = %+v, want only pkg/sub.go (repo-relative)", body.Entries)
+	}
+	// The anchor itself is not a child of itself.
+	if _, ok := got["pkg"]; ok {
+		t.Error("anchor entry pkg listed, want excluded")
+	}
+}
+
+func TestAPITreeNotFound(t *testing.T) {
+	srv, _ := newFixture(t)
+	rec := get(t, srv, `/api/tree?repo=acme/widget&path=nope`, nil)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404: %s", rec.Code, errorBody(t, rec))
+	}
+}
+
+func TestAPITreeNotDir(t *testing.T) {
+	srv, _ := newFixture(t)
+	rec := get(t, srv, `/api/tree?repo=acme/widget&path=widget.go`, nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400: %s", rec.Code, errorBody(t, rec))
+	}
+}
+
+func TestAPITreeInvalidPath(t *testing.T) {
+	srv, _ := newFixture(t)
+	for _, path := range []string{"../etc", "pkg/../..", ".", ":(exclude)pkg"} {
+		rec := get(t, srv, `/api/tree?repo=acme/widget&path=`+url.QueryEscape(path), nil)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("path %q: status = %d, want 400", path, rec.Code)
+		}
+	}
+}
+
+func TestAPITreeInvalidRepo(t *testing.T) {
+	srv, _ := newFixture(t)
+	for _, repo := range []string{"", "widget", "acme/widget/extra", "../acme/widget"} {
+		rec := get(t, srv, `/api/tree?repo=`+url.QueryEscape(repo), nil)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("repo %q: status = %d, want 400", repo, rec.Code)
+		}
+	}
+}
+
+func TestAPITreeUnknownRepo(t *testing.T) {
+	srv, _ := newFixture(t)
+	rec := get(t, srv, `/api/tree?repo=acme/absent`, nil)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404: %s", rec.Code, errorBody(t, rec))
+	}
+}
+
+func TestAPITreeIndexMismatch(t *testing.T) {
+	srv, _ := newFixture(t)
+	// Point the status file at a commit the mirror does not have.
+	writeStatus(t, srv.statusPath, "0000000000000000000000000000000000000000", time.Now())
+	rec := get(t, srv, `/api/tree?repo=acme/widget`, nil)
+	if rec.Code != http.StatusConflict {
+		t.Errorf("status = %d, want 409: %s", rec.Code, errorBody(t, rec))
+	}
+}
+
+func TestAPITreeTruncated(t *testing.T) {
+	srv, _ := newFixture(t)
+	srv.maxTreeEntries = 2
+	var body treeResponse
+	get(t, srv, `/api/tree?repo=acme/widget`, &body)
+	if len(body.Entries) != 2 || !body.Truncated {
+		t.Errorf("entries = %d, truncated = %v; want 2 and true", len(body.Entries), body.Truncated)
 	}
 }

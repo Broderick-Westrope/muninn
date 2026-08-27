@@ -26,6 +26,10 @@ var ErrIndexMismatch = errors.New("indexed commit not found in mirror; index and
 // ErrFileTooLarge is returned by ReadFile for blobs larger than 10 MiB.
 var ErrFileTooLarge = errors.New("file too large to read (over 10 MiB)")
 
+// ErrNotDir is returned by ListDir when the path names a file rather than a
+// directory.
+var ErrNotDir = errors.New("path is a file, not a directory")
+
 // TreeEntry is one entry of a directory listing.
 type TreeEntry struct {
 	// Path is the entry path relative to the repo root.
@@ -173,6 +177,80 @@ func ListTree(ctx context.Context, mirrorDir, commit, path string, depth, maxEnt
 		}
 	}
 	return entries, total, nil
+}
+
+// ListDir returns the immediate children of path at commit in the bare mirror
+// at mirrorDir, excluding the anchor directory itself. Path "" lists the repo
+// root. At most maxEntries entries are returned (0 means unlimited); total
+// reports how many exist, so total > len(entries) means the listing was
+// truncated.
+//
+// Unlike ListTree this is non-recursive: git walks one tree object rather than
+// the whole commit. Listing children needs a trailing-slash pathspec, which
+// matches nothing for a blob, so a non-empty path is first probed without the
+// slash to tell a missing path from a file. An unreachable commit yields
+// ErrIndexMismatch, a missing path fs.ErrNotExist, and a file path ErrNotDir.
+func ListDir(ctx context.Context, mirrorDir, commit, path string, maxEntries int) (entries []TreeEntry, total int, err error) {
+	if err := checkCommit(ctx, mirrorDir, commit); err != nil {
+		return nil, 0, err
+	}
+	prefix := strings.Trim(path, "/")
+	if prefix != "" {
+		if err := checkDir(ctx, mirrorDir, commit, path, prefix); err != nil {
+			return nil, 0, err
+		}
+	}
+
+	// The trailing slash is what makes git list a tree's children rather than
+	// the tree entry itself.
+	args := []string{"-C", mirrorDir, "ls-tree", "--long", "-z", commit}
+	if prefix != "" {
+		args = append(args, "--", prefix+"/")
+	}
+	out, err := runGit(ctx, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("listing directory %q at commit %s: %w", path, shortSHA(commit), err)
+	}
+	for _, record := range strings.Split(out, "\x00") {
+		if record == "" {
+			continue
+		}
+		total++
+		if maxEntries > 0 && len(entries) >= maxEntries {
+			// Past the cap: count for the total but skip full parsing.
+			continue
+		}
+		entry, err := parseTreeEntry(record)
+		if err != nil {
+			return nil, 0, fmt.Errorf("listing directory %q at commit %s: %w", path, shortSHA(commit), err)
+		}
+		entries = append(entries, entry)
+	}
+	return entries, total, nil
+}
+
+// checkDir probes a non-empty ListDir path with a slash-free pathspec, which
+// returns the anchor entry itself, to distinguish a missing path from a file.
+// The children listing cannot make that distinction: its trailing slash
+// matches nothing for a blob, exactly as it matches nothing for a path that
+// does not exist.
+func checkDir(ctx context.Context, mirrorDir, commit, path, prefix string) error {
+	out, err := runGit(ctx, "-C", mirrorDir, "ls-tree", "--long", "-z", commit, "--", prefix)
+	if err != nil {
+		return fmt.Errorf("probing %q at commit %s: %w", path, shortSHA(commit), err)
+	}
+	record, _, _ := strings.Cut(out, "\x00")
+	if record == "" {
+		return fmt.Errorf("path %q not found at commit %s: %w", path, shortSHA(commit), fs.ErrNotExist)
+	}
+	entry, err := parseTreeEntry(record)
+	if err != nil {
+		return fmt.Errorf("probing %q at commit %s: %w", path, shortSHA(commit), err)
+	}
+	if entry.Type != "dir" {
+		return fmt.Errorf("path %q at commit %s: %w", path, shortSHA(commit), ErrNotDir)
+	}
+	return nil
 }
 
 // parseTreeEntry parses one `ls-tree --long` record:
