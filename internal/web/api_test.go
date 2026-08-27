@@ -380,7 +380,8 @@ func TestUIStaticAssets(t *testing.T) {
 		wantBody string
 	}{
 		{"/", "text/html", "<title>muninn"},
-		{"/app.js", "javascript", "runSearch"},
+		{"/main.js", "javascript", "initSearch"},
+		{"/search.js", "javascript", "runSearch"},
 		{"/style.css", "text/css", "prefers-color-scheme"},
 		{"/chroma.css", "text/css", "@media (prefers-color-scheme: dark)"},
 	}
