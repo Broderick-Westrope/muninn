@@ -16,7 +16,17 @@
   --error: #d1242f;
   --error-bg: #ffebe9;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  --header-h: 41px; /* .bar height + padding + border; .file-head sticks below it */
+  --header-h: 41px; /* .bar height + border */
+  --hints-h: 23px; /* measured #hints chip row; visible in the results view only */
+  --sidebar-w: 260px;
+  /* Sticky offset for anything pinned below the header. #hints lives inside
+     the sticky header but is hidden in the file view, so the offset differs
+     per view: never use --header-h directly in a new sticky rule. */
+  --sticky-top: calc(var(--header-h) + var(--hints-h));
+}
+
+body[data-view="file"] {
+  --sticky-top: var(--header-h);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -134,25 +144,86 @@ header {
 
 body[data-view="file"] #results,
 body[data-view="file"] #stats,
-body[data-view="file"] #hints {
+body[data-view="file"] #hints,
+body[data-view="file"] #sidebar-facets {
   display: none;
 }
 
-body[data-view="results"] #file {
+body[data-view="results"] #file,
+body[data-view="results"] #sidebar-tree {
   display: none;
+}
+
+/* ---- layout ------------------------------------------------------------ */
+
+/* No max-width: .row code truncates with an ellipsis, so a cap discards
+   matched code, and the file view scrolls horizontally rather than wrapping.
+   Body stays the scroll container so .file-head's sticky offset and the
+   results scroll restore keep working. */
+main {
+  display: grid;
+  /* minmax(0, 1fr), not 1fr: a bare 1fr has min-width auto, so the wide file
+     view <pre> would blow the column out instead of scrolling inside it. */
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+  padding: 8px 12px 40px;
+}
+
+#sidebar {
+  position: sticky;
+  top: var(--sticky-top);
+  /* A grid item stretches to row height by default, and a stretched item
+     cannot stick. */
+  align-self: start;
+  /* An expanded tree can exceed the viewport, and a sticky element taller
+     than the viewport scrolls away. */
+  max-height: calc(100vh - var(--sticky-top));
+  overflow-y: auto;
+  padding-right: 12px;
+  font-size: 12px;
+}
+
+@media (max-width: 900px) {
+  main {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  #sidebar {
+    display: none;
+  }
 }
 
 /* ---- results ----------------------------------------------------------- */
 
-main {
-  max-width: 1100px;
-  padding: 8px 12px 40px;
+.repo-group h2 {
+  position: sticky;
+  top: var(--sticky-top);
+  z-index: 4;
+  display: flex;
+  align-items: baseline;
+  margin: 14px 0 6px;
+  padding: 4px 0;
+  /* Opaque: a transparent sticky header lets rows show through as they
+     scroll under it. */
+  background: var(--bg);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
 }
 
-.repo-group h2 {
-  margin: 14px 0 6px;
-  font-size: 12px;
-  font-weight: 600;
+.repo-owner {
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.repo-name {
+  color: var(--fg);
+}
+
+.repo-count {
+  margin-left: auto;
+  padding-left: 8px;
+  font-size: 11px;
+  font-weight: 400;
   color: var(--muted);
 }
 
@@ -285,12 +356,19 @@ footer {
   position: fixed;
   right: 0;
   bottom: 0;
-  left: 0;
+  /* Clear the sidebar, matching main's 12px padding. */
+  left: calc(var(--sidebar-w) + 12px);
   padding: 4px 12px;
   font-size: 11px;
   color: var(--muted);
   background: var(--bg);
   border-top: 1px solid var(--border);
+}
+
+@media (max-width: 900px) {
+  footer {
+    left: 0;
+  }
 }
 
 .trunc {
@@ -301,13 +379,15 @@ footer {
 
 .file-head {
   position: sticky;
-  top: var(--header-h);
+  top: var(--sticky-top);
   z-index: 5;
   display: flex;
   gap: 12px;
   align-items: baseline;
   padding: 6px 12px;
-  margin: 0 -12px;
+  /* Bleeds to the content edge on the right only: a left bleed would paint
+     over the sticky sidebar. */
+  margin: 0 -12px 0 0;
   font: 12px var(--mono);
   background: var(--bg);
   border-bottom: 1px solid var(--border);

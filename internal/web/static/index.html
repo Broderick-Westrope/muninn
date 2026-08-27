@@ -21,8 +21,14 @@
   <div id="hints" aria-label="Query syntax hints"></div>
 </header>
 <main>
-  <div id="results" role="region" aria-label="Search results"></div>
-  <div id="file" role="region" aria-label="File view"></div>
+  <aside id="sidebar" aria-label="Navigation">
+    <div id="sidebar-facets"></div>
+    <div id="sidebar-tree"></div>
+  </aside>
+  <div id="content">
+    <div id="results" role="region" aria-label="Search results"></div>
+    <div id="file" role="region" aria-label="File view"></div>
+  </div>
 </main>
 <footer id="stats" hidden></footer>
 <script type="module" src="/main.js"></script>

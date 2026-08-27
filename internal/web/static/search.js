@@ -59,14 +59,33 @@ function renderResults(data, tokens) {
   for (const [repo, files] of groups) {
     const section = document.createElement('section');
     section.className = 'repo-group';
-    const h = document.createElement('h2');
-    h.textContent = repo;
-    section.append(h);
+    section.append(repoHeading(repo, files));
     for (const f of files) section.append(fileCard(f, tokens));
     frag.append(section);
   }
   resultsEl.replaceChildren(frag);
   renderStats(data);
+}
+
+// repoHeading renders "owner/name" with the owner de-emphasised, so the
+// distinguishing half wins the glance, plus the group's match count.
+function repoHeading(repo, files) {
+  const h = document.createElement('h2');
+  const [owner, ...rest] = repo.split('/');
+  const ownerEl = document.createElement('span');
+  ownerEl.className = 'repo-owner';
+  ownerEl.textContent = owner + '/';
+  const nameEl = document.createElement('span');
+  nameEl.className = 'repo-name';
+  nameEl.textContent = rest.join('/');
+  // A filename-only match carries no lines but is still one result, the
+  // same rule the server applies when it counts against the limit.
+  const count = files.reduce((n, f) => n + (f.lines.length || 1), 0);
+  const countEl = document.createElement('span');
+  countEl.className = 'repo-count';
+  countEl.textContent = `${count} ${plural(count, 'match', 'matches')}`;
+  h.append(ownerEl, nameEl, countEl);
+  return h;
 }
 
 function fileCard(f, tokens) {
