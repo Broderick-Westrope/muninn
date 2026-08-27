@@ -581,3 +581,91 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 func writeError(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, map[string]string{"error": msg})
 }
+
+// openRequest is the JSON body of POST /api/open. The client sends a
+// repo/path pair; the server resolves the checkout itself and never accepts
+// a filesystem path from the request.
+type openRequest struct {
+	Repo string `json:"repo"`
+	Path string `json:"path"`
+	Line int    `json:"line"`
+}
+
+// maxOpenBody caps the request body: the payload is three short fields.
+const maxOpenBody = 8 << 10 // 8 KiB
+
+// handleOpen serves POST /api/open, launching the editor with the repo's
+// checkout loaded as the workspace folder. This is the only endpoint that
+// starts a local process, so it carries its own CSRF guard: hostCheck does
+// not cover it, because a form POST from a malicious page to 127.0.0.1
+// carries an allowed Host header.
+func (s *Server) handleOpen(w http.ResponseWriter, r *http.Request) {
+	if err := checkCSRF(r); err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	var req openRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxOpenBody)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	// Rejected rather than coerced to 1: a missing line means the client
+	// built a bad request, and silently opening the top of the file would
+	// hide that.
+	if req.Line < 1 {
+		writeError(w, http.StatusBadRequest, "line must be a positive integer")
+		return
+	}
+	checkout, ok := s.checkouts[strings.ToLower(req.Repo)]
+	if !ok {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("no local checkout for %q", req.Repo))
+		return
+	}
+
+	root, target, err := resolveInCheckout(checkout, req.Path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		writeError(w, http.StatusNotFound,
+			fmt.Sprintf("%q is not in the local checkout (it may be on a different commit than the index)", req.Path))
+		return
+	case err != nil:
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	// VS Code and Cursor split the --goto value on ":" and read the first
+	// numeric segment as a line number, so a path containing a colon can
+	// resolve to the wrong file. Decline and let the client fall back.
+	if strings.Contains(target, ":") {
+		writeError(w, http.StatusNotImplemented, "path contains a colon and cannot be passed to --goto")
+		return
+	}
+
+	// root, not the configured checkout path: the resolved form, so the
+	// workspace folder and the file agree.
+	switch err := s.launch(s.editorScheme, root, target, req.Line); {
+	case errors.Is(err, ErrEditorCLINotFound):
+		writeError(w, http.StatusNotImplemented, err.Error())
+		return
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// checkCSRF guards the one endpoint that launches a local process.
+//
+// Sec-Fetch-Site is browser-set and cannot be forged by page script. An
+// absent header is rejected rather than trusted: treating it as safe would
+// let any client that omits it bypass the guard entirely. Requiring JSON
+// blocks simple form POSTs and forces a CORS preflight for a cross-origin
+// fetch.
+func checkCSRF(r *http.Request) error {
+	if r.Header.Get("Sec-Fetch-Site") != "same-origin" {
+		return errors.New("forbidden: cross-origin or unrecognized request origin; reload the page and try again")
+	}
+	if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		return errors.New("forbidden: expected a JSON request")
+	}
+	return nil
+}

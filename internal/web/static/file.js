@@ -130,24 +130,74 @@ function fileActions(loc, data) {
   gh.rel = 'noopener';
   gh.textContent = 'GitHub';
   acts.append(gh, copyBtn(() => gh.href, 'Copy GitHub permalink', 'link'));
-  if (data.localPath) {
-    const ed = document.createElement('a');
-    ed.className = 'act editor';
-    ed.href = editorUrl(loc, data);
-    ed.textContent = EDITOR_LABELS[data.editorScheme] || data.editorScheme;
-    ed.title = 'Opens your local checkout — may be on a different commit than the index';
-    acts.append(ed);
-  }
+  if (data.localPath) acts.append(editorButton(loc, data));
   return acts;
 }
 
+// editorButton posts to /api/open, which launches the editor CLI with the
+// repo's checkout as the workspace folder. The URL scheme cannot express a
+// workspace folder, so it is only a fallback for when the CLI is missing.
+function editorButton(loc, data) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'act editor';
+  b.textContent = EDITOR_LABELS[data.editorScheme] || data.editorScheme;
+  b.title = 'Open in your local checkout — may be on a different commit than the index';
+  b.addEventListener('click', async () => {
+    // Read the target at click time so a gutter-selected line is honoured.
+    const f = currentFile || loc;
+    let res;
+    try {
+      res = await fetch('/api/open', {
+        method: 'POST',
+        // Sec-Fetch-Site is set by the browser; it is a forbidden header
+        // name, so any attempt to set it here would be dropped anyway.
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ repo: f.repo, path: f.path, line: f.line || 1 }),
+      });
+    } catch (e) {
+      showActionError(b, e.message);
+      return;
+    }
+    if (res.status === 204) return;
+
+    // 501 is the one recoverable case: no CLI, or a path --goto cannot
+    // express. The scheme opens the file without its repo, so say so.
+    if (res.status === 501) {
+      b.title =
+        'Opened without the repo loaded — install the editor’s shell command ' +
+        'so muninn can open the workspace folder';
+      location.href = editorUrl(f, data);
+      return;
+    }
+    let msg = res.statusText;
+    try {
+      msg = (await res.json()).error || msg;
+    } catch {
+      /* non-JSON error body */
+    }
+    showActionError(b, msg);
+  });
+  return b;
+}
+
+// showActionError surfaces an open-in-editor failure next to the button.
+function showActionError(btn, msg) {
+  const prev = $('.act-error', fileEl);
+  if (prev) prev.remove();
+  const span = document.createElement('span');
+  span.className = 'act-error';
+  span.textContent = msg;
+  btn.after(span);
+}
+
 // refreshFileActions re-points the header links at the active target line.
+// The editor button needs no update: it reads the current target when
+// clicked.
 export function refreshFileActions() {
   if (!currentFile || !currentFileData) return;
   const gh = $('.file-actions .gh', fileEl);
   if (gh) gh.href = githubUrl(currentFile, currentFileData);
-  const ed = $('.file-actions .editor', fileEl);
-  if (ed) ed.href = editorUrl(currentFile, currentFileData);
 }
 
 // plainPre renders unhighlighted content in the same DOM shape chroma

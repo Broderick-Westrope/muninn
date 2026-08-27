@@ -51,6 +51,9 @@ type Server struct {
 	// a const so tests can reach the truncation path without a fixture of
 	// thousands of files.
 	maxTreeEntries int
+	// launch starts the editor. A field so tests can exercise the success
+	// path of /api/open without executing a real editor.
+	launch func(scheme, dir, file string, line int) error
 }
 
 // New returns a Server that searches with searcher, resolves indexed
@@ -66,6 +69,7 @@ func New(searcher *search.Searcher, statusPath, mirrorsDir string, checkouts map
 		checkouts:      checkouts,
 		editorScheme:   editorScheme,
 		maxTreeEntries: defaultMaxTreeEntries,
+		launch:         launchEditor,
 	}
 }
 
@@ -77,6 +81,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/file", s.handleFile)
 	mux.HandleFunc("GET /api/tree", s.handleTree)
 	mux.HandleFunc("GET /api/repos", s.handleRepos)
+	// Registered here rather than in Serve's middleware chain so httptest
+	// requests against Handler() exercise the CSRF guard.
+	mux.HandleFunc("POST /api/open", s.handleOpen)
 	mux.HandleFunc("GET /chroma.css", s.handleChromaCSS)
 	mux.Handle("GET /", staticHandler())
 	return mux

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -890,5 +891,198 @@ func TestAPISearchFacetExtValidation(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("ext %q: status = %d, want 400", ext, rec.Code)
 		}
+	}
+}
+
+// launchCall records one editor launch for the injected launcher.
+type launchCall struct {
+	scheme, dir, file string
+	line              int
+}
+
+// newOpenFixture returns a server wired to a real local checkout plus a
+// recorder standing in for the editor launch, so the success path is
+// testable without executing an editor.
+func newOpenFixture(t *testing.T) (*Server, *[]launchCall, string) {
+	t.Helper()
+	srv, _ := newFixture(t)
+	checkout := t.TempDir()
+	if err := os.WriteFile(filepath.Join(checkout, "widget.go"), []byte(widgetGo), 0o644); err != nil {
+		t.Fatalf("writing checkout file: %v", err)
+	}
+	srv.checkouts = map[string]string{"acme/widget": checkout}
+	srv.editorScheme = "cursor"
+
+	var calls []launchCall
+	srv.launch = func(scheme, dir, file string, line int) error {
+		calls = append(calls, launchCall{scheme, dir, file, line})
+		return nil
+	}
+	return srv, &calls, checkout
+}
+
+// postOpen sends a POST /api/open with same-origin JSON headers by default;
+// headers overrides individual values (an empty value removes the header).
+func postOpen(t *testing.T, srv *Server, body string, headers map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/open", strings.NewReader(body))
+	set := map[string]string{"Sec-Fetch-Site": "same-origin", "Content-Type": "application/json"}
+	for k, v := range headers {
+		set[k] = v
+	}
+	for k, v := range set {
+		if v != "" {
+			req.Header.Set(k, v)
+		}
+	}
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+func TestAPIOpenSuccess(t *testing.T) {
+	srv, calls, checkout := newOpenFixture(t)
+	resolved, err := filepath.EvalSymlinks(checkout)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+
+	rec := postOpen(t, srv, `{"repo":"acme/widget","path":"widget.go","line":7}`, nil)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204: %s", rec.Code, rec.Body.String())
+	}
+	if len(*calls) != 1 {
+		t.Fatalf("launches = %d, want 1", len(*calls))
+	}
+	got := (*calls)[0]
+	// The folder argument must be the checkout root itself — not its parent,
+	// which would open the wrong workspace.
+	if got.dir != resolved {
+		t.Errorf("dir = %q, want the checkout root %q", got.dir, resolved)
+	}
+	if want := filepath.Join(resolved, "widget.go"); got.file != want {
+		t.Errorf("file = %q, want %q", got.file, want)
+	}
+	if got.line != 7 || got.scheme != "cursor" {
+		t.Errorf("launch = %+v, want line 7 and scheme cursor", got)
+	}
+}
+
+func TestAPIOpenCSRF(t *testing.T) {
+	tests := []struct {
+		name    string
+		headers map[string]string
+	}{
+		// Absent is rejected, not trusted: otherwise any client omitting the
+		// header bypasses the guard.
+		{"missing Sec-Fetch-Site", map[string]string{"Sec-Fetch-Site": ""}},
+		{"cross-site", map[string]string{"Sec-Fetch-Site": "cross-site"}},
+		{"same-site", map[string]string{"Sec-Fetch-Site": "same-site"}},
+		{"form content type", map[string]string{"Content-Type": "application/x-www-form-urlencoded"}},
+		{"no content type", map[string]string{"Content-Type": ""}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, calls, _ := newOpenFixture(t)
+			rec := postOpen(t, srv, `{"repo":"acme/widget","path":"widget.go","line":1}`, tt.headers)
+			if rec.Code != http.StatusForbidden {
+				t.Errorf("status = %d, want 403", rec.Code)
+			}
+			if len(*calls) != 0 {
+				t.Error("editor launched despite a rejected request")
+			}
+		})
+	}
+}
+
+func TestAPIOpenBadRequest(t *testing.T) {
+	tests := []struct{ name, body string }{
+		{"malformed", `{`},
+		{"zero line", `{"repo":"acme/widget","path":"widget.go","line":0}`},
+		{"negative line", `{"repo":"acme/widget","path":"widget.go","line":-3}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, calls, _ := newOpenFixture(t)
+			rec := postOpen(t, srv, tt.body, nil)
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400: %s", rec.Code, rec.Body.String())
+			}
+			if len(*calls) != 0 {
+				t.Error("editor launched for an invalid request")
+			}
+		})
+	}
+}
+
+func TestAPIOpenUnknownRepo(t *testing.T) {
+	srv, _, _ := newOpenFixture(t)
+	rec := postOpen(t, srv, `{"repo":"acme/absent","path":"widget.go","line":1}`, nil)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404: %s", rec.Code, errorBody(t, rec))
+	}
+}
+
+func TestAPIOpenMissingFile(t *testing.T) {
+	srv, _, _ := newOpenFixture(t)
+	// Routine: the checkout is often on a different commit than the index.
+	rec := postOpen(t, srv, `{"repo":"acme/widget","path":"absent.go","line":1}`, nil)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404: %s", rec.Code, errorBody(t, rec))
+	}
+}
+
+func TestAPIOpenEscape(t *testing.T) {
+	srv, calls, checkout := newOpenFixture(t)
+	outside := filepath.Join(filepath.Dir(checkout), "outside.go")
+	if err := os.WriteFile(outside, []byte("package outside\n"), 0o644); err != nil {
+		t.Fatalf("writing outside file: %v", err)
+	}
+
+	rec := postOpen(t, srv, `{"repo":"acme/widget","path":"../outside.go","line":1}`, nil)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403: %s", rec.Code, errorBody(t, rec))
+	}
+	if len(*calls) != 0 {
+		t.Error("editor launched for a path outside the checkout")
+	}
+}
+
+func TestAPIOpenColonPath(t *testing.T) {
+	srv, calls, checkout := newOpenFixture(t)
+	// --goto splits its value on ":", so such a path would open the wrong
+	// file; the endpoint declines and the client falls back.
+	if err := os.WriteFile(filepath.Join(checkout, "od:d.go"), []byte("package odd\n"), 0o644); err != nil {
+		t.Fatalf("writing colon file: %v", err)
+	}
+
+	rec := postOpen(t, srv, `{"repo":"acme/widget","path":"od:d.go","line":1}`, nil)
+	if rec.Code != http.StatusNotImplemented {
+		t.Errorf("status = %d, want 501: %s", rec.Code, errorBody(t, rec))
+	}
+	if len(*calls) != 0 {
+		t.Error("editor launched with a colon in the path")
+	}
+}
+
+func TestAPIOpenCLIMissing(t *testing.T) {
+	srv, _, _ := newOpenFixture(t)
+	srv.launch = func(string, string, string, int) error {
+		return fmt.Errorf("cursor: %w", ErrEditorCLINotFound)
+	}
+	rec := postOpen(t, srv, `{"repo":"acme/widget","path":"widget.go","line":1}`, nil)
+	if rec.Code != http.StatusNotImplemented {
+		t.Errorf("status = %d, want 501: %s", rec.Code, errorBody(t, rec))
+	}
+}
+
+func TestAPIOpenExecFailed(t *testing.T) {
+	srv, _, _ := newOpenFixture(t)
+	srv.launch = func(string, string, string, int) error {
+		return errors.New("fork/exec: resource temporarily unavailable")
+	}
+	rec := postOpen(t, srv, `{"repo":"acme/widget","path":"widget.go","line":1}`, nil)
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500: %s", rec.Code, errorBody(t, rec))
 	}
 }

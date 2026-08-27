@@ -512,15 +512,27 @@ footer {
 }
 
 .file-actions .act {
+  padding: 0;
+  font: inherit;
   color: var(--muted);
   text-decoration: none;
   white-space: nowrap;
+  /* The editor action is a button (it POSTs) but must read as a link
+     alongside the GitHub anchor. */
+  background: none;
+  border: 0;
+  cursor: pointer;
 }
 
 .file-actions .act:hover,
 .file-actions .act:focus-visible {
   color: var(--accent);
   text-decoration: underline;
+}
+
+.act-error {
+  color: var(--error);
+  white-space: nowrap;
 }
 
 .file-meta {
