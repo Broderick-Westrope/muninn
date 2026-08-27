@@ -62,6 +62,17 @@ func (s *Searcher) Search(ctx context.Context, opts Options) (*Result, error) {
 		}
 		q = query.NewAnd(q, &query.Repo{Regexp: re})
 	}
+	if opts.FileFilter != "" {
+		// Parsed as a file: atom and ANDed at the AST level, so the filter
+		// covers the whole query however it is shaped. Concatenating it onto
+		// the query text would bind tighter than a top-level `or` and leave
+		// one side of the disjunction silently unfiltered.
+		fq, err := query.Parse("file:" + opts.FileFilter)
+		if err != nil {
+			return nil, fmt.Errorf("parsing file filter %q: %w", opts.FileFilter, err)
+		}
+		q = query.NewAnd(q, fq)
+	}
 	q = query.Simplify(q)
 
 	maxResults := opts.MaxResults
@@ -165,4 +176,71 @@ func hasSymbolInfo(lm zoekt.LineMatch) bool {
 		}
 	}
 	return false
+}
+
+// Aggregate runs q with no facet filters and buckets the matches by repo and
+// by file extension. It exists so the facet sidebar stays stable: deriving
+// facet values from a filtered search would make every unselected value
+// disappear on the first click, leaving multi-select unbuildable and a
+// zero-result selection with no chip to undo.
+//
+// Counts are line matches, matching what the UI renders as rows, and
+// maxResults is the aggregation cap. Set it above the display limit so a
+// count is never lower than the rows a filtered search shows.
+//
+// Known limitation: the cap counts line matches, so one heavily-matching
+// repo can consume the budget and narrow the value list. Facets.Truncated
+// discloses that.
+func (s *Searcher) Aggregate(ctx context.Context, q string, maxResults int) (*Facets, error) {
+	res, err := s.Search(ctx, Options{Query: q, MaxResults: maxResults})
+	if err != nil {
+		return nil, err
+	}
+	repos, exts := map[string]int{}, map[string]int{}
+	for _, f := range res.Files {
+		// A filename-only match carries no lines but is still one result,
+		// the same rule the web layer applies when counting against a limit.
+		n := len(f.Lines)
+		if n == 0 {
+			n = 1
+		}
+		repos[f.Repo] += n
+		exts[extOf(f.Path)] += n
+	}
+	return &Facets{
+		Repos:     sortedFacets(repos),
+		Exts:      sortedFacets(exts),
+		Truncated: res.Truncated,
+	}, nil
+}
+
+// extOf returns the lowercased extension of a path's basename, or "" when it
+// has none. A leading dot does not start an extension, so "Makefile" and
+// ".gitignore" both bucket as "".
+func extOf(path string) string {
+	base := path
+	if i := strings.LastIndexByte(base, '/'); i >= 0 {
+		base = base[i+1:]
+	}
+	i := strings.LastIndexByte(base, '.')
+	if i <= 0 { // -1: no dot at all; 0: leading dot (a dotfile)
+		return ""
+	}
+	return strings.ToLower(base[i+1:])
+}
+
+// sortedFacets orders buckets by count descending, then value ascending, so
+// identical requests always produce an identical list.
+func sortedFacets(counts map[string]int) []FacetValue {
+	out := make([]FacetValue, 0, len(counts))
+	for value, count := range counts {
+		out = append(out, FacetValue{Value: value, Count: count})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Count != out[j].Count {
+			return out[i].Count > out[j].Count
+		}
+		return out[i].Value < out[j].Value
+	})
+	return out
 }

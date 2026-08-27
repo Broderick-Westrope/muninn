@@ -9,6 +9,11 @@ type Options struct {
 	Query string
 	// RepoFilter is an optional repo name regexp ANDed into the query.
 	RepoFilter string
+	// FileFilter is an optional file path regexp ANDed into the query.
+	// Composed at the query AST level, never concatenated onto Query:
+	// zoekt's `or` binds looser than implicit AND, so an appended atom
+	// would silently fail to filter one side of a disjunction.
+	FileFilter string
 	// MaxResults is the hard cap on returned line matches; 0 means
 	// defaultMaxResults.
 	MaxResults int
@@ -72,4 +77,22 @@ type RepoInfo struct {
 	Branch string
 	// IndexedCommit is the commit SHA the shards were built from.
 	IndexedCommit string
+}
+
+// Facets counts line matches per repo and per file extension for a query,
+// ignoring any facet filters. Aggregation runs at its own cap, independent
+// of the display limits, so a count is never lower than the rows a filtered
+// search displays. Truncated reports that the cap was hit, meaning the value
+// list is not exhaustive.
+type Facets struct {
+	Repos     []FacetValue
+	Exts      []FacetValue
+	Truncated bool
+}
+
+// FacetValue is one facet bucket: a value and how many matching lines carry
+// it. Value is "" in Exts for files with no extension.
+type FacetValue struct {
+	Value string
+	Count int
 }

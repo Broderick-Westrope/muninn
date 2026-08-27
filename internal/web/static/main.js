@@ -1,6 +1,7 @@
 'use strict';
 
 import { $, note } from './dom.js';
+import { facetParams, initFacets, renderFacets } from './facets.js';
 import {
   getCurrentFile,
   initFile,
@@ -23,6 +24,7 @@ const fileEl = $('#file');
 const statsEl = $('#stats');
 const repoBadge = $('#repo-badge');
 const treeEl = $('#sidebar-tree');
+const facetsEl = $('#sidebar-facets');
 
 const DEBOUNCE_MS = 200;
 
@@ -66,15 +68,19 @@ function route() {
 // ---------------------------------------------------------------------------
 // Input wiring
 
+// search takes facet params as an argument, so search.js never imports
+// facets.js and facets.js never imports search.js.
+const search = (fromUser) => runSearch(searchInput.value.trim(), fromUser, facetParams());
+
 searchInput.addEventListener('input', () => {
   clearTimeout(debounceTimer);
-  debounceTimer = setTimeout(() => runSearch(searchInput.value.trim(), true), DEBOUNCE_MS);
+  debounceTimer = setTimeout(() => search(true), DEBOUNCE_MS);
 });
 
 searchInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') {
     clearTimeout(debounceTimer);
-    runSearch(searchInput.value.trim(), true);
+    search(true);
   }
 });
 
@@ -94,15 +100,20 @@ document.addEventListener('keydown', (e) => {
 // ---------------------------------------------------------------------------
 // Init
 
-initSearch({ resultsEl, statsEl });
+initSearch({ resultsEl, statsEl, onFacets: renderFacets });
 initFile(fileEl);
 initTree(treeEl);
+// A facet toggle re-searches immediately: it is a click, not typing, so it
+// must not wait out the input debounce.
+initFacets({ facetsEl, onToggle: () => search(false) });
 initHints(hintsEl, searchInput);
 
 const initialQ = new URLSearchParams(location.search).get('q') || '';
 searchInput.value = initialQ;
 loadRepos(repoBadge);
-if (initialQ) runSearch(initialQ);
+// initFacets has already read the URL, so a reloaded filtered link searches
+// with its facets applied rather than briefly showing everything.
+if (initialQ) runSearch(initialQ, false, facetParams());
 else resultsEl.replaceChildren(note('Type to search across all indexed repos.'));
 route();
 window.addEventListener('hashchange', route);

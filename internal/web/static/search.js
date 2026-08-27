@@ -10,13 +10,21 @@ const SEARCH_LIMIT = 100;
 let resultsEl = null;
 let statsEl = null;
 let searchCtl = null; // AbortController for the in-flight search
+// Injected by main.js: search.js must not import facets.js (facets.js
+// already needs a re-search callback, so importing it here would be a
+// cycle).
+let onFacets = () => {};
 
 export function initSearch(els) {
   resultsEl = els.resultsEl;
   statsEl = els.statsEl;
+  onFacets = els.onFacets || onFacets;
 }
 
-export async function runSearch(q, fromUser) {
+// runSearch fetches and renders results. facetParams is a pre-encoded query
+// string fragment supplied by the caller, so this module stays independent
+// of how facet state is stored.
+export async function runSearch(q, fromUser, facetParams = '') {
   const url = new URL(location.href);
   if (q) url.searchParams.set('q', q);
   else url.searchParams.delete('q');
@@ -26,13 +34,14 @@ export async function runSearch(q, fromUser) {
   if (!q) {
     resultsEl.replaceChildren(note('Type to search across all indexed repos.'));
     statsEl.hidden = true;
+    onFacets(null);
     return;
   }
   searchCtl = new AbortController();
   let data;
   try {
     data = await api(
-      `/api/search?q=${encodeURIComponent(q)}&limit=${SEARCH_LIMIT}`,
+      `/api/search?q=${encodeURIComponent(q)}&limit=${SEARCH_LIMIT}${facetParams}`,
       searchCtl.signal,
     );
   } catch (e) {
@@ -42,6 +51,7 @@ export async function runSearch(q, fromUser) {
     return;
   }
   renderResults(data, bareTokens(q));
+  onFacets(data.facets);
   // Searching from the file view returns to results — but only for
   // user-initiated searches, never the initial background one (which
   // would yank a deep-linked file view away).

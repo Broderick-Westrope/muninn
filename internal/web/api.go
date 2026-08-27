@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -29,6 +31,14 @@ const (
 	// staleAfter is how old the last successful sync may be before repos
 	// are reported stale.
 	staleAfter = 24 * time.Hour
+	// maxFacetRepos and maxFacetExts bound the facet params: every value
+	// becomes a branch of a regex alternation compiled on each search.
+	maxFacetRepos = 50
+	maxFacetExts  = 20
+	// facetAggregateLimit caps the facet-free aggregation pass. Well above
+	// the display limit so a facet count is never lower than the rows a
+	// filtered search returns for that value.
+	facetAggregateLimit = 1000
 )
 
 // searchResponse is the JSON shape of /api/search.
@@ -36,6 +46,24 @@ type searchResponse struct {
 	Files     []fileMatchesJSON `json:"files"`
 	Truncated bool              `json:"truncated"`
 	Stats     statsJSON         `json:"stats"`
+	Facets    facetsJSON        `json:"facets"`
+}
+
+// facetsJSON is the sidebar's facet universe: repo and extension buckets
+// aggregated from the query with no facet filters applied.
+type facetsJSON struct {
+	Repos []facetValueJSON `json:"repos"`
+	Exts  []facetValueJSON `json:"exts"`
+	// Truncated reports that the aggregation cap was hit, so the value
+	// list is not exhaustive. Distinct from the results-level Truncated.
+	Truncated bool `json:"truncated"`
+}
+
+// facetValueJSON is one facet bucket. Value is "" in Exts for files with no
+// extension.
+type facetValueJSON struct {
+	Value string `json:"value"`
+	Count int    `json:"count"`
 }
 
 // fileMatchesJSON is one matching file in a search response.
@@ -94,9 +122,15 @@ type treeEntryJSON struct {
 	Size int64  `json:"size"` // 0 for directories
 }
 
-// handleSearch serves GET /api/search?q=<query>&limit=<n>. Search errors
-// are reported as 400 with the parser message so the UI can show them
-// inline; the query is the only input, so failures are user-attributable.
+// handleSearch serves GET /api/search?q=<query>&limit=<n>&repo=<a,b>&ext=<go,ts>.
+// Search errors are reported as 400 with the parser message so the UI can
+// show them inline; the query is the only free-form input, so failures are
+// user-attributable.
+//
+// The repo and ext facet params filter the results but deliberately do not
+// touch the facet block, which is aggregated from the same query with no
+// facet filters. Deriving facet values from the filtered results would make
+// every unselected value vanish on the first click.
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query().Get("q")
 	if q == "" {
@@ -108,18 +142,137 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	query := r.URL.Query()
+	repos, err := parseFacetParam(query, "repo", maxFacetRepos)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	exts, err := parseFacetParam(query, "ext", maxFacetExts)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	for _, ext := range exts {
+		if !validExt(ext) {
+			writeError(w, http.StatusBadRequest,
+				fmt.Sprintf("invalid ext %q: expected a bare file extension", ext))
+			return
+		}
+	}
 
 	// Fetch one line past the cap so truncation is detected even when
 	// zoekt's own display limits would round up.
 	res, err := s.searcher.Search(r.Context(), search.Options{
 		Query:      q,
+		RepoFilter: facetRepoFilter(repos),
+		FileFilter: facetExtFilter(exts),
 		MaxResults: limit + 1,
 	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, trimResult(res, limit))
+
+	// Always a separate pass, never reusing res: it runs at a lower cap, so
+	// counts taken from it would change the moment a facet is selected —
+	// exactly the instability this design exists to avoid.
+	facets, err := s.searcher.Aggregate(r.Context(), q, facetAggregateLimit)
+	if err != nil {
+		// The query already parsed for the results pass, so a failure here
+		// is a server fault rather than bad input.
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	out := trimResult(res, limit)
+	out.Facets = toFacetsJSON(facets)
+	writeJSON(w, http.StatusOK, out)
+}
+
+// parseFacetParam splits a comma-separated facet param into its values,
+// rejecting more than max: each value becomes a branch of a regex
+// alternation compiled on every search.
+//
+// Presence is checked rather than emptiness, because "" is a meaningful
+// value — it is the no-extension bucket — so "?ext=" selects extensionless
+// files while omitting the param entirely applies no filter.
+func parseFacetParam(query url.Values, name string, max int) ([]string, error) {
+	if !query.Has(name) {
+		return nil, nil
+	}
+	parts := strings.Split(query.Get(name), ",")
+	values := make([]string, len(parts))
+	for i, p := range parts {
+		values[i] = strings.TrimSpace(p)
+	}
+	if len(values) > max {
+		return nil, fmt.Errorf("too many %s values: %d exceeds the limit of %d", name, len(values), max)
+	}
+	return values, nil
+}
+
+// validExt reports whether an extension facet value is a bare extension.
+// Empty is legal: it is the no-extension bucket.
+func validExt(ext string) bool {
+	for _, r := range ext {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '_' || r == '-' || r == '+':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// facetRepoFilter builds an anchored alternation over exact repo names.
+// Values are quoted: a repo named "acme/my.lib" would otherwise match
+// characters it should not.
+func facetRepoFilter(repos []string) string {
+	if len(repos) == 0 {
+		return ""
+	}
+	alts := make([]string, len(repos))
+	for i, repo := range repos {
+		alts[i] = "^" + regexp.QuoteMeta(repo) + "$"
+	}
+	return "(" + strings.Join(alts, "|") + ")"
+}
+
+// facetExtFilter builds an alternation over file extensions. The empty value
+// means "no extension": a basename whose only dot, if any, is a leading one,
+// so both "Makefile" and ".gitignore" qualify — matching how search.extOf
+// buckets them.
+func facetExtFilter(exts []string) string {
+	if len(exts) == 0 {
+		return ""
+	}
+	alts := make([]string, len(exts))
+	for i, ext := range exts {
+		if ext == "" {
+			alts[i] = `(^|/)\.?[^/.]+$`
+			continue
+		}
+		alts[i] = `\.` + regexp.QuoteMeta(ext) + `$`
+	}
+	return "(" + strings.Join(alts, "|") + ")"
+}
+
+// toFacetsJSON maps aggregated facets to the response shape.
+func toFacetsJSON(f *search.Facets) facetsJSON {
+	out := facetsJSON{
+		Repos:     make([]facetValueJSON, 0, len(f.Repos)),
+		Exts:      make([]facetValueJSON, 0, len(f.Exts)),
+		Truncated: f.Truncated,
+	}
+	for _, v := range f.Repos {
+		out.Repos = append(out.Repos, facetValueJSON{Value: v.Value, Count: v.Count})
+	}
+	for _, v := range f.Exts {
+		out.Exts = append(out.Exts, facetValueJSON{Value: v.Value, Count: v.Count})
+	}
+	return out
 }
 
 // handleFile serves GET /api/file?repo=<owner/name>&path=<p>, returning

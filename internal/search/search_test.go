@@ -41,6 +41,20 @@ func callerTwo() int { return Frobnicate() }
 const otherGo = `package widget
 
 const banana = "yellow"
+
+const kiwi = "green"
+`
+
+// Facet and file-filter tests need one token spanning several extensions,
+// so an extension filter has something to exclude and a top-level `or` has
+// two sides that differ by file type. "banana" stays unique to other.go for
+// the single-match tests, so these use "kiwi" instead.
+const otherTS = `export const kiwi = "green";
+`
+
+// makefile has no extension, covering the "no extension" facet bucket.
+const makefile = `build:
+	@echo kiwi
 `
 
 // fixtureIndex builds a shard directory over a small fixture repo containing
@@ -50,7 +64,12 @@ func fixtureIndex(t *testing.T, ctagsPath string) (indexDir, commit string) {
 	t.Helper()
 	src := filepath.Join(t.TempDir(), "src")
 	git(t, "", "init", "-b", "main", src)
-	for name, content := range map[string]string{"widget.go": widgetGo, "other.go": otherGo} {
+	for name, content := range map[string]string{
+		"widget.go": widgetGo,
+		"other.go":  otherGo,
+		"other.ts":  otherTS,
+		"Makefile":  makefile,
+	} {
 		if err := os.WriteFile(filepath.Join(src, name), []byte(content), 0o644); err != nil {
 			t.Fatalf("writing fixture file %s: %v", name, err)
 		}
@@ -254,5 +273,166 @@ func TestListRepos(t *testing.T) {
 	}
 	if got.IndexedCommit != commit {
 		t.Errorf("IndexedCommit = %q, want %q", got.IndexedCommit, commit)
+	}
+}
+
+// fixtureIndexMultiRepo indexes acme/widget alongside a second repo whose
+// name contains a regex metacharacter, so facet alternations can be tested
+// for both multi-repo OR and QuoteMeta escaping. The second repo shares the
+// "kiwi" token so one query spans both.
+func fixtureIndexMultiRepo(t *testing.T) string {
+	t.Helper()
+	indexDir, _ := fixtureIndex(t, "")
+
+	src := filepath.Join(t.TempDir(), "lib")
+	git(t, "", "init", "-b", "main", src)
+	if err := os.WriteFile(filepath.Join(src, "lib.go"), []byte("package lib\n\nconst kiwi = \"green\"\n"), 0o644); err != nil {
+		t.Fatalf("writing lib fixture: %v", err)
+	}
+	git(t, src, "add", ".")
+	git(t, src, "commit", "-m", "initial")
+
+	mirror := filepath.Join(t.TempDir(), "my.lib.git")
+	git(t, "", "clone", "--bare", src, mirror)
+	commit := git(t, mirror, "rev-parse", "refs/heads/main")
+
+	ix := &index.Indexer{IndexDir: indexDir}
+	if err := ix.IndexRepo(context.Background(), mirror, "acme/my.lib", "main", commit); err != nil {
+		t.Fatalf("IndexRepo acme/my.lib: %v", err)
+	}
+	return indexDir
+}
+
+// openMultiRepoSearcher opens a searcher over the two-repo fixture.
+func openMultiRepoSearcher(t *testing.T) *Searcher {
+	t.Helper()
+	s, err := Open(fixtureIndexMultiRepo(t))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(s.Close)
+	return s
+}
+
+func TestExtOf(t *testing.T) {
+	tests := []struct{ path, want string }{
+		{"a/b/c.go", "go"},
+		{"main.go", "go"},
+		{"Makefile", ""},
+		{".gitignore", ""},
+		{"a/.gitignore", ""},
+		{"x.TAR.GZ", "gz"},
+		{"dir.d/file", ""},
+		{"a/b/LICENSE", ""},
+	}
+	for _, tt := range tests {
+		if got := extOf(tt.path); got != tt.want {
+			t.Errorf("extOf(%q) = %q, want %q", tt.path, got, tt.want)
+		}
+	}
+}
+
+// TestSearchFileFilterComposition is the regression test for zoekt's operator
+// precedence: `or` binds looser than implicit AND, so a file filter appended
+// to the query text would apply to only one side of a disjunction. The
+// fixture spreads the "kiwi" token across .go, .ts, and an extensionless
+// file, so a wrongly-composed filter shows up as leaked non-.go matches.
+func TestSearchFileFilterComposition(t *testing.T) {
+	s, _ := openSearcher(t, "")
+
+	res, err := s.Search(context.Background(), Options{
+		Query:      "kiwi or Frobnicate",
+		FileFilter: `\.go$`,
+	})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(res.Files) == 0 {
+		t.Fatal("no files matched; the filter should narrow, not empty, the result")
+	}
+	for _, f := range res.Files {
+		if !strings.HasSuffix(f.Path, ".go") {
+			t.Errorf("file %q leaked past the .go filter — the filter did not cover both sides of the `or`", f.Path)
+		}
+	}
+	// Both sides of the disjunction must survive: kiwi lives in other.go and
+	// Frobnicate in widget.go.
+	paths := map[string]bool{}
+	for _, f := range res.Files {
+		paths[f.Path] = true
+	}
+	if !paths["other.go"] || !paths["widget.go"] {
+		t.Errorf("matched %v, want both other.go (kiwi) and widget.go (Frobnicate)", paths)
+	}
+}
+
+// TestFileFilterParses pins that zoekt accepts the grouped, anchored,
+// alternated regexes the facet layer builds. If its lexer ever terminated a
+// file: value at "(" or "|", extension facets would fail at parse time.
+func TestFileFilterParses(t *testing.T) {
+	s, _ := openSearcher(t, "")
+	for _, filter := range []string{
+		`(\.go$)`,
+		`(\.go$|\.ts$)`,
+		`(\.go$|(^|/)\.?[^/.]+$)`,
+	} {
+		if _, err := s.Search(context.Background(), Options{Query: "kiwi", FileFilter: filter}); err != nil {
+			t.Errorf("FileFilter %q: %v", filter, err)
+		}
+	}
+}
+
+func TestSearchFileFilterNoExtension(t *testing.T) {
+	s, _ := openSearcher(t, "")
+
+	res, err := s.Search(context.Background(), Options{
+		Query:      "kiwi",
+		FileFilter: `(^|/)\.?[^/.]+$`,
+	})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(res.Files) != 1 || res.Files[0].Path != "Makefile" {
+		t.Errorf("files = %+v, want only Makefile", res.Files)
+	}
+}
+
+func TestAggregateIgnoresFilters(t *testing.T) {
+	s := openMultiRepoSearcher(t)
+
+	facets, err := s.Aggregate(context.Background(), "kiwi", 1000)
+	if err != nil {
+		t.Fatalf("Aggregate: %v", err)
+	}
+	byValue := func(vs []FacetValue) map[string]int {
+		m := map[string]int{}
+		for _, v := range vs {
+			m[v.Value] = v.Count
+		}
+		return m
+	}
+	repos := byValue(facets.Repos)
+	if repos["acme/widget"] == 0 || repos["acme/my.lib"] == 0 {
+		t.Errorf("repos = %+v, want both fixture repos", facets.Repos)
+	}
+	exts := byValue(facets.Exts)
+	for _, want := range []string{"go", "ts", ""} {
+		if exts[want] == 0 {
+			t.Errorf("exts = %+v, want a bucket for %q", facets.Exts, want)
+		}
+	}
+}
+
+func TestAggregateCountsLines(t *testing.T) {
+	s, _ := openSearcher(t, "")
+
+	// Frobnicate is on four lines of widget.go: the doc comment, the
+	// definition, and two calls. Counting files would report 1.
+	facets, err := s.Aggregate(context.Background(), "Frobnicate", 1000)
+	if err != nil {
+		t.Fatalf("Aggregate: %v", err)
+	}
+	if len(facets.Repos) != 1 || facets.Repos[0].Count != 4 {
+		t.Errorf("repos = %+v, want acme/widget with 4 line matches", facets.Repos)
 	}
 }

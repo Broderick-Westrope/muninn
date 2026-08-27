@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -38,6 +39,20 @@ const banana = "yellow"
 // return. Its contents are distinct from the other fixture files so search
 // assertions stay unambiguous.
 const subGo = `package sub
+
+const kiwi = "green"
+`
+
+// otherTS and makefile give the fixture extension variety sharing one token,
+// so extension facets have something to separate — including the
+// no-extension bucket.
+const otherTS = `export const kiwi = "green";
+`
+
+const makefile = "build:\n\t@echo kiwi\n"
+
+// libGo is the second facet-fixture repo's only file.
+const libGo = `package lib
 
 const kiwi = "green"
 `
@@ -79,6 +94,10 @@ func newFixture(t *testing.T) (*Server, string) {
 		"big.txt":   hugeText,
 		// A subdirectory so tree listings can exercise dir entries.
 		"pkg/sub.go": subGo,
+		// Extension variety, sharing the "kiwi" token, so extension facets
+		// have something to separate.
+		"other.ts": otherTS,
+		"Makefile": makefile,
 	}
 	for name, content := range files {
 		path := filepath.Join(src, name)
@@ -126,17 +145,79 @@ func newFixture(t *testing.T) (*Server, string) {
 // the given time.
 func writeStatus(t *testing.T, path, commit string, finishedAt time.Time) {
 	t.Helper()
+	writeStatusRepos(t, path, finishedAt, map[string]string{"acme/widget": commit})
+}
+
+// writeStatusRepos writes a successful sync status for several repos.
+func writeStatusRepos(t *testing.T, path string, finishedAt time.Time, commits map[string]string) {
+	t.Helper()
+	repos := make(map[string]status.RepoStatus, len(commits))
+	for name, commit := range commits {
+		repos[name] = status.RepoStatus{Fetched: true, Indexed: true, IndexedCommit: commit}
+	}
 	err := status.Write(path, &status.SyncStatus{
 		StartedAt:  finishedAt.Add(-time.Minute),
 		FinishedAt: finishedAt,
 		Success:    true,
-		Repos: map[string]status.RepoStatus{
-			"acme/widget": {Fetched: true, Indexed: true, IndexedCommit: commit},
-		},
+		Repos:      repos,
 	})
 	if err != nil {
 		t.Fatalf("status.Write: %v", err)
 	}
+}
+
+// newFacetFixture builds a two-repo index so facet alternations can be
+// tested for multi-repo OR and for QuoteMeta escaping: the second repo's
+// name contains a regex metacharacter. Kept separate from newFixture so the
+// single-repo assertions in TestAPIRepos keep holding.
+func newFacetFixture(t *testing.T) *Server {
+	t.Helper()
+	root := t.TempDir()
+	mirrorsDir := filepath.Join(root, "mirrors")
+	indexDir := filepath.Join(root, "index")
+	if err := os.MkdirAll(indexDir, 0o755); err != nil {
+		t.Fatalf("creating index dir: %v", err)
+	}
+	commits := map[string]string{}
+	for repo, files := range map[string]map[string]string{
+		"acme/widget": {"widget.go": widgetGo, "other.ts": otherTS, "Makefile": makefile},
+		// The dot is the escaping test: an unquoted "." would also match
+		// "acme/myxlib".
+		"acme/my.lib": {"lib.go": libGo},
+	} {
+		src := filepath.Join(t.TempDir(), "src")
+		git(t, "", "init", "-b", "main", src)
+		for name, content := range files {
+			if err := os.WriteFile(filepath.Join(src, name), []byte(content), 0o644); err != nil {
+				t.Fatalf("writing %s: %v", name, err)
+			}
+		}
+		git(t, src, "add", ".")
+		git(t, src, "commit", "-m", "initial")
+
+		owner, name, _ := strings.Cut(repo, "/")
+		mirror := filepath.Join(mirrorsDir, owner, name+".git")
+		if err := os.MkdirAll(filepath.Dir(mirror), 0o755); err != nil {
+			t.Fatalf("creating mirror dir: %v", err)
+		}
+		git(t, "", "clone", "--bare", src, mirror)
+		commit := git(t, mirror, "rev-parse", "refs/heads/main")
+		commits[repo] = commit
+
+		ix := &index.Indexer{IndexDir: indexDir}
+		if err := ix.IndexRepo(context.Background(), mirror, repo, "main", commit); err != nil {
+			t.Fatalf("IndexRepo %s: %v", repo, err)
+		}
+	}
+
+	statusPath := filepath.Join(root, "status.json")
+	writeStatusRepos(t, statusPath, time.Now(), commits)
+	searcher, err := search.Open(indexDir)
+	if err != nil {
+		t.Fatalf("search.Open: %v", err)
+	}
+	t.Cleanup(searcher.Close)
+	return New(searcher, statusPath, mirrorsDir, nil, "")
 }
 
 // get performs a GET request against the server's handler and decodes the
@@ -613,5 +694,201 @@ func TestAPITreeTruncated(t *testing.T) {
 	get(t, srv, `/api/tree?repo=acme/widget`, &body)
 	if len(body.Entries) != 2 || !body.Truncated {
 		t.Errorf("entries = %d, truncated = %v; want 2 and true", len(body.Entries), body.Truncated)
+	}
+}
+
+// facetCounts maps a facet slice to value -> count.
+func facetCounts(vs []facetValueJSON) map[string]int {
+	m := make(map[string]int, len(vs))
+	for _, v := range vs {
+		m[v.Value] = v.Count
+	}
+	return m
+}
+
+// searchPaths lists "repo/path" for every file in a search response.
+func searchPaths(body searchResponse) []string {
+	var out []string
+	for _, f := range body.Files {
+		out = append(out, f.Repo+"/"+f.Path)
+	}
+	return out
+}
+
+func TestAPISearchFacets(t *testing.T) {
+	srv := newFacetFixture(t)
+	var body searchResponse
+	get(t, srv, `/api/search?q=kiwi`, &body)
+
+	repos := facetCounts(body.Facets.Repos)
+	if repos["acme/widget"] == 0 || repos["acme/my.lib"] == 0 {
+		t.Errorf("repo facets = %+v, want both repos", body.Facets.Repos)
+	}
+	exts := facetCounts(body.Facets.Exts)
+	for _, want := range []string{"go", "ts", ""} {
+		if exts[want] == 0 {
+			t.Errorf("ext facets = %+v, want a bucket for %q", body.Facets.Exts, want)
+		}
+	}
+}
+
+// TestAPISearchFacetsIgnoreSelection is the guard against computing facets
+// from the filtered results, which would make every unselected value vanish
+// on the first click. A deliberately tiny limit forces the results pass and
+// the aggregation pass to disagree, so reusing the former would show up.
+func TestAPISearchFacetsIgnoreSelection(t *testing.T) {
+	srv := newFacetFixture(t)
+	var unfiltered, filtered searchResponse
+	get(t, srv, `/api/search?q=kiwi&limit=1`, &unfiltered)
+	get(t, srv, `/api/search?q=kiwi&limit=1&repo=acme/widget`, &filtered)
+
+	before, after := facetCounts(unfiltered.Facets.Repos), facetCounts(filtered.Facets.Repos)
+	if len(after) != len(before) {
+		t.Fatalf("repo facets changed on selection: %+v then %+v", unfiltered.Facets.Repos, filtered.Facets.Repos)
+	}
+	for value, count := range before {
+		if after[value] != count {
+			t.Errorf("facet %q count changed on selection: %d then %d", value, count, after[value])
+		}
+	}
+	// The selection must still have narrowed the results themselves.
+	for _, f := range filtered.Files {
+		if f.Repo != "acme/widget" {
+			t.Errorf("file from %q survived repo=acme/widget", f.Repo)
+		}
+	}
+}
+
+func TestAPISearchFacetCountNotBelowRows(t *testing.T) {
+	srv := newFacetFixture(t)
+	var body searchResponse
+	get(t, srv, `/api/search?q=Frobnicate&repo=acme/widget`, &body)
+
+	rows := 0
+	for _, f := range body.Files {
+		if n := len(f.Lines); n > 0 {
+			rows += n
+		} else {
+			rows++
+		}
+	}
+	if got := facetCounts(body.Facets.Repos)["acme/widget"]; got < rows {
+		t.Errorf("facet count %d is below the %d rows displayed for it", got, rows)
+	}
+}
+
+func TestAPISearchFacetFilter(t *testing.T) {
+	srv := newFacetFixture(t)
+	var body searchResponse
+	get(t, srv, `/api/search?q=kiwi&repo=`+url.QueryEscape("acme/my.lib"), &body)
+	if got := searchPaths(body); len(got) != 1 || got[0] != "acme/my.lib/lib.go" {
+		t.Errorf("files = %v, want only acme/my.lib/lib.go", got)
+	}
+
+	var none searchResponse
+	get(t, srv, `/api/search?q=kiwi&repo=`+url.QueryEscape("acme/absent"), &none)
+	if len(none.Files) != 0 {
+		t.Errorf("files = %v, want none for an unmatched repo", searchPaths(none))
+	}
+}
+
+// TestAPISearchFacetTwoRepos covers OR within a category: two selected repos
+// must both come back, which a naive ANDed filter would make impossible.
+func TestAPISearchFacetTwoRepos(t *testing.T) {
+	srv := newFacetFixture(t)
+	var body searchResponse
+	get(t, srv, `/api/search?q=kiwi&repo=`+url.QueryEscape("acme/widget,acme/my.lib"), &body)
+
+	seen := map[string]bool{}
+	for _, f := range body.Files {
+		seen[f.Repo] = true
+	}
+	if !seen["acme/widget"] || !seen["acme/my.lib"] {
+		t.Errorf("repos = %v, want files from both selected repos", seen)
+	}
+}
+
+// TestAPISearchFacetIntersection covers AND across categories.
+func TestAPISearchFacetIntersection(t *testing.T) {
+	srv := newFacetFixture(t)
+	var body searchResponse
+	get(t, srv, `/api/search?q=kiwi&repo=`+url.QueryEscape("acme/widget")+`&ext=ts`, &body)
+	if got := searchPaths(body); len(got) != 1 || got[0] != "acme/widget/other.ts" {
+		t.Errorf("files = %v, want only acme/widget/other.ts", got)
+	}
+}
+
+// TestAPISearchFacetRegexMeta pins that facet values are quoted: the "." in
+// "acme/my.lib" must be literal, not a wildcard.
+func TestAPISearchFacetRegexMeta(t *testing.T) {
+	srv := newFacetFixture(t)
+	if got := facetRepoFilter([]string{"acme/my.lib"}); got != `(^acme/my\.lib$)` {
+		t.Errorf("facetRepoFilter = %q, want the dot escaped", got)
+	}
+	var body searchResponse
+	get(t, srv, `/api/search?q=kiwi&repo=`+url.QueryEscape("acme/myxlib"), &body)
+	if len(body.Files) != 0 {
+		t.Errorf("files = %v, want none: 'acme/myxlib' must not match 'acme/my.lib'", searchPaths(body))
+	}
+}
+
+func TestAPISearchFacetExtFilter(t *testing.T) {
+	srv := newFacetFixture(t)
+	tests := []struct {
+		ext  string
+		want []string
+	}{
+		{"ts", []string{"acme/widget/other.ts"}},
+		{"", []string{"acme/widget/Makefile"}},
+	}
+	for _, tt := range tests {
+		var body searchResponse
+		get(t, srv, `/api/search?q=kiwi&repo=`+url.QueryEscape("acme/widget")+`&ext=`+tt.ext, &body)
+		got := searchPaths(body)
+		if len(got) != len(tt.want) || (len(got) > 0 && got[0] != tt.want[0]) {
+			t.Errorf("ext=%q: files = %v, want %v", tt.ext, got, tt.want)
+		}
+	}
+}
+
+// TestAPISearchFacetWithTypedAtom checks a hand-typed repo: atom composes
+// with a facet param rather than conflicting with it.
+func TestAPISearchFacetWithTypedAtom(t *testing.T) {
+	srv := newFacetFixture(t)
+	var body searchResponse
+	get(t, srv, `/api/search?q=`+url.QueryEscape("kiwi repo:widget")+`&ext=ts`, &body)
+	if got := searchPaths(body); len(got) != 1 || got[0] != "acme/widget/other.ts" {
+		t.Errorf("files = %v, want the typed atom and the facet to both apply", got)
+	}
+}
+
+func TestAPISearchFacetCaps(t *testing.T) {
+	srv := newFacetFixture(t)
+	many := func(n int, prefix string) string {
+		parts := make([]string, n)
+		for i := range parts {
+			parts[i] = fmt.Sprintf("%s%d", prefix, i)
+		}
+		return strings.Join(parts, ",")
+	}
+	tests := []struct{ name, param string }{
+		{"repos", `repo=` + url.QueryEscape(many(maxFacetRepos+1, "acme/r"))},
+		{"exts", `ext=` + url.QueryEscape(many(maxFacetExts+1, "e"))},
+	}
+	for _, tt := range tests {
+		rec := get(t, srv, `/api/search?q=kiwi&`+tt.param, nil)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s over cap: status = %d, want 400", tt.name, rec.Code)
+		}
+	}
+}
+
+func TestAPISearchFacetExtValidation(t *testing.T) {
+	srv := newFacetFixture(t)
+	for _, ext := range []string{`go$|.*`, `.go`, `a/b`, `(`} {
+		rec := get(t, srv, `/api/search?q=kiwi&ext=`+url.QueryEscape(ext), nil)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("ext %q: status = %d, want 400", ext, rec.Code)
+		}
 	}
 }

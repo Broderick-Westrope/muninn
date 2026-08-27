@@ -589,3 +589,73 @@ footer {
     display: none;
   }
 }
+
+/* ---- facets ------------------------------------------------------------ */
+
+.facet-group {
+  margin-bottom: 14px;
+}
+
+.facet-group h3 {
+  margin: 0 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.facet-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.facet-chip {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 2px 6px;
+  font: 11px var(--mono);
+  color: var(--fg);
+  text-align: left;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.facet-chip:hover,
+.facet-chip:focus-visible {
+  border-color: var(--border);
+}
+
+/* Selected state carries a border and weight, not colour alone. */
+.facet-chip.on {
+  font-weight: 600;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border-color: var(--accent);
+}
+
+.facet-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.facet-count {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.facet-chip.on .facet-count {
+  color: inherit;
+}
+
+.facet-note {
+  margin: 0;
+  font-size: 11px;
+  color: var(--muted);
+}
