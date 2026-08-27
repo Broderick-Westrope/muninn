@@ -2,6 +2,7 @@ package search
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -434,5 +435,78 @@ func TestAggregateCountsLines(t *testing.T) {
 	}
 	if len(facets.Repos) != 1 || facets.Repos[0].Count != 4 {
 		t.Errorf("repos = %+v, want acme/widget with 4 line matches", facets.Repos)
+	}
+}
+
+// TestAggregateIsDeterministic guards the facet list against reshuffling
+// between identical searches. zoekt's TotalMaxMatchCount is a budget shared
+// across shards, so a truncated aggregation returns whichever shards
+// finished first; the same query then reports a different set of repos run
+// to run and facet chips appear and vanish as the user clicks. Aggregate
+// must use a per-shard cap, which never halts the search early.
+//
+// The fixture is small enough not to truncate, so this pins the contract
+// rather than the race. TestAggregateVisitsEverySaturatedShard covers the
+// truncating case.
+func TestAggregateIsDeterministic(t *testing.T) {
+	s := openMultiRepoSearcher(t)
+
+	var first string
+	for i := 0; i < 8; i++ {
+		facets, err := s.Aggregate(context.Background(), "kiwi", 500)
+		if err != nil {
+			t.Fatalf("Aggregate: %v", err)
+		}
+		var b strings.Builder
+		for _, v := range facets.Repos {
+			fmt.Fprintf(&b, "%s:%d|", v.Value, v.Count)
+		}
+		for _, v := range facets.Exts {
+			fmt.Fprintf(&b, "%s:%d|", v.Value, v.Count)
+		}
+		if i == 0 {
+			first = b.String()
+			continue
+		}
+		if b.String() != first {
+			t.Fatalf("run %d differs:\n first: %s\n  this: %s", i, first, b.String())
+		}
+	}
+}
+
+// TestAggregateVisitsEverySaturatedShard pins that a per-shard cap low
+// enough to saturate does not drop repos: every shard is still visited, so
+// the value list stays complete. A cross-shard budget this small would
+// return only whichever repo won the race.
+func TestAggregateVisitsEverySaturatedShard(t *testing.T) {
+	s := openMultiRepoSearcher(t)
+
+	for i := 0; i < 8; i++ {
+		facets, err := s.Aggregate(context.Background(), "kiwi", 1)
+		if err != nil {
+			t.Fatalf("Aggregate: %v", err)
+		}
+		got := map[string]bool{}
+		for _, v := range facets.Repos {
+			got[v.Value] = true
+		}
+		if !got["acme/widget"] || !got["acme/my.lib"] {
+			t.Fatalf("run %d: repos = %+v, want both repos even with a saturating cap", i, facets.Repos)
+		}
+	}
+}
+
+// TestSearchPerShardLimitLiftsTotalBudget pins that a per-shard limit does
+// not also cap total matches: a cap of 1 must not reduce the whole search to
+// a single match.
+func TestSearchPerShardLimitLiftsTotalBudget(t *testing.T) {
+	s := openMultiRepoSearcher(t)
+
+	res, err := s.Search(context.Background(), Options{Query: "kiwi", PerShardMatchLimit: 1})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(res.Files) < 2 {
+		t.Errorf("files = %d, want matches from more than one shard", len(res.Files))
 	}
 }

@@ -35,10 +35,13 @@ const (
 	// becomes a branch of a regex alternation compiled on each search.
 	maxFacetRepos = 50
 	maxFacetExts  = 20
-	// facetAggregateLimit caps the facet-free aggregation pass. Well above
-	// the display limit so a facet count is never lower than the rows a
-	// filtered search returns for that value.
-	facetAggregateLimit = 1000
+	// facetShardLimit bounds the facet aggregation pass per index shard
+	// rather than in total. A total cap is a budget shared across shards, so
+	// a truncated aggregation reports whichever repos finished first and the
+	// facet list visibly reshuffles between identical searches. Kept at
+	// maxSearchLimit or above so an aggregated count can never fall below
+	// the rows displayed for that value.
+	facetShardLimit = 500
 )
 
 // searchResponse is the JSON shape of /api/search.
@@ -177,7 +180,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	// Always a separate pass, never reusing res: it runs at a lower cap, so
 	// counts taken from it would change the moment a facet is selected —
 	// exactly the instability this design exists to avoid.
-	facets, err := s.searcher.Aggregate(r.Context(), q, facetAggregateLimit)
+	facets, err := s.searcher.Aggregate(r.Context(), q, facetShardLimit)
 	if err != nil {
 		// The query already parsed for the results pass, so a failure here
 		// is a server fault rather than bad input.

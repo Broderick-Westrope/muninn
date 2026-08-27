@@ -6,6 +6,7 @@ package search
 import (
 	"context"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -87,6 +88,14 @@ func (s *Searcher) Search(ctx context.Context, opts Options) (*Result, error) {
 		// returned file has at least one match, maxResults files suffice.
 		MaxDocDisplayCount:   maxResults,
 		MaxMatchDisplayCount: maxResults,
+	}
+	if opts.PerShardMatchLimit > 0 {
+		// Per-shard cap instead of a cross-shard budget: deterministic, and
+		// every shard is visited. See Options.PerShardMatchLimit.
+		zOpts.ShardMaxMatchCount = opts.PerShardMatchLimit
+		zOpts.TotalMaxMatchCount = math.MaxInt32
+		zOpts.MaxDocDisplayCount = math.MaxInt32
+		zOpts.MaxMatchDisplayCount = math.MaxInt32
 	}
 
 	res, err := s.z.Search(ctx, q, zOpts)
@@ -184,15 +193,16 @@ func hasSymbolInfo(lm zoekt.LineMatch) bool {
 // disappear on the first click, leaving multi-select unbuildable and a
 // zero-result selection with no chip to undo.
 //
-// Counts are line matches, matching what the UI renders as rows, and
-// maxResults is the aggregation cap. Set it above the display limit so a
-// count is never lower than the rows a filtered search shows.
+// perShardLimit bounds the work per index shard. It must not be turned into
+// a total-match cap: that budget is shared across shards, so a truncated
+// aggregation returns whichever repos won the race and the facet list
+// reshuffles between identical searches. See Options.PerShardMatchLimit.
 //
-// Known limitation: the cap counts line matches, so one heavily-matching
-// repo can consume the budget and narrow the value list. Facets.Truncated
-// discloses that.
-func (s *Searcher) Aggregate(ctx context.Context, q string, maxResults int) (*Facets, error) {
-	res, err := s.Search(ctx, Options{Query: q, MaxResults: maxResults})
+// Counts are line matches, matching what the UI renders as rows. They
+// saturate for a repo with more than perShardLimit matches in one shard,
+// which Facets.Truncated discloses.
+func (s *Searcher) Aggregate(ctx context.Context, q string, perShardLimit int) (*Facets, error) {
+	res, err := s.Search(ctx, Options{Query: q, PerShardMatchLimit: perShardLimit})
 	if err != nil {
 		return nil, err
 	}

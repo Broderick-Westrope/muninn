@@ -17,6 +17,22 @@ type Options struct {
 	// MaxResults is the hard cap on returned line matches; 0 means
 	// defaultMaxResults.
 	MaxResults int
+	// PerShardMatchLimit, when non-zero, bounds matches per index shard and
+	// lifts the cross-shard budget instead of capping total matches. Use it
+	// for aggregation, where the returned *set* has to be stable.
+	//
+	// zoekt's TotalMaxMatchCount is a budget shared across shards: the
+	// search stops once it is exhausted, so which shards contributed
+	// depends on which happened to finish first. Two identical searches can
+	// therefore report different repos. A per-shard cap is applied by each
+	// shard independently and never halts the search, so every shard is
+	// always visited and the result is deterministic — and coverage is
+	// broader, since one heavily-matching repo can no longer consume the
+	// whole budget.
+	//
+	// It must stay >= maxSearchLimit so an aggregated count can never fall
+	// below the number of rows a capped search displays for that value.
+	PerShardMatchLimit int
 	// GroupByRepo sorts the returned files by repo name (stable, keeping
 	// zoekt's relevance order within each repo).
 	GroupByRepo bool
