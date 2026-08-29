@@ -118,11 +118,42 @@ func (m *Manager) HeadCommit(ctx context.Context, dir, defaultBranch string) (st
 	return sha, nil
 }
 
-// MarkIndexed records the indexed commit under refs/muninn/indexed,
-// keeping it reachable across upstream force-pushes and gc.
+// MarkIndexed records the indexed commit under refs/muninn/indexed and
+// rotates the previous generation to refs/muninn/indexed-prev, keeping both
+// reachable across upstream force-pushes and gc. Two generations are kept
+// because a live MCP session may still hold the previously indexed commit
+// while a sync moves the pin forward.
 func (m *Manager) MarkIndexed(ctx context.Context, dir, sha string) error {
-	if _, err := runGit(ctx, nil, "-C", dir, "update-ref", "refs/muninn/indexed", sha); err != nil {
-		return fmt.Errorf("marking indexed commit in %s: %w", dir, err)
+	old, err := runGit(ctx, nil, "-C", dir, "rev-parse", "--verify", "--quiet", "refs/muninn/indexed")
+	if err != nil {
+		// rev-parse --verify --quiet exits 1 when the ref does not exist;
+		// treat that as "no previous generation". Anything else (exit 128,
+		// timeout, ...) is a real failure.
+		var gitErr *gitcmd.Error
+		if !errors.As(err, &gitErr) || gitErr.ExitCode != 1 {
+			return fmt.Errorf("reading current indexed ref in %s: %w", dir, err)
+		}
+		old = ""
+	}
+	if old == sha {
+		return nil
+	}
+	if old == "" {
+		if _, err := runGit(ctx, nil, "-C", dir, "update-ref", "refs/muninn/indexed", sha); err != nil {
+			return fmt.Errorf("marking indexed commit in %s: %w", dir, err)
+		}
+		return nil
+	}
+	// Rotate both refs in one atomic update-ref --stdin batch. The old
+	// value on the indexed line is a CAS guard: if a concurrent sync moved
+	// the ref between the read above and this write, the batch fails
+	// instead of silently dropping a generation. indexed-prev takes no old
+	// value — whatever it currently holds is the generation being rotated
+	// out and is always overwritten.
+	batch := "update refs/muninn/indexed-prev " + old + "\n" +
+		"update refs/muninn/indexed " + sha + " " + old + "\n"
+	if _, err := (gitcmd.Runner{}).RunStdin(ctx, batch, "-C", dir, "update-ref", "--stdin"); err != nil {
+		return fmt.Errorf("rotating indexed refs in %s: %w", dir, err)
 	}
 	return nil
 }

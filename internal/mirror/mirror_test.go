@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/broderick-westrope/muninn/internal/discover"
 )
 
@@ -290,4 +292,110 @@ func TestCleanTmp(t *testing.T) {
 	if _, err := os.Stat(keep); err != nil {
 		t.Errorf("real mirror removed by CleanTmp: %v", err)
 	}
+}
+
+// refValue returns the value of ref in dir, or "" if the ref does not
+// exist.
+func refValue(t *testing.T, dir, ref string) string {
+	t.Helper()
+	return git(t, dir, "for-each-ref", "--format=%(objectname)", ref)
+}
+
+// addUpstreamCommit adds a commit to an upstream repo and returns the new
+// head SHA.
+func addUpstreamCommit(t *testing.T, upstream string) string {
+	t.Helper()
+	require.NoError(t, os.WriteFile(filepath.Join(upstream, "b.txt"), []byte("two\n"), 0o644))
+	git(t, upstream, "add", ".")
+	git(t, upstream, "commit", "-m", "second")
+	return git(t, upstream, "rev-parse", "HEAD")
+}
+
+func TestMarkIndexedTwoGenerations(t *testing.T) {
+	m := &Manager{BaseDir: t.TempDir()}
+	repo, upstream := fixtureRepo(t, "acme/widget")
+	ctx := context.Background()
+
+	_, err := m.Ensure(ctx, repo, "")
+	require.NoError(t, err)
+	dir := m.Dir(repo.FullName)
+	commitA, err := m.HeadCommit(ctx, dir, "main")
+	require.NoError(t, err)
+
+	// First generation: indexed at A, no prev.
+	require.NoError(t, m.MarkIndexed(ctx, dir, commitA))
+	require.Equal(t, commitA, refValue(t, dir, "refs/muninn/indexed"))
+	require.Empty(t, refValue(t, dir, "refs/muninn/indexed-prev"))
+
+	// Second generation: indexed at B, prev rotated to A.
+	commitB := addUpstreamCommit(t, upstream)
+	_, err = m.Ensure(ctx, repo, "")
+	require.NoError(t, err)
+	require.NoError(t, m.MarkIndexed(ctx, dir, commitB))
+	require.Equal(t, commitB, refValue(t, dir, "refs/muninn/indexed"))
+	require.Equal(t, commitA, refValue(t, dir, "refs/muninn/indexed-prev"))
+
+	// Same SHA again: a no-op that leaves both refs untouched.
+	require.NoError(t, m.MarkIndexed(ctx, dir, commitB))
+	require.Equal(t, commitB, refValue(t, dir, "refs/muninn/indexed"))
+	require.Equal(t, commitA, refValue(t, dir, "refs/muninn/indexed-prev"))
+}
+
+// TestMarkIndexedStaleCAS exercises the CAS failure mode directly: a batch
+// whose old-value guard no longer matches the ref must fail and leave the
+// ref untouched. (Interleaving a concurrent MarkIndexed between its read
+// and write is not orchestrable from a test, so the batch is issued raw.)
+func TestMarkIndexedStaleCAS(t *testing.T) {
+	m := &Manager{BaseDir: t.TempDir()}
+	repo, upstream := fixtureRepo(t, "acme/widget")
+	ctx := context.Background()
+
+	_, err := m.Ensure(ctx, repo, "")
+	require.NoError(t, err)
+	dir := m.Dir(repo.FullName)
+	commitA, err := m.HeadCommit(ctx, dir, "main")
+	require.NoError(t, err)
+	require.NoError(t, m.MarkIndexed(ctx, dir, commitA))
+
+	commitB := addUpstreamCommit(t, upstream)
+	_, err = m.Ensure(ctx, repo, "")
+	require.NoError(t, err)
+
+	// The ref is at A, but the batch claims it is at B: git must reject it.
+	batch := "update refs/muninn/indexed " + commitB + " " + commitB + "\n"
+	cmd := exec.Command("git", "-C", dir, "update-ref", "--stdin")
+	cmd.Stdin = strings.NewReader(batch)
+	out, err := cmd.CombinedOutput()
+	require.Error(t, err, "stale old-value batch must fail: %s", out)
+	require.Equal(t, commitA, refValue(t, dir, "refs/muninn/indexed"))
+}
+
+// TestMarkIndexedSurvivesHostileMaintenance is the two-generation
+// guarantee end to end: after an upstream force-push, a prune fetch, a new
+// pin, and gc --prune=now, both the current and the previous indexed
+// commits must still be readable (the previous is held by indexed-prev).
+func TestMarkIndexedSurvivesHostileMaintenance(t *testing.T) {
+	m := &Manager{BaseDir: t.TempDir()}
+	repo, upstream := fixtureRepo(t, "acme/widget")
+	ctx := context.Background()
+
+	_, err := m.Ensure(ctx, repo, "")
+	require.NoError(t, err)
+	dir := m.Dir(repo.FullName)
+	commitA, err := m.HeadCommit(ctx, dir, "main")
+	require.NoError(t, err)
+	require.NoError(t, m.MarkIndexed(ctx, dir, commitA))
+
+	// Force-rewrite upstream so A is unreachable from any branch.
+	git(t, upstream, "commit", "--amend", "--allow-empty", "-m", "rewritten")
+	commitB := git(t, upstream, "rev-parse", "HEAD")
+	require.NotEqual(t, commitA, commitB, "fixture amend did not change the commit SHA")
+
+	_, err = m.Ensure(ctx, repo, "")
+	require.NoError(t, err)
+	require.NoError(t, m.MarkIndexed(ctx, dir, commitB))
+
+	git(t, dir, "gc", "--prune=now")
+	git(t, dir, "cat-file", "-e", commitA+"^{commit}")
+	git(t, dir, "cat-file", "-e", commitB+"^{commit}")
 }
