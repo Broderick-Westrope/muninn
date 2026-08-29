@@ -11,6 +11,7 @@ import (
 	"github.com/broderick-westrope/muninn/internal/config"
 	"github.com/broderick-westrope/muninn/internal/ctags"
 	"github.com/broderick-westrope/muninn/internal/discover"
+	"github.com/broderick-westrope/muninn/internal/gitcmd"
 	"github.com/broderick-westrope/muninn/internal/index"
 	"github.com/broderick-westrope/muninn/internal/launchd"
 	"github.com/broderick-westrope/muninn/internal/mirror"
@@ -52,6 +53,11 @@ func resolveConfigPath() string {
 // summary but exit zero; only total failure returns an error, so launchd
 // does not mark the job crashed for one bad repo.
 func runSync(cmd *cobra.Command) error {
+	// Git is a hard prerequisite, validated up front like ctags: fail the
+	// run loudly rather than failing every repo individually.
+	if err := gitcmd.Validate(); err != nil {
+		return fmt.Errorf("validating git: %w", err)
+	}
 	cfg, err := config.Load(resolveConfigPath())
 	if err != nil {
 		return err
