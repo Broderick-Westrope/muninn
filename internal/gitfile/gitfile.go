@@ -4,14 +4,14 @@
 package gitfile
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io/fs"
-	"os/exec"
 	"strconv"
 	"strings"
+
+	"github.com/broderick-westrope/muninn/internal/gitcmd"
 )
 
 // maxBlobBytes is the largest blob ReadFile will return.
@@ -318,20 +318,16 @@ func shortSHA(commit string) string {
 	return commit
 }
 
+// gitRunner is the package's immutable zero-config hermetic runner; gitfile
+// never needs auth or long timeouts.
+var gitRunner = gitcmd.Runner{}
+
 // runGit executes a git command and returns its trimmed stdout.
 func runGit(ctx context.Context, args ...string) (string, error) {
-	out, err := runGitRaw(ctx, args...)
-	return strings.TrimSpace(out), err
+	return gitRunner.Run(ctx, args...)
 }
 
 // runGitRaw executes a git command and returns its stdout verbatim.
 func runGitRaw(ctx context.Context, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("git %s: %w (stderr: %s)", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
-	}
-	return stdout.String(), nil
+	return gitRunner.RunRaw(ctx, args...)
 }

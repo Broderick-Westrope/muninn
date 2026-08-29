@@ -3,20 +3,24 @@
 package mirror
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/broderick-westrope/muninn/internal/discover"
+	"github.com/broderick-westrope/muninn/internal/gitcmd"
 )
+
+// fetchTimeout bounds Ensure's clone and fetch, which legitimately exceed
+// gitcmd.DefaultTimeout on large repos or slow links.
+const fetchTimeout = 10 * time.Minute
 
 // Manager performs git operations on the mirrors under BaseDir.
 // Callers pass the base directory (typically xdg.MirrorsDir()).
@@ -42,7 +46,11 @@ func (m *Manager) Dir(fullName string) string {
 // fetch destination.
 func (m *Manager) Ensure(ctx context.Context, repo discover.Repo, token string) (created bool, err error) {
 	dir := m.Dir(repo.FullName)
+	// gitcmd runs with a hermetic config, so global credential helpers and
+	// url.insteadOf rewrites are deliberately unavailable; network auth
+	// flows exclusively through authEnv's injected HTTP header.
 	env := authEnv(token)
+	fetcher := gitcmd.Runner{Timeout: fetchTimeout, ExtraEnv: env}
 
 	if _, statErr := os.Stat(dir); statErr == nil {
 		// Re-assert the config before fetching so mirrors created by older
@@ -51,7 +59,7 @@ func (m *Manager) Ensure(ctx context.Context, repo discover.Repo, token string) 
 		if err := assertConfig(ctx, dir, repo.FullName); err != nil {
 			return false, err
 		}
-		if _, err := runGit(ctx, env, "-C", dir, "fetch", "--prune", "origin"); err != nil {
+		if _, err := fetcher.Run(ctx, "-C", dir, "fetch", "--prune", "origin"); err != nil {
 			return false, fmt.Errorf("fetching %s: %w", repo.FullName, err)
 		}
 		return false, nil
@@ -76,7 +84,7 @@ func (m *Manager) Ensure(ctx context.Context, repo discover.Repo, token string) 
 	if err := os.RemoveAll(tmp); err != nil {
 		return false, fmt.Errorf("removing stale temp clone for %s: %w", repo.FullName, err)
 	}
-	if _, err := runGit(ctx, env, "clone", "--bare", "--config", "gc.auto=0", repo.CloneURL, tmp); err != nil {
+	if _, err := fetcher.Run(ctx, "clone", "--bare", "--config", "gc.auto=0", repo.CloneURL, tmp); err != nil {
 		return false, fmt.Errorf("cloning %s: %w", repo.FullName, err)
 	}
 	if _, err := runGit(ctx, nil, "-C", tmp, "config", "remote.origin.fetch", "+refs/heads/*:refs/heads/*"); err != nil {
@@ -224,16 +232,8 @@ func authEnv(token string) []string {
 	)
 }
 
+// runGit executes a git command through the hermetic gitcmd runner with
+// extraEnv appended, returning its trimmed stdout.
 func runGit(ctx context.Context, extraEnv []string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
-	if len(extraEnv) > 0 {
-		cmd.Env = append(os.Environ(), extraEnv...)
-	}
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("git %s: %w (stderr: %s)", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
-	}
-	return strings.TrimSpace(stdout.String()), nil
+	return gitcmd.Runner{ExtraEnv: extraEnv}.Run(ctx, args...)
 }
