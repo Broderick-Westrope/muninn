@@ -16,7 +16,9 @@ import (
 )
 
 // git runs a git command against dir (or without -C when dir is empty),
-// failing the test on error.
+// failing the test on error. Global and system config are disabled so
+// host configuration (commit templates, hooks paths, ...) cannot leak
+// into the fixture history.
 func git(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	base := []string{"-c", "user.name=test", "-c", "user.email=test@example.com"}
@@ -24,6 +26,7 @@ func git(t *testing.T, dir string, args ...string) string {
 		base = append(base, "-C", dir)
 	}
 	cmd := exec.Command("git", append(base, args...)...)
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %v: %v\n%s", args, err, out)

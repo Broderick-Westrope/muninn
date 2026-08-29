@@ -4,14 +4,14 @@
 package gitfile
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io/fs"
-	"os/exec"
 	"strconv"
 	"strings"
+
+	"github.com/broderick-westrope/muninn/internal/gitcmd"
 )
 
 // maxBlobBytes is the largest blob ReadFile will return.
@@ -22,6 +22,14 @@ const maxBlobBytes = 10 << 20 // 10 MiB
 // force-push followed by a failed index run). Running `muninn sync` repairs
 // it.
 var ErrIndexMismatch = errors.New("indexed commit not found in mirror; index and mirror are out of sync, run `muninn sync`")
+
+// ErrUnknownRev is wrapped by errors from ResolveRev when a caller-supplied
+// revision does not resolve to a commit in the mirror.
+var ErrUnknownRev = errors.New("unknown revision")
+
+// ErrUnknownPath is wrapped by errors from ClassifyPathErr when git reports
+// that a path does not exist at the requested revision.
+var ErrUnknownPath = errors.New("path not found at revision")
 
 // ErrFileTooLarge is returned by ReadFile for blobs larger than 10 MiB.
 var ErrFileTooLarge = errors.New("file too large to read (over 10 MiB)")
@@ -303,11 +311,73 @@ func isMissingObject(err error) bool {
 
 // checkCommit verifies the commit exists and is reachable in the mirror,
 // returning ErrIndexMismatch otherwise.
+//
+// It is only for muninn-recorded commits (read from the status file), where
+// an unresolvable commit means the index and the mirror have diverged and
+// `muninn sync` is the remedy. Caller-supplied revisions go through
+// ResolveRev, where the same failure means a typo or an unfetched rev and
+// yields ErrUnknownRev instead.
 func checkCommit(ctx context.Context, mirrorDir, commit string) error {
 	if _, err := runGit(ctx, "-C", mirrorDir, "cat-file", "-e", commit+"^{commit}"); err != nil {
 		return fmt.Errorf("commit %s: %w", shortSHA(commit), ErrIndexMismatch)
 	}
 	return nil
+}
+
+// ResolveRev resolves a caller-supplied revision (full or short SHA, branch
+// name, or tag) to a full commit SHA in the bare mirror at mirrorDir. An
+// unresolvable revision yields an error wrapping ErrUnknownRev; see
+// checkCommit for the contract split with ErrIndexMismatch.
+func ResolveRev(ctx context.Context, mirrorDir, rev string) (string, error) {
+	if rev == "" {
+		return "", fmt.Errorf("empty rev: %w", ErrUnknownRev)
+	}
+	// Reject option lookalikes before git ever sees them; the
+	// --end-of-options below is defense in depth.
+	if strings.HasPrefix(rev, "-") {
+		return "", fmt.Errorf("rev %q starts with '-': %w", rev, ErrUnknownRev)
+	}
+	sha, err := runGit(ctx, "-C", mirrorDir, "rev-parse", "--verify", "--end-of-options", rev+"^{commit}")
+	if err != nil {
+		// Only rev-parse's normal unknown-rev failure (a git error exiting
+		// 128, or 1 under --quiet-style probes) means the rev does not
+		// exist; timeouts and non-git failures pass through so they are
+		// not misreported as a bad revision.
+		var gitErr *gitcmd.Error
+		if errors.As(err, &gitErr) && !errors.Is(err, gitcmd.ErrTimeout) &&
+			(gitErr.ExitCode == 128 || gitErr.ExitCode == 1) {
+			return "", fmt.Errorf("rev %q not found in mirror; it may not exist upstream or predates the last sync: %w (%w)", rev, ErrUnknownRev, err)
+		}
+		return "", fmt.Errorf("resolving rev %q: %w", rev, err)
+	}
+	return sha, nil
+}
+
+// ClassifyPathErr maps git failures that mean "this path does not exist at
+// that revision" onto errors wrapping ErrUnknownPath, so callers (such as
+// blame and log handlers) can render them as user errors rather than
+// internal failures. Any other error, and nil, is passed through unchanged.
+//
+// Callers must resolve the revision via ResolveRev before running the
+// command whose error is classified here: "Not a valid object name" is
+// also git's diagnostic for an unknown rev, so an unresolved rev would be
+// misclassified as a missing path.
+func ClassifyPathErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	for _, marker := range []string{
+		"no such path",               // log/blame: "fatal: no such path 'x' in HEAD"
+		"does not exist in",          // cat-file: "path 'x' does not exist in 'rev'"
+		"Not a valid object name",    // rev:path with a missing path component
+		"exists on disk, but not in", // checkout-style hint for untracked paths
+	} {
+		if strings.Contains(msg, marker) {
+			return fmt.Errorf("%w: %w", ErrUnknownPath, err)
+		}
+	}
+	return err
 }
 
 // shortSHA abbreviates a commit SHA for error messages.
@@ -318,20 +388,16 @@ func shortSHA(commit string) string {
 	return commit
 }
 
+// gitRunner is the package's immutable zero-config hermetic runner; gitfile
+// never needs auth or long timeouts.
+var gitRunner = gitcmd.Runner{}
+
 // runGit executes a git command and returns its trimmed stdout.
 func runGit(ctx context.Context, args ...string) (string, error) {
-	out, err := runGitRaw(ctx, args...)
-	return strings.TrimSpace(out), err
+	return gitRunner.Run(ctx, args...)
 }
 
 // runGitRaw executes a git command and returns its stdout verbatim.
 func runGitRaw(ctx context.Context, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("git %s: %w (stderr: %s)", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
-	}
-	return stdout.String(), nil
+	return gitRunner.RunRaw(ctx, args...)
 }

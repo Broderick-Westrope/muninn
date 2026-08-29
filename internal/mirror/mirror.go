@@ -3,25 +3,41 @@
 package mirror
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/broderick-westrope/muninn/internal/discover"
+	"github.com/broderick-westrope/muninn/internal/gitcmd"
 )
+
+// fetchTimeout bounds Ensure's clone and fetch, which legitimately exceed
+// gitcmd.DefaultTimeout on large repos or slow links.
+const fetchTimeout = 10 * time.Minute
+
+// gcTimeout bounds MaybeGC's git gc, which can legitimately run for
+// minutes on large mirrors.
+const gcTimeout = 10 * time.Minute
+
+// defaultGCLooseObjectThreshold is the loose-object count above which
+// MaybeGC repacks a mirror when Manager.GCLooseObjectThreshold is unset.
+const defaultGCLooseObjectThreshold = 5000
 
 // Manager performs git operations on the mirrors under BaseDir.
 // Callers pass the base directory (typically xdg.MirrorsDir()).
 type Manager struct {
 	BaseDir string
+	// GCLooseObjectThreshold is the loose-object count above which MaybeGC
+	// runs git gc; 0 means defaultGCLooseObjectThreshold.
+	GCLooseObjectThreshold int
 }
 
 // Dir returns the mirror directory for a repo's "owner/name".
@@ -42,7 +58,10 @@ func (m *Manager) Dir(fullName string) string {
 // fetch destination.
 func (m *Manager) Ensure(ctx context.Context, repo discover.Repo, token string) (created bool, err error) {
 	dir := m.Dir(repo.FullName)
-	env := authEnv(token)
+	// gitcmd runs with a hermetic config, so global credential helpers and
+	// url.insteadOf rewrites are deliberately unavailable; network auth
+	// flows exclusively through authConfig's injected HTTP header.
+	fetcher := gitcmd.Runner{Timeout: fetchTimeout, ExtraConfig: authConfig(token)}
 
 	if _, statErr := os.Stat(dir); statErr == nil {
 		// Re-assert the config before fetching so mirrors created by older
@@ -51,7 +70,7 @@ func (m *Manager) Ensure(ctx context.Context, repo discover.Repo, token string) 
 		if err := assertConfig(ctx, dir, repo.FullName); err != nil {
 			return false, err
 		}
-		if _, err := runGit(ctx, env, "-C", dir, "fetch", "--prune", "origin"); err != nil {
+		if _, err := fetcher.Run(ctx, "-C", dir, "fetch", "--prune", "origin"); err != nil {
 			return false, fmt.Errorf("fetching %s: %w", repo.FullName, err)
 		}
 		return false, nil
@@ -76,10 +95,10 @@ func (m *Manager) Ensure(ctx context.Context, repo discover.Repo, token string) 
 	if err := os.RemoveAll(tmp); err != nil {
 		return false, fmt.Errorf("removing stale temp clone for %s: %w", repo.FullName, err)
 	}
-	if _, err := runGit(ctx, env, "clone", "--bare", "--config", "gc.auto=0", repo.CloneURL, tmp); err != nil {
+	if _, err := fetcher.Run(ctx, "clone", "--bare", "--config", "gc.auto=0", repo.CloneURL, tmp); err != nil {
 		return false, fmt.Errorf("cloning %s: %w", repo.FullName, err)
 	}
-	if _, err := runGit(ctx, nil, "-C", tmp, "config", "remote.origin.fetch", "+refs/heads/*:refs/heads/*"); err != nil {
+	if _, err := runGit(ctx, "-C", tmp, "config", "remote.origin.fetch", "+refs/heads/*:refs/heads/*"); err != nil {
 		return false, fmt.Errorf("configuring fetch refspec for %s: %w", repo.FullName, err)
 	}
 	if err := os.Rename(tmp, dir); err != nil {
@@ -92,10 +111,10 @@ func (m *Manager) Ensure(ctx context.Context, repo discover.Repo, token string) 
 // mirror, healing mirrors left partial by a crash or created before the
 // config was passed atomically on clone.
 func assertConfig(ctx context.Context, dir, fullName string) error {
-	if _, err := runGit(ctx, nil, "-C", dir, "config", "--replace-all", "remote.origin.fetch", "+refs/heads/*:refs/heads/*"); err != nil {
+	if _, err := runGit(ctx, "-C", dir, "config", "--replace-all", "remote.origin.fetch", "+refs/heads/*:refs/heads/*"); err != nil {
 		return fmt.Errorf("configuring fetch refspec for %s: %w", fullName, err)
 	}
-	if _, err := runGit(ctx, nil, "-C", dir, "config", "gc.auto", "0"); err != nil {
+	if _, err := runGit(ctx, "-C", dir, "config", "gc.auto", "0"); err != nil {
 		return fmt.Errorf("disabling auto-gc for %s: %w", fullName, err)
 	}
 	return nil
@@ -103,20 +122,104 @@ func assertConfig(ctx context.Context, dir, fullName string) error {
 
 // HeadCommit returns the commit SHA at the tip of the default branch.
 func (m *Manager) HeadCommit(ctx context.Context, dir, defaultBranch string) (string, error) {
-	sha, err := runGit(ctx, nil, "-C", dir, "rev-parse", "refs/heads/"+defaultBranch)
+	sha, err := runGit(ctx, "-C", dir, "rev-parse", "refs/heads/"+defaultBranch)
 	if err != nil {
 		return "", fmt.Errorf("resolving head of %s in %s: %w", defaultBranch, dir, err)
 	}
 	return sha, nil
 }
 
-// MarkIndexed records the indexed commit under refs/muninn/indexed,
-// keeping it reachable across upstream force-pushes and gc.
+// MarkIndexed records the indexed commit under refs/muninn/indexed and
+// rotates the previous generation to refs/muninn/indexed-prev, keeping both
+// reachable across upstream force-pushes and gc. Two generations are kept
+// because a live MCP session may still hold the previously indexed commit
+// while a sync moves the pin forward.
 func (m *Manager) MarkIndexed(ctx context.Context, dir, sha string) error {
-	if _, err := runGit(ctx, nil, "-C", dir, "update-ref", "refs/muninn/indexed", sha); err != nil {
-		return fmt.Errorf("marking indexed commit in %s: %w", dir, err)
+	old, err := runGit(ctx, "-C", dir, "rev-parse", "--verify", "--quiet", "refs/muninn/indexed")
+	if err != nil {
+		// rev-parse --verify --quiet exits 1 when the ref does not exist;
+		// treat that as "no previous generation". Anything else (exit 128,
+		// timeout, ...) is a real failure.
+		var gitErr *gitcmd.Error
+		if !errors.As(err, &gitErr) || gitErr.ExitCode != 1 {
+			return fmt.Errorf("reading current indexed ref in %s: %w", dir, err)
+		}
+		old = ""
+	}
+	if old == sha {
+		return nil
+	}
+	if old == "" {
+		// A create batch has must-not-exist semantics: if a concurrent
+		// first sync pinned the ref between the read above and this write,
+		// the batch fails loudly instead of clobbering the other pin.
+		batch := "create refs/muninn/indexed " + sha + "\n"
+		if _, err := (gitcmd.Runner{}).RunStdin(ctx, batch, "-C", dir, "update-ref", "--stdin"); err != nil {
+			return fmt.Errorf("marking indexed commit in %s: %w", dir, err)
+		}
+		return nil
+	}
+	// Rotate both refs in one atomic update-ref --stdin batch. The old
+	// value on the indexed line is a CAS guard: if a concurrent sync moved
+	// the ref between the read above and this write, the batch fails
+	// instead of silently dropping a generation. indexed-prev takes no old
+	// value — whatever it currently holds is the generation being rotated
+	// out and is always overwritten.
+	batch := "update refs/muninn/indexed-prev " + old + "\n" +
+		"update refs/muninn/indexed " + sha + " " + old + "\n"
+	if _, err := (gitcmd.Runner{}).RunStdin(ctx, batch, "-C", dir, "update-ref", "--stdin"); err != nil {
+		return fmt.Errorf("rotating indexed refs in %s: %w", dir, err)
 	}
 	return nil
+}
+
+// MaybeGC runs git gc on the mirror at dir when its loose-object count
+// exceeds the threshold, reporting whether gc ran to completion; when gc
+// fails, ran is false. Mirrors are cloned with gc.auto=0, so this is the
+// only mechanism bounding loose-object accumulation from repeated fetches.
+//
+// It deliberately does NOT pass --prune=now: git gc's default two-week
+// grace period additionally protects any commit that a session older than
+// two syncs might still name explicitly, beyond the two generations held
+// by refs/muninn/*. A gc killed by the timeout can leave tmp packs
+// behind; git self-heals on the next run, which is acceptable.
+func (m *Manager) MaybeGC(ctx context.Context, dir string) (ran bool, err error) {
+	out, err := runGit(ctx, "-C", dir, "count-objects", "-v")
+	if err != nil {
+		return false, fmt.Errorf("counting objects in %s: %w", dir, err)
+	}
+	loose, err := parseLooseCount(out)
+	if err != nil {
+		return false, fmt.Errorf("parsing object count in %s: %w", dir, err)
+	}
+	threshold := m.GCLooseObjectThreshold
+	if threshold == 0 {
+		threshold = defaultGCLooseObjectThreshold
+	}
+	if loose <= threshold {
+		return false, nil
+	}
+	if _, err := (gitcmd.Runner{Timeout: gcTimeout}).Run(ctx, "-C", dir, "gc", "--quiet"); err != nil {
+		return false, fmt.Errorf("running gc in %s: %w", dir, err)
+	}
+	return true, nil
+}
+
+// parseLooseCount extracts the loose-object count from
+// `git count-objects -v` output (its "count:" line).
+func parseLooseCount(out string) (int, error) {
+	for line := range strings.Lines(out) {
+		value, ok := strings.CutPrefix(strings.TrimSpace(line), "count:")
+		if !ok {
+			continue
+		}
+		count, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return 0, fmt.Errorf("parsing count line %q: %w", strings.TrimSpace(line), err)
+		}
+		return count, nil
+	}
+	return 0, fmt.Errorf("no count line in count-objects output %q", out)
 }
 
 // List returns the "owner/name" of every mirror on disk, sorted.
@@ -193,8 +296,8 @@ func (m *Manager) CleanTmp() error {
 	return nil
 }
 
-// authEnv returns the extra environment for network git operations. It
-// injects the token as an HTTP header via git config env vars, so it
+// authConfig returns the extra git config for network git operations. It
+// injects the token as an HTTP header via gitcmd's ExtraConfig, so it
 // never appears in argv or on disk. GitHub's git endpoint rejects Bearer
 // for OAuth/gh tokens, so Basic auth with the x-access-token username is
 // used (works for all token types). It also sets a low-speed abort so a
@@ -204,36 +307,21 @@ func (m *Manager) CleanTmp() error {
 // appliances interfere with HTTP/2 git transfers (stream cancels, resets,
 // sub-1KB/s throttling; observed repeatedly against github.com). Auth is
 // omitted for empty tokens; the other settings are always applied.
-func authEnv(token string) []string {
-	env := []string{
-		"GIT_CONFIG_KEY_0=http.lowSpeedLimit",
-		"GIT_CONFIG_VALUE_0=1000",
-		"GIT_CONFIG_KEY_1=http.lowSpeedTime",
-		"GIT_CONFIG_VALUE_1=60",
-		"GIT_CONFIG_KEY_2=http.version",
-		"GIT_CONFIG_VALUE_2=HTTP/1.1",
+func authConfig(token string) []string {
+	cfg := []string{
+		"http.lowSpeedLimit=1000",
+		"http.lowSpeedTime=60",
+		"http.version=HTTP/1.1",
 	}
 	if token == "" {
-		return append(env, "GIT_CONFIG_COUNT=3")
+		return cfg
 	}
 	credentials := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))
-	return append(env,
-		"GIT_CONFIG_KEY_3=http.extraHeader",
-		"GIT_CONFIG_VALUE_3=Authorization: Basic "+credentials,
-		"GIT_CONFIG_COUNT=4",
-	)
+	return append(cfg, "http.extraHeader=Authorization: Basic "+credentials)
 }
 
-func runGit(ctx context.Context, extraEnv []string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
-	if len(extraEnv) > 0 {
-		cmd.Env = append(os.Environ(), extraEnv...)
-	}
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("git %s: %w (stderr: %s)", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
-	}
-	return strings.TrimSpace(stdout.String()), nil
+// runGit executes a git command through the hermetic gitcmd runner,
+// returning its trimmed stdout.
+func runGit(ctx context.Context, args ...string) (string, error) {
+	return gitcmd.Runner{}.Run(ctx, args...)
 }

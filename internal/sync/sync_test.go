@@ -435,3 +435,97 @@ func TestRunInvalidCtagsFailsRun(t *testing.T) {
 		t.Errorf("status file written despite ctags hard failure (err = %v)", err)
 	}
 }
+
+// gcTrackingMirror delegates to the embedded Mirror while recording the
+// ordering of MarkIndexed and MaybeGC calls, optionally failing MaybeGC.
+type gcTrackingMirror struct {
+	Mirror
+	gcErr error
+
+	mu            stdsync.Mutex
+	marked        int
+	gcCalls       int
+	gcAfterMarked bool
+}
+
+func (g *gcTrackingMirror) MarkIndexed(ctx context.Context, dir, sha string) error {
+	g.mu.Lock()
+	g.marked++
+	g.mu.Unlock()
+	return g.Mirror.MarkIndexed(ctx, dir, sha)
+}
+
+func (g *gcTrackingMirror) MaybeGC(ctx context.Context, dir string) (bool, error) {
+	g.mu.Lock()
+	g.gcCalls++
+	g.gcAfterMarked = g.marked >= g.gcCalls
+	g.mu.Unlock()
+	if g.gcErr != nil {
+		return false, g.gcErr
+	}
+	return g.Mirror.MaybeGC(ctx, dir)
+}
+
+func TestRunMaybeGCAfterMarkIndexed(t *testing.T) {
+	src, _ := fixtureRepo(t)
+	e := newEnv(t)
+	deps := e.deps(&stubDiscoverer{repos: []discover.Repo{fileRepo("acme/a", src)}}, nil)
+	gm := &gcTrackingMirror{Mirror: deps.Mirror}
+	deps.Mirror = gm
+
+	st, err := Run(context.Background(), &config.Config{}, deps)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !st.Success {
+		t.Errorf("Success = false, want true: %+v", st.Repos)
+	}
+	if gm.gcCalls != 1 {
+		t.Errorf("MaybeGC calls = %d, want 1", gm.gcCalls)
+	}
+	if !gm.gcAfterMarked {
+		t.Error("MaybeGC ran before MarkIndexed")
+	}
+}
+
+func TestRunMaybeGCSkippedOnIndexFailure(t *testing.T) {
+	src, _ := fixtureRepo(t)
+	e := newEnv(t)
+	failIx := func(string) Indexer { return failingIndexer{e.indexer()} }
+	deps := e.deps(&stubDiscoverer{repos: []discover.Repo{fileRepo("acme/a", src)}}, failIx)
+	gm := &gcTrackingMirror{Mirror: deps.Mirror}
+	deps.Mirror = gm
+
+	if _, err := Run(context.Background(), &config.Config{}, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if gm.gcCalls != 0 {
+		t.Errorf("MaybeGC calls = %d, want 0 after an index failure", gm.gcCalls)
+	}
+}
+
+func TestRunMaybeGCFailureKeepsRepoSynced(t *testing.T) {
+	src, commit := fixtureRepo(t)
+	e := newEnv(t)
+	deps := e.deps(&stubDiscoverer{repos: []discover.Repo{fileRepo("acme/a", src)}}, nil)
+	gm := &gcTrackingMirror{Mirror: deps.Mirror, gcErr: errors.New("gc boom")}
+	deps.Mirror = gm
+
+	st, err := Run(context.Background(), &config.Config{}, deps)
+	if err != nil {
+		t.Fatalf("Run: %v (a gc failure must not abort the run)", err)
+	}
+	if st.Success {
+		t.Error("Success = true, want false with a recorded gc error")
+	}
+	rs := st.Repos["acme/a"]
+	if !rs.Fetched || !rs.Indexed {
+		t.Errorf("repo = %+v, want Fetched and Indexed despite gc failure", rs)
+	}
+	if rs.IndexedCommit != commit {
+		t.Errorf("IndexedCommit = %q, want %q", rs.IndexedCommit, commit)
+	}
+	if !strings.Contains(rs.Error, "gc boom") {
+		t.Errorf("Error = %q, want the gc failure recorded", rs.Error)
+	}
+}

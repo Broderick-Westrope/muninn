@@ -35,6 +35,7 @@ type Mirror interface {
 	Ensure(ctx context.Context, repo discover.Repo, token string) (created bool, err error)
 	HeadCommit(ctx context.Context, dir, defaultBranch string) (string, error)
 	MarkIndexed(ctx context.Context, dir, sha string) error
+	MaybeGC(ctx context.Context, dir string) (ran bool, err error)
 	List() ([]string, error)
 	Remove(fullName string) error
 	CleanTmp() error
@@ -279,5 +280,19 @@ func syncRepo(ctx context.Context, deps Deps, ix Indexer, repo discover.Repo, pr
 	}
 	rs.Indexed = true
 	rs.IndexedCommit = head
+	// Housekeeping after a successful pin: a gc failure is recorded but
+	// must not flip Fetched/Indexed — the repo is fully synced either way.
+	if _, err := deps.Mirror.MaybeGC(ctx, dir); err != nil {
+		rs.Error = appendError(rs.Error, err.Error())
+	}
 	return rs
+}
+
+// appendError joins error strings with the "; " separator used for
+// multi-error status entries.
+func appendError(existing, msg string) string {
+	if existing == "" {
+		return msg
+	}
+	return existing + "; " + msg
 }

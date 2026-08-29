@@ -161,11 +161,11 @@ func (s *Server) ListRepos(ctx context.Context, args ListReposArgs) (string, err
 	// line so they can never disagree.
 	var b strings.Builder
 	if st, err := status.Read(s.statusPath); err != nil {
-		b.WriteString("WARNING: no sync status found; the index may be empty or stale — run `muninn sync`\n")
+		b.WriteString(noStatusWarning)
 	} else {
 		age := status.Age(st)
 		if age > staleAfter {
-			fmt.Fprintf(&b, "WARNING: index is stale: last sync finished %s ago — run `muninn sync`\n", formatAge(age))
+			fmt.Fprintf(&b, staleWarningFormat, formatAge(age))
 		}
 		fmt.Fprintf(&b, "last sync: %s (%s ago)\n", st.FinishedAt.Format(time.RFC3339), formatAge(age))
 	}

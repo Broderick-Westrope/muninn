@@ -12,19 +12,19 @@ Three tools, not five: description tokens are paid by every agent session, and e
 
 **Prerequisite fix (ships first, independent of the tools): commit pinning that survives prune, gc, and mirror fetch.**
 
-Two failure modes currently threaten the indexed commit's objects, silently breaking the existing v1 line-number guarantee (`read_file`/`list_tree` pinned to the indexed commit) — every history tool inherits the same exposure:
+**Already implemented** (verified in `internal/mirror/mirror.go` — the design-review concern about `--mirror` refspecs pruning pin refs does not apply to this codebase):
 
-1. After a force-push or branch deletion upstream, the indexed commit becomes unreachable; any gc/repack (including fetch-triggered auto-gc) prunes its objects.
-2. A naive pin ref does not survive mirror fetches: a `--mirror` clone's refspec is `+refs/*:refs/*`, so any prune-enabled fetch **deletes every local ref not on the remote** — including `refs/muninn/*`. The pin would be destroyed by the very sync job that maintains it (git-fetch PRUNING docs describe exactly this hazard).
+- Mirrors are created with `git clone --bare` plus a narrowed fetch refspec `+refs/heads/*:refs/heads/*` (deliberately not `--mirror`), so `fetch --prune` only touches `refs/heads/*` and can never delete `refs/muninn/*`. `assertConfig` re-asserts this self-healingly on every sync.
+- `gc.auto=0` is set at clone time and re-asserted by `assertConfig`.
+- `MarkIndexed` writes `refs/muninn/indexed` after each successful index.
 
-The fix, in full:
+**Remaining gaps to close in this work:**
 
-- **Exclude pin refs from the mirror refspec**: add negative refspec `remote.origin.fetch = ^refs/muninn/*` (git ≥ 2.29) at clone time, and retrofit onto existing mirrors during sync.
-- **Two-generation pin**: sync maintains `refs/muninn/indexed` (current) and `refs/muninn/indexed-prev` (previous). Latest-only is insufficient: a live MCP session may hold line numbers/SHAs against the previous indexed commit while sync moves the pin — hourly launchd sync plus long agent sessions makes this routine. Two generations plus the existing "status file re-read per tool call" behavior (`internal/mcp/server.go` never caches the status) covers live sessions across one sync boundary; sessions spanning two syncs get the accurate `ErrIndexMismatch` remedy.
-- **Pin before index, not after**: sync updates the pin ref immediately **after fetch, before indexing**. An index failure (zoekt error, disk full) must not leave the fetched commit unpinned while the status file still references the old one.
-- **Disable auto-gc** (`gc.auto=0`) at clone time and retrofit during sync.
-- **Explicit maintenance**: unbounded `gc.auto=0` means unbounded object accumulation on force-push-heavy mirrors. Sync runs `git gc` on a mirror only **after** the pin refs are updated (pinned commits stay reachable), and only periodically (e.g. every N syncs or when loose-object count crosses a threshold — decide during planning). This is the designed answer to "when does gc ever run": after pinning, never before.
-- **Error taxonomy**: a rev that fails to resolve distinguishes "unknown ref/SHA" (typo, never-fetched ref) from "index/mirror mismatch" (existing `ErrIndexMismatch`, "run `muninn sync`" remedy), and the mismatch message must be accurate about cause.
+- **Two-generation pin**: sync must also maintain `refs/muninn/indexed-prev` (previous indexed commit). Latest-only is insufficient once explicit gc exists: a live MCP session may hold SHAs/line numbers against the previous indexed commit while sync moves the pin — hourly launchd sync plus long agent sessions makes this routine. Two generations plus the existing "status file re-read per tool call" behavior (`internal/mcp/server.go` never caches the status) covers live sessions across one sync boundary; sessions spanning two syncs get the accurate `ErrIndexMismatch` remedy. Update both refs in one `update-ref --stdin` transaction.
+- **Explicit maintenance**: `gc.auto=0` with no explicit gc means unbounded object accumulation on force-push-heavy mirrors (currently nothing ever gcs). Sync runs `git gc` on a mirror only **after** the pin refs are updated (pinned commits stay reachable), and only periodically (loose-object threshold via `git count-objects` or every N syncs — decide during planning). This is the designed answer to "when does gc ever run": after pinning, never before.
+- **Error taxonomy**: a rev that fails to resolve must distinguish "unknown ref/SHA" (typo, never-fetched ref) from "index/mirror mismatch" (existing `ErrIndexMismatch`, "run `muninn sync`" remedy), and the mismatch message must be accurate about cause. Today `checkCommit` maps every failure to `ErrIndexMismatch`.
+
+Note on ordering: the current pin-after-index ordering is actually safe — on index failure the status file carries the *old* commit forward and the pin ref still points at it. "Pin before index" from the earlier draft is unnecessary; what matters is that the pin and the status file never disagree, which two-generation pinning preserves across the sync boundary.
 
 **Scope:**
 
@@ -65,7 +65,7 @@ Out (this iteration, possible later):
 - **Shell out to system git**, never go-git: go-git blame is pathologically slow (go-git#14), and Gitea/OpenGrok both shell out. `internal/gitfile` already establishes the pattern (`runGit`/`runGitRaw`).
 - **Hermetic git invocations**: every git subprocess runs with `GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_NOSYSTEM=1`. User/system config silently changes tool semantics otherwise (`grep.patternType=perl` alters `--grep`, `log.showSignature` pollutes output, `blame.ignoreRevsFile`, `diff.algorithm`, `log.follow`). Repo-local config (where muninn writes `gc.auto`, refspecs) still applies. Retrofit this onto the existing `gitfile` helpers too.
 - **Global subprocess timeout**: every git invocation — not just pickaxe — runs under a deadline (default 15s, generous for reads on mirrors). Diff between distant revs or blame on pathological files can run minutes; a hung tool call is the worst agent experience. On expiry, tools that can return labeled partials do (`search_commits` reads log output incrementally and keeps commits parsed so far); others return a clear timeout error naming the narrowing options (path filter, line range, closer revs).
-- **Validate system git at startup** the same way ctags is validated: fail loudly with a remedy. Require git ≥ 2.29 (negative refspec support for the pinning fix).
+- **Validate system git at startup** the same way ctags is validated: fail loudly with a remedy (presence + a sanity version check; no specific minimum needed — the narrowed-refspec design avoids negative refspecs).
 - **Argument-injection safety**: all user-supplied values pass as separate argv entries (never shell-interpolated — existing pattern); `rev` **and** `base` are validated via `git rev-parse --verify` and rejected if they start with `-`; `path` values starting with `-` are rejected and pathspec magic (`:` prefix) is disallowed; `repo` is validated against the known-repo set from the status file (no path traversal); `--` separates revs from paths in every invocation that accepts both.
 - All operations are read-only and work on bare mirrors: log, show, diff-between-revs, blame-at-rev, and pickaxe need no working tree. Blame **must** pass an explicit rev (bare repos have no worktree HEAD default).
 - Every tool enforces output caps with truncation notices (same discipline as v1 tools). Patch output capped by bytes at file boundaries; log and blame output by lines.
@@ -75,7 +75,7 @@ Out (this iteration, possible later):
 **Success Criteria:**
 
 - [ ] **Pinning survives hostile maintenance**: fixture test force-pushes the remote, runs sync, then runs `git fetch --prune` and `git gc --prune=now` on the mirror — and `read_file`/`blame` at both the current and previous indexed commits still work. (A test without explicit gc/prune verifies nothing: unreachable objects survive by default for weeks.)
-- [ ] **Pin-before-index**: fixture test makes indexing fail after fetch; the fetched commit is pinned anyway and the status file still points at the old (also pinned) commit.
+- [ ] **Index-failure consistency**: fixture test makes indexing fail after fetch; the status file still points at the old commit and that commit is still pinned.
 - [ ] **Flagship scenario, concretely**: fixture repo where function `Foo`'s implementation changed in commit C (behind a merge M). `search_commits(changed_literal: "Foo", first_parent: true)` surfaces M with the merge annotation; rerunning with `first_parent: false` surfaces C; `get_diff(rev: C)` shows the change. Test asserts this exact retrieval chain.
 - [ ] `blame` line numbers agree exactly with `read_file` for the same path at the indexed commit (fixture asserts equality).
 - [ ] `get_diff` on a lockfile-heavy commit returns source diffs intact and lockfiles as stat lines within budget.
@@ -90,7 +90,7 @@ Out (this iteration, possible later):
 **Design Decisions:**
 
 - **Three tools, not five**: `get_commit`/`get_diff` merged (one rev vs two — same output machinery); `list_commits`/pickaxe merged (pickaxe is a log filter, not a different operation). The "one whitelisted read-only `git` tool" alternative was considered — agents know git — but rejected: parameter-shaped tools enforce pinned-rev defaults, truncation, timeouts, hermetic config, and lockfile handling; a passthrough cannot.
-- **Two-generation pin ref + negative refspec**: latest-only pinning contradicts the concurrency model muninn already commits to (live MCP sessions during sync); the negative refspec is what makes any pin ref survive mirror fetches at all. Both are cheap; neither is optional.
+- **Two-generation pin ref**: latest-only pinning contradicts the concurrency model muninn already commits to (live MCP sessions during sync) once explicit gc exists. The narrowed fetch refspec (already shipped) is what makes pin refs survive mirror fetches.
 - **`first_parent` defaults true, with merge annotation**: 30 result slots on merge-heavy repos otherwise fill with merge noise; the annotation keeps the "why" reachable in one follow-up call.
 - **`merge_base` defaults true, with mandatory endpoint header**: three-dot answers "what does this branch change", but silently returns empty for descendant/swapped revs — the header converts a trap into a self-explaining result.
 - **File-boundary diff truncation**: a byte cap that cuts mid-hunk hands agents a malformed patch. Whole files + stat-remainder is strictly more useful at the same budget.
@@ -101,7 +101,6 @@ Out (this iteration, possible later):
 
 **Implementation Notes (resolve during planning):**
 
-- Confirm the current sync's prune behavior (`remote update --prune`? config?) and make prune explicit + ordered after the negative-refspec retrofit, so the first post-upgrade sync cannot delete pins before the refspec lands.
 - Pin-ref reconciliation: repo removed from config → reconciliation GC deletes mirror (pins go with it); nothing extra needed. Verify `indexed-prev` is updated atomically with `indexed` (read old value, two `update-ref` calls; a `--stdin` transaction gives atomicity).
 - gc cadence: pick the trigger (every N syncs vs `git count-objects -v` threshold); measure gc time on pilot-engine before choosing.
 - Pickaxe/log incremental read: parse commits as they stream; on deadline, kill the process group and label the partial. Verify git flushes per-commit with `--no-pager`.
@@ -119,4 +118,4 @@ Out (this iteration, possible later):
 - Developer search intents: Sadowski, Stolee, Elbaum — "How Developers Search for Code" (Google, 2015)
 - go-git blame performance: https://github.com/go-git/go-git/issues/14
 - Pickaxe semantics: https://git-scm.com/docs/git-log (`-S`/`-G`)
-- Mirror-refspec prune hazard: https://git-scm.com/docs/git-fetch (PRUNING section); negative refspecs: git 2.29 release notes
+- Mirror-refspec prune hazard (avoided via narrowed refspec): https://git-scm.com/docs/git-fetch (PRUNING section)

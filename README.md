@@ -57,7 +57,7 @@ muninn web               # local web UI at 127.0.0.1:7576 (Ctrl-C to stop)
 { "mcpServers": { "muninn": { "command": "muninn", "args": ["mcp"] } } }
 ```
 
-Tools: `grep`, `glob`, `list_repos`, `read_file`, `list_tree`, `find_symbol_definitions`, `find_symbol_references`. File reads are pinned to the indexed commit so line numbers always match search results. `find_symbol_references` is approximate (text search excluding definition sites).
+Tools: `grep`, `glob`, `list_repos`, `read_file`, `list_tree`, `find_symbol_definitions`, `find_symbol_references`, `search_commits`, `get_diff`, `blame`. File reads are pinned to the indexed commit so line numbers always match search results. `find_symbol_references` is approximate (text search excluding definition sites). `search_commits` filters commit history (author, date, message, path, pickaxe content-change search); `get_diff` shows one commit or compares two revs with agent-safe truncation; `blame` attributes lines at the indexed commit by default so its line numbers agree with `read_file`.
 
 ## Data
 

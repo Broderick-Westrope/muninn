@@ -9,6 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/broderick-westrope/muninn/internal/gitcmd"
 )
 
 // git runs a git command against dir (or without -C when dir is empty),
@@ -39,8 +42,10 @@ func writeFile(t *testing.T, dir, name, content string) {
 	}
 }
 
-const fileV1 = "one\ntwo\nthree\nfour\nfive\n"
-const fileV2 = "one\nCHANGED\nthree\n"
+const (
+	fileV1 = "one\ntwo\nthree\nfour\nfive\n"
+	fileV2 = "one\nCHANGED\nthree\n"
+)
 
 // fixtureMirror creates a bare mirror with two commits touching file.txt
 // (v1 then v2) plus a small tree, returning the mirror dir and both commits.
@@ -360,5 +365,129 @@ func TestListDirIndexMismatch(t *testing.T) {
 	_, _, err := ListDir(context.Background(), mirror, "0000000000000000000000000000000000000000", "", 0)
 	if !errors.Is(err, ErrIndexMismatch) {
 		t.Errorf("ListDir at unreachable commit: err = %v, want ErrIndexMismatch", err)
+	}
+}
+
+func TestResolveRev(t *testing.T) {
+	mirror, commit1, commit2 := fixtureMirror(t)
+	ctx := context.Background()
+
+	sha, err := ResolveRev(ctx, mirror, commit1)
+	if err != nil {
+		t.Fatalf("ResolveRev(full SHA): %v", err)
+	}
+	if sha != commit1 {
+		t.Fatalf("ResolveRev(full SHA) = %q, want %q (full SHA resolves to itself)", sha, commit1)
+	}
+
+	sha, err = ResolveRev(ctx, mirror, commit1[:8])
+	if err != nil {
+		t.Fatalf("ResolveRev(short SHA): %v", err)
+	}
+	if sha != commit1 {
+		t.Fatalf("ResolveRev(short SHA) = %q, want %q (short SHA resolves to the full SHA)", sha, commit1)
+	}
+
+	sha, err = ResolveRev(ctx, mirror, "main")
+	if err != nil {
+		t.Fatalf("ResolveRev(branch): %v", err)
+	}
+	if sha != commit2 {
+		t.Fatalf("ResolveRev(branch) = %q, want %q (branch name resolves to its tip)", sha, commit2)
+	}
+}
+
+func TestResolveRevUnknown(t *testing.T) {
+	mirror, _, _ := fixtureMirror(t)
+
+	_, err := ResolveRev(context.Background(), mirror, strings.Repeat("a", 40))
+	if !errors.Is(err, ErrUnknownRev) {
+		t.Fatalf("err = %v, want ErrUnknownRev", err)
+	}
+	if errors.Is(err, ErrIndexMismatch) {
+		t.Fatalf("err = %v, must not be ErrIndexMismatch", err)
+	}
+	if !strings.Contains(err.Error(), "rev-parse") {
+		t.Fatalf("err = %q, want to contain %q (underlying git error must be preserved)", err, "rev-parse")
+	}
+}
+
+// TestResolveRevTimeoutIsNotUnknownRev asserts a timed-out rev-parse is
+// not conflated with an unknown revision: a slow mirror must not be
+// reported to the user as a bad rev.
+func TestResolveRevTimeoutIsNotUnknownRev(t *testing.T) {
+	// exec replaces the shell so the kill on deadline reaches sleep
+	// directly.
+	fakeDir := t.TempDir()
+	script := "#!/bin/sh\nexec sleep 10\n"
+	if err := os.WriteFile(filepath.Join(fakeDir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatalf("writing fake git script: %v", err)
+	}
+	t.Setenv("PATH", fakeDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_, err := ResolveRev(ctx, t.TempDir(), "main")
+	if !errors.Is(err, gitcmd.ErrTimeout) {
+		t.Fatalf("err = %v, want ErrTimeout", err)
+	}
+	if errors.Is(err, ErrUnknownRev) {
+		t.Fatalf("err = %v; a timeout must not be reported as an unknown rev", err)
+	}
+}
+
+// TestResolveRevRejectsOptionLookalikes asserts dash-prefixed and empty
+// revs are rejected before any git process is spawned: a fake git at the
+// front of PATH writes a marker file if it is ever executed.
+func TestResolveRevRejectsOptionLookalikes(t *testing.T) {
+	fakeDir := t.TempDir()
+	marker := filepath.Join(fakeDir, "executed")
+	script := "#!/bin/sh\ntouch " + marker + "\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(fakeDir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatalf("writing fake git script: %v", err)
+	}
+	t.Setenv("PATH", fakeDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	for _, rev := range []string{"--upload-pack=/bin/true", "-x", ""} {
+		_, err := ResolveRev(context.Background(), t.TempDir(), rev)
+		if !errors.Is(err, ErrUnknownRev) {
+			t.Fatalf("ResolveRev(%q): error = %v, want ErrUnknownRev", rev, err)
+		}
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("marker stat error = %v; git was executed for a rejected rev", err)
+	}
+}
+
+func TestClassifyPathErr(t *testing.T) {
+	tests := []struct {
+		name    string
+		stderr  string
+		unknown bool
+	}{
+		{"log/blame missing path", "fatal: no such path 'nope.txt' in HEAD", true},
+		{"cat-file missing path", "fatal: path 'nope.txt' does not exist in 'deadbeef'", true},
+		{"invalid object name", "fatal: Not a valid object name deadbeef:nope.txt", true},
+		{"untracked path hint", "fatal: path 'nope.txt' exists on disk, but not in 'deadbeef'", true},
+		{"unrelated failure", "fatal: bad revision walk", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			in := errors.New(tt.stderr)
+			out := ClassifyPathErr(in)
+			if tt.unknown {
+				if !errors.Is(out, ErrUnknownPath) {
+					t.Fatalf("err = %v, want ErrUnknownPath", out)
+				}
+				if !strings.Contains(out.Error(), tt.stderr) {
+					t.Fatalf("err = %q, want to contain %q (original diagnostics preserved)", out, tt.stderr)
+				}
+			} else if out != in {
+				t.Fatalf("err = %v, want %v (non-path errors pass through unchanged)", out, in)
+			}
+		})
+	}
+	if err := ClassifyPathErr(nil); err != nil {
+		t.Fatalf("ClassifyPathErr(nil) = %v, want nil", err)
 	}
 }

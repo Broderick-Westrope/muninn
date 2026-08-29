@@ -1,7 +1,8 @@
 // Package mcp implements muninn's MCP server: a stdio transport exposing
-// the seven v1 tools (grep, glob, list_repos, read_file, list_tree,
-// find_symbol_definitions, find_symbol_references) over the search core,
-// the status file, and the bare git mirrors.
+// ten tools (grep, glob, list_repos, read_file, list_tree,
+// find_symbol_definitions, find_symbol_references, search_commits,
+// get_diff, blame) over the search core, the status file, and the bare
+// git mirrors.
 package mcp
 
 import (
@@ -17,14 +18,24 @@ import (
 // that the index is stale.
 const staleAfter = 24 * time.Hour
 
+// Staleness warning fragments shared by ListRepos and stalenessWarning so
+// every tool renders the identical wording.
+const (
+	noStatusWarning    = "WARNING: no sync status found; the index may be empty or stale — run `muninn sync`\n"
+	staleWarningFormat = "WARNING: index is stale: last sync finished %s ago — run `muninn sync`\n"
+)
+
 // instructions is sent to clients at initialization so agents know how to
 // interpret results.
 const instructions = `muninn serves code search over locally indexed GitHub repositories.
 read_file and list_tree return content at the commit each repo was indexed
 at, so line numbers always agree with grep results — but content may lag
-the repos' latest commits until the next sync. Use list_repos to see which
-repos are indexed and how old the index is; it warns when the index is
-stale.`
+the repos' latest commits until the next sync. The history tools
+(search_commits, get_diff, blame) operate on each repo's full fetched
+history, while file reads stay pinned to the indexed commit; blame
+defaults to that commit so its line numbers agree with read_file. Use
+list_repos to see which repos are indexed and how old the index is; it
+warns when the index is stale.`
 
 // Server holds the dependencies of the MCP tool handlers. Each tool is a
 // plain method so tests can call handlers directly without a stdio
@@ -64,6 +75,9 @@ func (s *Server) mcpServer() *sdk.Server {
 	sdk.AddTool(srv, &sdk.Tool{Name: "list_tree", Description: listTreeDescription}, textHandler(s.ListTree))
 	sdk.AddTool(srv, &sdk.Tool{Name: "find_symbol_definitions", Description: findDefinitionsDescription}, textHandler(s.FindSymbolDefinitions))
 	sdk.AddTool(srv, &sdk.Tool{Name: "find_symbol_references", Description: findReferencesDescription}, textHandler(s.FindSymbolReferences))
+	sdk.AddTool(srv, &sdk.Tool{Name: "search_commits", Description: searchCommitsDescription}, textHandler(s.SearchCommits))
+	sdk.AddTool(srv, &sdk.Tool{Name: "get_diff", Description: getDiffDescription}, textHandler(s.GetDiff))
+	sdk.AddTool(srv, &sdk.Tool{Name: "blame", Description: blameDescription}, textHandler(s.Blame))
 	return srv
 }
 
