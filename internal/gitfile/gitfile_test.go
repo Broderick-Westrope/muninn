@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // git runs a git command against dir (or without -C when dir is empty),
@@ -39,8 +41,10 @@ func writeFile(t *testing.T, dir, name, content string) {
 	}
 }
 
-const fileV1 = "one\ntwo\nthree\nfour\nfive\n"
-const fileV2 = "one\nCHANGED\nthree\n"
+const (
+	fileV1 = "one\ntwo\nthree\nfour\nfive\n"
+	fileV2 = "one\nCHANGED\nthree\n"
+)
 
 // fixtureMirror creates a bare mirror with two commits touching file.txt
 // (v1 then v2) plus a small tree, returning the mirror dir and both commits.
@@ -361,4 +365,75 @@ func TestListDirIndexMismatch(t *testing.T) {
 	if !errors.Is(err, ErrIndexMismatch) {
 		t.Errorf("ListDir at unreachable commit: err = %v, want ErrIndexMismatch", err)
 	}
+}
+
+func TestResolveRev(t *testing.T) {
+	mirror, commit1, commit2 := fixtureMirror(t)
+	ctx := context.Background()
+
+	sha, err := ResolveRev(ctx, mirror, commit1)
+	require.NoError(t, err)
+	require.Equal(t, commit1, sha, "full SHA resolves to itself")
+
+	sha, err = ResolveRev(ctx, mirror, commit1[:8])
+	require.NoError(t, err)
+	require.Equal(t, commit1, sha, "short SHA resolves to the full SHA")
+
+	sha, err = ResolveRev(ctx, mirror, "main")
+	require.NoError(t, err)
+	require.Equal(t, commit2, sha, "branch name resolves to its tip")
+}
+
+func TestResolveRevUnknown(t *testing.T) {
+	mirror, _, _ := fixtureMirror(t)
+
+	_, err := ResolveRev(context.Background(), mirror, strings.Repeat("a", 40))
+	require.ErrorIs(t, err, ErrUnknownRev)
+	require.NotErrorIs(t, err, ErrIndexMismatch)
+}
+
+// TestResolveRevRejectsOptionLookalikes asserts dash-prefixed and empty
+// revs are rejected before any git process is spawned: a fake git at the
+// front of PATH writes a marker file if it is ever executed.
+func TestResolveRevRejectsOptionLookalikes(t *testing.T) {
+	// Uses t.Setenv, so no t.Parallel.
+	fakeDir := t.TempDir()
+	marker := filepath.Join(fakeDir, "executed")
+	script := "#!/bin/sh\ntouch " + marker + "\nexit 0\n"
+	require.NoError(t, os.WriteFile(filepath.Join(fakeDir, "git"), []byte(script), 0o755))
+	t.Setenv("PATH", fakeDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	for _, rev := range []string{"--upload-pack=/bin/true", "-x", ""} {
+		_, err := ResolveRev(context.Background(), t.TempDir(), rev)
+		require.ErrorIs(t, err, ErrUnknownRev, "rev %q", rev)
+	}
+	_, err := os.Stat(marker)
+	require.ErrorIs(t, err, fs.ErrNotExist, "git was executed for a rejected rev")
+}
+
+func TestClassifyPathErr(t *testing.T) {
+	tests := []struct {
+		name    string
+		stderr  string
+		unknown bool
+	}{
+		{"log/blame missing path", "fatal: no such path 'nope.txt' in HEAD", true},
+		{"cat-file missing path", "fatal: path 'nope.txt' does not exist in 'deadbeef'", true},
+		{"invalid object name", "fatal: Not a valid object name deadbeef:nope.txt", true},
+		{"untracked path hint", "fatal: path 'nope.txt' exists on disk, but not in 'deadbeef'", true},
+		{"unrelated failure", "fatal: bad revision walk", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			in := errors.New(tt.stderr)
+			out := ClassifyPathErr(in)
+			if tt.unknown {
+				require.ErrorIs(t, out, ErrUnknownPath)
+				require.Contains(t, out.Error(), tt.stderr, "original diagnostics preserved")
+			} else {
+				require.Equal(t, in, out, "non-path errors pass through unchanged")
+			}
+		})
+	}
+	require.NoError(t, ClassifyPathErr(nil))
 }
