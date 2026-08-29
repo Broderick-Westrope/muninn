@@ -93,11 +93,11 @@ func TestTimeout(t *testing.T) {
 func TestPartialOutputOnTimeout(t *testing.T) {
 	// Uses t.Setenv, so no t.Parallel. echo flushes before exec hands the
 	// process over to sleep, so the line is captured before the kill. The
-	// timeout is generous enough for the shell to start and print, yet far
-	// below the 10s sleep.
+	// timeout is generous enough for the shell to start and print even
+	// under full-suite load, yet far below the 10s sleep.
 	fakeGit(t, "#!/bin/sh\necho partial-line\nexec sleep 10\n")
 
-	out, err := Runner{Timeout: 500 * time.Millisecond}.RunRaw(context.Background(), "log")
+	out, err := Runner{Timeout: 2 * time.Second}.RunRaw(context.Background(), "log")
 	require.ErrorIs(t, err, ErrTimeout)
 	require.Contains(t, out, "partial-line")
 }
