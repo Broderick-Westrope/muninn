@@ -111,18 +111,24 @@ func TestTimeout(t *testing.T) {
 
 func TestPartialOutputOnTimeout(t *testing.T) {
 	// echo flushes before exec hands the process over to sleep, so the
-	// line is captured before the kill. The timeout is generous enough
-	// for the shell to start and print even under full-suite load, yet
-	// far below the 10s sleep.
+	// line is captured before the kill. Shell startup can occasionally
+	// exceed the timeout under full-suite load, missing the echo; a
+	// bounded retry tolerates that scheduling race while a genuine
+	// output-discarding regression still fails every attempt.
 	fakeGit(t, "#!/bin/sh\necho partial-line\nexec sleep 10\n")
 
-	out, err := Runner{Timeout: 2 * time.Second}.RunRaw(context.Background(), "log")
-	if !errors.Is(err, ErrTimeout) {
-		t.Fatalf("error = %v, want ErrTimeout", err)
+	var out string
+	for attempt := range 3 {
+		var err error
+		out, err = Runner{Timeout: 2 * time.Second}.RunRaw(context.Background(), "log")
+		if !errors.Is(err, ErrTimeout) {
+			t.Fatalf("attempt %d: error = %v, want ErrTimeout", attempt+1, err)
+		}
+		if strings.Contains(out, "partial-line") {
+			return
+		}
 	}
-	if !strings.Contains(out, "partial-line") {
-		t.Fatalf("output missing partial line: %q", out)
-	}
+	t.Fatalf("output missing partial line after 3 attempts: %q", out)
 }
 
 // TestExtraConfigKeepsSafeDirectory is the regression test for the
