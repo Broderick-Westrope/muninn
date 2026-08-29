@@ -1,6 +1,6 @@
 # Phase 2: History Tools (`internal/githistory` + MCP)
 
-> **Status:** DRAFT
+> **Status:** COMPLETED
 > Part of `plans/impl-2026-08-29-git-history/` — see README. Requires phase 1 merged (`internal/gitcmd` with partial output + exit codes + `RunStdin`, `ResolveRev`/`ErrUnknownRev`/`ErrUnknownPath`, two-gen pins).
 
 ## Specification

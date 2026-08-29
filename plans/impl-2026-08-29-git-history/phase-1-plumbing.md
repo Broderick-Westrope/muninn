@@ -1,6 +1,6 @@
 # Phase 1: Git Plumbing & Pinning Completion
 
-> **Status:** DRAFT
+> **Status:** COMPLETED
 > Part of `plans/impl-2026-08-29-git-history/` — see README for phase overview.
 
 ## Specification
