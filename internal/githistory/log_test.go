@@ -2,12 +2,13 @@ package githistory
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
-
-	"github.com/stretchr/testify/require"
 
 	"github.com/broderick-westrope/muninn/internal/gitfile"
 )
@@ -16,7 +17,6 @@ import (
 func boolPtr(b bool) *bool { return &b }
 
 func TestSearchCommitsFirstParent(t *testing.T) {
-	t.Parallel()
 	f := newFixtureRepo(t)
 	ctx := context.Background()
 
@@ -26,12 +26,24 @@ func TestSearchCommitsFirstParent(t *testing.T) {
 		Rev:            "main",
 		ChangedLiteral: "Foo",
 	})
-	require.NoError(t, err)
-	require.False(t, truncated)
-	require.False(t, timedOut)
-	require.Equal(t, []string{f.Merge, f.Root}, shas(commits))
-	require.True(t, commits[0].IsMerge)
-	require.False(t, commits[1].IsMerge)
+	if err != nil {
+		t.Fatalf("SearchCommits: %v", err)
+	}
+	if truncated {
+		t.Fatal("truncated = true, want false")
+	}
+	if timedOut {
+		t.Fatal("timedOut = true, want false")
+	}
+	if want := []string{f.Merge, f.Root}; !slices.Equal(shas(commits), want) {
+		t.Fatalf("shas = %v, want %v", shas(commits), want)
+	}
+	if !commits[0].IsMerge {
+		t.Fatal("commits[0].IsMerge = false, want true")
+	}
+	if commits[1].IsMerge {
+		t.Fatal("commits[1].IsMerge = true, want false")
+	}
 
 	// first_parent: false surfaces the underlying commit C instead of M.
 	commits, _, _, err = SearchCommits(ctx, f.Mirror, LogOptions{
@@ -39,38 +51,47 @@ func TestSearchCommitsFirstParent(t *testing.T) {
 		ChangedLiteral: "Foo",
 		FirstParent:    boolPtr(false),
 	})
-	require.NoError(t, err)
-	require.Equal(t, []string{f.SideChange, f.Root}, shas(commits))
+	if err != nil {
+		t.Fatalf("SearchCommits: %v", err)
+	}
+	if want := []string{f.SideChange, f.Root}; !slices.Equal(shas(commits), want) {
+		t.Fatalf("shas = %v, want %v", shas(commits), want)
+	}
 }
 
 func TestSearchCommitsPickaxeIntroduceRemove(t *testing.T) {
-	t.Parallel()
 	f := newFixtureRepo(t)
 
 	commits, _, _, err := SearchCommits(context.Background(), f.Mirror, LogOptions{
 		Rev:            "main",
 		ChangedLiteral: "MAGIC",
 	})
-	require.NoError(t, err)
-	require.Equal(t, []string{f.MagicRemove, f.MagicAdd}, shas(commits))
+	if err != nil {
+		t.Fatalf("SearchCommits: %v", err)
+	}
+	if want := []string{f.MagicRemove, f.MagicAdd}; !slices.Equal(shas(commits), want) {
+		t.Fatalf("shas = %v, want %v", shas(commits), want)
+	}
 }
 
 func TestSearchCommitsChangedRegex(t *testing.T) {
-	t.Parallel()
 	f := newFixtureRepo(t)
 
 	commits, _, _, err := SearchCommits(context.Background(), f.Mirror, LogOptions{
 		Rev:          "main",
 		ChangedRegex: `return "(one|two)"`,
 	})
-	require.NoError(t, err)
+	if err != nil {
+		t.Fatalf("SearchCommits: %v", err)
+	}
 	// The merge's first-parent diff only adds a comment, so -G on the
 	// return line matches the root and lockfile commits only.
-	require.Equal(t, []string{f.Lockfile, f.Root}, shas(commits))
+	if want := []string{f.Lockfile, f.Root}; !slices.Equal(shas(commits), want) {
+		t.Fatalf("shas = %v, want %v", shas(commits), want)
+	}
 }
 
 func TestSearchCommitsFollowRename(t *testing.T) {
-	t.Parallel()
 	f := newFixtureRepo(t)
 
 	// --follow walks past the bar.txt -> baz.txt rename to the original
@@ -79,21 +100,30 @@ func TestSearchCommitsFollowRename(t *testing.T) {
 		Rev:  "main",
 		Path: "baz.txt",
 	})
-	require.NoError(t, err)
-	require.Equal(t, []string{f.PostRename, f.Rename, f.BarV2, f.Root}, shas(commits))
+	if err != nil {
+		t.Fatalf("SearchCommits: %v", err)
+	}
+	if want := []string{f.PostRename, f.Rename, f.BarV2, f.Root}; !slices.Equal(shas(commits), want) {
+		t.Fatalf("shas = %v, want %v", shas(commits), want)
+	}
 }
 
 func TestSearchCommitsParsesRootAndTabSubject(t *testing.T) {
-	t.Parallel()
 	f := newFixtureRepo(t)
 
 	commits, truncated, timedOut, err := SearchCommits(context.Background(), f.Mirror, LogOptions{
 		Rev:   "main",
 		Limit: 100,
 	})
-	require.NoError(t, err)
-	require.False(t, truncated)
-	require.False(t, timedOut)
+	if err != nil {
+		t.Fatalf("SearchCommits: %v", err)
+	}
+	if truncated {
+		t.Fatal("truncated = true, want false")
+	}
+	if timedOut {
+		t.Fatal("timedOut = true, want false")
+	}
 
 	bySHA := make(map[string]Commit, len(commits))
 	for _, c := range commits {
@@ -101,32 +131,52 @@ func TestSearchCommitsParsesRootAndTabSubject(t *testing.T) {
 	}
 
 	root := bySHA[f.Root]
-	require.Equal(t, "root: add foo and bar", root.Subject)
-	require.False(t, root.IsMerge, "root commit (empty %%P) must parse as non-merge")
-	require.Equal(t, "2024-01-01", root.AuthorDate)
-	require.Equal(t, "test", root.Author)
+	if root.Subject != "root: add foo and bar" {
+		t.Fatalf("root Subject = %q, want %q", root.Subject, "root: add foo and bar")
+	}
+	if root.IsMerge {
+		t.Fatal("root commit (empty %P) must parse as non-merge")
+	}
+	if root.AuthorDate != "2024-01-01" {
+		t.Fatalf("root AuthorDate = %q, want %q", root.AuthorDate, "2024-01-01")
+	}
+	if root.Author != "test" {
+		t.Fatalf("root Author = %q, want %q", root.Author, "test")
+	}
 
-	require.Equal(t, tabSubject, bySHA[f.TabSubject].Subject, "tab-containing subject must survive parsing")
-	require.True(t, bySHA[f.Merge].IsMerge)
+	if got := bySHA[f.TabSubject].Subject; got != tabSubject {
+		t.Fatalf("Subject = %q, want %q (tab-containing subject must survive parsing)", got, tabSubject)
+	}
+	if !bySHA[f.Merge].IsMerge {
+		t.Fatal("merge commit IsMerge = false, want true")
+	}
 }
 
 func TestSearchCommitsAuthorAndMessage(t *testing.T) {
-	t.Parallel()
 	f := newFixtureRepo(t)
 	ctx := context.Background()
 
 	commits, _, _, err := SearchCommits(ctx, f.Mirror, LogOptions{Rev: "main", Author: "Alice"})
-	require.NoError(t, err)
-	require.Equal(t, []string{f.BarV2}, shas(commits))
-	require.Equal(t, "Alice", commits[0].Author)
+	if err != nil {
+		t.Fatalf("SearchCommits: %v", err)
+	}
+	if want := []string{f.BarV2}; !slices.Equal(shas(commits), want) {
+		t.Fatalf("shas = %v, want %v", shas(commits), want)
+	}
+	if commits[0].Author != "Alice" {
+		t.Fatalf("Author = %q, want %q", commits[0].Author, "Alice")
+	}
 
 	commits, _, _, err = SearchCommits(ctx, f.Mirror, LogOptions{Rev: "main", Message: "extend baz"})
-	require.NoError(t, err)
-	require.Equal(t, []string{f.PostRename}, shas(commits))
+	if err != nil {
+		t.Fatalf("SearchCommits: %v", err)
+	}
+	if want := []string{f.PostRename}; !slices.Equal(shas(commits), want) {
+		t.Fatalf("shas = %v, want %v", shas(commits), want)
+	}
 }
 
 func TestSearchCommitsSinceUntil(t *testing.T) {
-	t.Parallel()
 	f := newFixtureRepo(t)
 
 	// Fixture commits carry deterministic committer dates; day 2 is the
@@ -136,26 +186,36 @@ func TestSearchCommitsSinceUntil(t *testing.T) {
 		Since: "2024-01-02 00:00 +0000",
 		Until: "2024-01-02 23:59 +0000",
 	})
-	require.NoError(t, err)
-	require.Equal(t, []string{f.TabSubject}, shas(commits))
+	if err != nil {
+		t.Fatalf("SearchCommits: %v", err)
+	}
+	if want := []string{f.TabSubject}; !slices.Equal(shas(commits), want) {
+		t.Fatalf("shas = %v, want %v", shas(commits), want)
+	}
 }
 
 func TestSearchCommitsLimitTruncated(t *testing.T) {
-	t.Parallel()
 	f := newFixtureRepo(t)
 
 	commits, truncated, _, err := SearchCommits(context.Background(), f.Mirror, LogOptions{
 		Rev:   "main",
 		Limit: 2,
 	})
-	require.NoError(t, err)
-	require.True(t, truncated)
-	require.Len(t, commits, 2)
-	require.Equal(t, f.Head, commits[0].SHA)
+	if err != nil {
+		t.Fatalf("SearchCommits: %v", err)
+	}
+	if !truncated {
+		t.Fatal("truncated = false, want true")
+	}
+	if len(commits) != 2 {
+		t.Fatalf("len(commits) = %d, want 2", len(commits))
+	}
+	if commits[0].SHA != f.Head {
+		t.Fatalf("commits[0].SHA = %q, want head %q", commits[0].SHA, f.Head)
+	}
 }
 
 func TestSearchCommitsValidation(t *testing.T) {
-	t.Parallel()
 	f := newFixtureRepo(t)
 	ctx := context.Background()
 
@@ -164,33 +224,42 @@ func TestSearchCommitsValidation(t *testing.T) {
 		ChangedLiteral: "a",
 		ChangedRegex:   "b",
 	})
-	require.ErrorContains(t, err, "mutually exclusive")
+	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("error = %v, want to contain %q", err, "mutually exclusive")
+	}
 
 	_, _, _, err = SearchCommits(ctx, f.Mirror, LogOptions{Rev: "main", Path: "--all"})
-	require.ErrorContains(t, err, "must not start with")
+	if err == nil || !strings.Contains(err.Error(), "must not start with") {
+		t.Fatalf("error = %v, want to contain %q", err, "must not start with")
+	}
 
 	_, _, _, err = SearchCommits(ctx, f.Mirror, LogOptions{Rev: "main", Path: ":(glob)*.go"})
-	require.ErrorContains(t, err, "must not start with")
+	if err == nil || !strings.Contains(err.Error(), "must not start with") {
+		t.Fatalf("error = %v, want to contain %q", err, "must not start with")
+	}
 
 	_, _, _, err = SearchCommits(ctx, f.Mirror, LogOptions{Rev: "no-such-branch"})
-	require.ErrorIs(t, err, gitfile.ErrUnknownRev)
+	if !errors.Is(err, gitfile.ErrUnknownRev) {
+		t.Fatalf("error = %v, want ErrUnknownRev", err)
+	}
 }
 
 // fakeGit installs a fake git shell script at the front of PATH via
-// t.Setenv, so the calling test must not use t.Parallel.
+// t.Setenv.
 func fakeGit(t *testing.T, script string) {
 	t.Helper()
 	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755))
+	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatalf("writing fake git script: %v", err)
+	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
 func TestSearchCommitsTimeoutPartial(t *testing.T) {
-	// Uses t.Setenv (via fakeGit), so no t.Parallel. The fake git answers
-	// rev-parse (ResolveRev) instantly, emits two complete log lines plus
-	// an unterminated fragment, then hangs; the caller deadline (sooner
-	// than logTimeout) kills it and the complete lines survive as labeled
-	// partial results.
+	// The fake git answers rev-parse (ResolveRev) instantly, emits two
+	// complete log lines plus an unterminated fragment, then hangs; the
+	// caller deadline (sooner than logTimeout) kills it and the complete
+	// lines survive as labeled partial results.
 	fakeGit(t, `#!/bin/sh
 for a in "$@"; do
   if [ "$a" = "rev-parse" ]; then
@@ -208,10 +277,22 @@ exec sleep 10
 	defer cancel()
 
 	commits, truncated, timedOut, err := SearchCommits(ctx, t.TempDir(), LogOptions{Rev: "main"})
-	require.NoError(t, err)
-	require.True(t, timedOut)
-	require.False(t, truncated)
-	require.Equal(t, []string{"sha1", "sha2"}, shas(commits))
-	require.True(t, commits[1].IsMerge)
-	require.Equal(t, "subject\twith tab", commits[1].Subject)
+	if err != nil {
+		t.Fatalf("SearchCommits: %v", err)
+	}
+	if !timedOut {
+		t.Fatal("timedOut = false, want true")
+	}
+	if truncated {
+		t.Fatal("truncated = true, want false")
+	}
+	if want := []string{"sha1", "sha2"}; !slices.Equal(shas(commits), want) {
+		t.Fatalf("shas = %v, want %v", shas(commits), want)
+	}
+	if !commits[1].IsMerge {
+		t.Fatal("commits[1].IsMerge = false, want true")
+	}
+	if commits[1].Subject != "subject\twith tab" {
+		t.Fatalf("Subject = %q, want %q", commits[1].Subject, "subject\twith tab")
+	}
 }

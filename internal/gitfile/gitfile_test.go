@@ -11,8 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
-
 	"github.com/broderick-westrope/muninn/internal/gitcmd"
 )
 
@@ -375,62 +373,90 @@ func TestResolveRev(t *testing.T) {
 	ctx := context.Background()
 
 	sha, err := ResolveRev(ctx, mirror, commit1)
-	require.NoError(t, err)
-	require.Equal(t, commit1, sha, "full SHA resolves to itself")
+	if err != nil {
+		t.Fatalf("ResolveRev(full SHA): %v", err)
+	}
+	if sha != commit1 {
+		t.Fatalf("ResolveRev(full SHA) = %q, want %q (full SHA resolves to itself)", sha, commit1)
+	}
 
 	sha, err = ResolveRev(ctx, mirror, commit1[:8])
-	require.NoError(t, err)
-	require.Equal(t, commit1, sha, "short SHA resolves to the full SHA")
+	if err != nil {
+		t.Fatalf("ResolveRev(short SHA): %v", err)
+	}
+	if sha != commit1 {
+		t.Fatalf("ResolveRev(short SHA) = %q, want %q (short SHA resolves to the full SHA)", sha, commit1)
+	}
 
 	sha, err = ResolveRev(ctx, mirror, "main")
-	require.NoError(t, err)
-	require.Equal(t, commit2, sha, "branch name resolves to its tip")
+	if err != nil {
+		t.Fatalf("ResolveRev(branch): %v", err)
+	}
+	if sha != commit2 {
+		t.Fatalf("ResolveRev(branch) = %q, want %q (branch name resolves to its tip)", sha, commit2)
+	}
 }
 
 func TestResolveRevUnknown(t *testing.T) {
 	mirror, _, _ := fixtureMirror(t)
 
 	_, err := ResolveRev(context.Background(), mirror, strings.Repeat("a", 40))
-	require.ErrorIs(t, err, ErrUnknownRev)
-	require.NotErrorIs(t, err, ErrIndexMismatch)
-	require.Contains(t, err.Error(), "rev-parse", "underlying git error must be preserved")
+	if !errors.Is(err, ErrUnknownRev) {
+		t.Fatalf("error = %v, want ErrUnknownRev", err)
+	}
+	if errors.Is(err, ErrIndexMismatch) {
+		t.Fatalf("error = %v, must not be ErrIndexMismatch", err)
+	}
+	if !strings.Contains(err.Error(), "rev-parse") {
+		t.Fatalf("error = %q, want to contain %q (underlying git error must be preserved)", err, "rev-parse")
+	}
 }
 
 // TestResolveRevTimeoutIsNotUnknownRev asserts a timed-out rev-parse is
 // not conflated with an unknown revision: a slow mirror must not be
 // reported to the user as a bad rev.
 func TestResolveRevTimeoutIsNotUnknownRev(t *testing.T) {
-	// Uses t.Setenv, so no t.Parallel. exec replaces the shell so the kill
-	// on deadline reaches sleep directly.
+	// exec replaces the shell so the kill on deadline reaches sleep
+	// directly.
 	fakeDir := t.TempDir()
 	script := "#!/bin/sh\nexec sleep 10\n"
-	require.NoError(t, os.WriteFile(filepath.Join(fakeDir, "git"), []byte(script), 0o755))
+	if err := os.WriteFile(filepath.Join(fakeDir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatalf("writing fake git script: %v", err)
+	}
 	t.Setenv("PATH", fakeDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	_, err := ResolveRev(ctx, t.TempDir(), "main")
-	require.ErrorIs(t, err, gitcmd.ErrTimeout)
-	require.NotErrorIs(t, err, ErrUnknownRev, "a timeout must not be reported as an unknown rev")
+	if !errors.Is(err, gitcmd.ErrTimeout) {
+		t.Fatalf("error = %v, want ErrTimeout", err)
+	}
+	if errors.Is(err, ErrUnknownRev) {
+		t.Fatalf("error = %v; a timeout must not be reported as an unknown rev", err)
+	}
 }
 
 // TestResolveRevRejectsOptionLookalikes asserts dash-prefixed and empty
 // revs are rejected before any git process is spawned: a fake git at the
 // front of PATH writes a marker file if it is ever executed.
 func TestResolveRevRejectsOptionLookalikes(t *testing.T) {
-	// Uses t.Setenv, so no t.Parallel.
 	fakeDir := t.TempDir()
 	marker := filepath.Join(fakeDir, "executed")
 	script := "#!/bin/sh\ntouch " + marker + "\nexit 0\n"
-	require.NoError(t, os.WriteFile(filepath.Join(fakeDir, "git"), []byte(script), 0o755))
+	if err := os.WriteFile(filepath.Join(fakeDir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatalf("writing fake git script: %v", err)
+	}
 	t.Setenv("PATH", fakeDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	for _, rev := range []string{"--upload-pack=/bin/true", "-x", ""} {
 		_, err := ResolveRev(context.Background(), t.TempDir(), rev)
-		require.ErrorIs(t, err, ErrUnknownRev, "rev %q", rev)
+		if !errors.Is(err, ErrUnknownRev) {
+			t.Fatalf("ResolveRev(%q): error = %v, want ErrUnknownRev", rev, err)
+		}
 	}
-	_, err := os.Stat(marker)
-	require.ErrorIs(t, err, fs.ErrNotExist, "git was executed for a rejected rev")
+	if _, err := os.Stat(marker); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("marker stat error = %v; git was executed for a rejected rev", err)
+	}
 }
 
 func TestClassifyPathErr(t *testing.T) {
@@ -450,12 +476,18 @@ func TestClassifyPathErr(t *testing.T) {
 			in := errors.New(tt.stderr)
 			out := ClassifyPathErr(in)
 			if tt.unknown {
-				require.ErrorIs(t, out, ErrUnknownPath)
-				require.Contains(t, out.Error(), tt.stderr, "original diagnostics preserved")
-			} else {
-				require.Equal(t, in, out, "non-path errors pass through unchanged")
+				if !errors.Is(out, ErrUnknownPath) {
+					t.Fatalf("error = %v, want ErrUnknownPath", out)
+				}
+				if !strings.Contains(out.Error(), tt.stderr) {
+					t.Fatalf("error = %q, want to contain %q (original diagnostics preserved)", out, tt.stderr)
+				}
+			} else if out != in {
+				t.Fatalf("error = %v, want %v (non-path errors pass through unchanged)", out, in)
 			}
 		})
 	}
-	require.NoError(t, ClassifyPathErr(nil))
+	if err := ClassifyPathErr(nil); err != nil {
+		t.Fatalf("ClassifyPathErr(nil) = %v, want nil", err)
+	}
 }

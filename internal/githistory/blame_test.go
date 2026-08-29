@@ -2,43 +2,60 @@ package githistory
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
-
-	"github.com/stretchr/testify/require"
 
 	"github.com/broderick-westrope/muninn/internal/gitfile"
 )
 
 func TestBlameAgreesWithReadFile(t *testing.T) {
-	t.Parallel()
 	f := newFixtureRepo(t)
 	ctx := context.Background()
 
 	lines, err := Blame(ctx, f.Mirror, BlameOptions{Rev: "main", Path: "doc.txt"})
-	require.NoError(t, err)
+	if err != nil {
+		t.Fatalf("Blame: %v", err)
+	}
 
 	content, totalLines, err := gitfile.ReadFile(ctx, f.Mirror, f.Head, "doc.txt", 0, 0)
-	require.NoError(t, err)
-	require.Len(t, lines, totalLines)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if len(lines) != totalLines {
+		t.Fatalf("blame lines = %d, want %d", len(lines), totalLines)
+	}
 
 	want := strings.SplitAfter(content, "\n")
 	for i, line := range lines {
-		require.Equal(t, i+1, line.Line, "blame line numbers must be sequential from 1")
-		require.Equal(t, strings.TrimSuffix(want[i], "\n"), line.Content)
+		if line.Line != i+1 {
+			t.Fatalf("line %d number = %d, want %d (blame line numbers must be sequential from 1)", i, line.Line, i+1)
+		}
+		if got := strings.TrimSuffix(want[i], "\n"); line.Content != got {
+			t.Fatalf("line %d content = %q, want %q", i+1, line.Content, got)
+		}
 	}
 
 	// Line attribution: line 1 came with the root commit, line 2 with
 	// the tab-subject commit.
-	require.Equal(t, f.Root, lines[0].SHA)
-	require.Equal(t, f.TabSubject, lines[1].SHA)
-	require.Equal(t, "2024-01-01", lines[0].AuthorDate)
-	require.Equal(t, "2024-01-02", lines[1].AuthorDate)
-	require.Equal(t, "test", lines[0].Author)
+	if lines[0].SHA != f.Root {
+		t.Fatalf("line 1 SHA = %q, want root %q", lines[0].SHA, f.Root)
+	}
+	if lines[1].SHA != f.TabSubject {
+		t.Fatalf("line 2 SHA = %q, want tab-subject %q", lines[1].SHA, f.TabSubject)
+	}
+	if lines[0].AuthorDate != "2024-01-01" {
+		t.Fatalf("line 1 AuthorDate = %q, want %q", lines[0].AuthorDate, "2024-01-01")
+	}
+	if lines[1].AuthorDate != "2024-01-02" {
+		t.Fatalf("line 2 AuthorDate = %q, want %q", lines[1].AuthorDate, "2024-01-02")
+	}
+	if lines[0].Author != "test" {
+		t.Fatalf("line 1 Author = %q, want %q", lines[0].Author, "test")
+	}
 }
 
 func TestBlameLineRange(t *testing.T) {
-	t.Parallel()
 	f := newFixtureRepo(t)
 
 	lines, err := Blame(context.Background(), f.Mirror, BlameOptions{
@@ -47,15 +64,24 @@ func TestBlameLineRange(t *testing.T) {
 		StartLine: 2,
 		EndLine:   2,
 	})
-	require.NoError(t, err)
-	require.Len(t, lines, 1)
-	require.Equal(t, 2, lines[0].Line)
-	require.Equal(t, "more", lines[0].Content)
-	require.Equal(t, f.TabSubject, lines[0].SHA)
+	if err != nil {
+		t.Fatalf("Blame: %v", err)
+	}
+	if len(lines) != 1 {
+		t.Fatalf("len(lines) = %d, want 1", len(lines))
+	}
+	if lines[0].Line != 2 {
+		t.Fatalf("Line = %d, want 2", lines[0].Line)
+	}
+	if lines[0].Content != "more" {
+		t.Fatalf("Content = %q, want %q", lines[0].Content, "more")
+	}
+	if lines[0].SHA != f.TabSubject {
+		t.Fatalf("SHA = %q, want %q", lines[0].SHA, f.TabSubject)
+	}
 }
 
 func TestBlameOpenEndedLineRange(t *testing.T) {
-	t.Parallel()
 	f := newFixtureRepo(t)
 
 	// StartLine without EndLine blames from that line to EOF.
@@ -64,15 +90,24 @@ func TestBlameOpenEndedLineRange(t *testing.T) {
 		Path:      "doc.txt",
 		StartLine: 2,
 	})
-	require.NoError(t, err)
-	require.Len(t, lines, 1)
-	require.Equal(t, 2, lines[0].Line)
-	require.Equal(t, "more", lines[0].Content)
-	require.Equal(t, f.TabSubject, lines[0].SHA)
+	if err != nil {
+		t.Fatalf("Blame: %v", err)
+	}
+	if len(lines) != 1 {
+		t.Fatalf("len(lines) = %d, want 1", len(lines))
+	}
+	if lines[0].Line != 2 {
+		t.Fatalf("Line = %d, want 2", lines[0].Line)
+	}
+	if lines[0].Content != "more" {
+		t.Fatalf("Content = %q, want %q", lines[0].Content, "more")
+	}
+	if lines[0].SHA != f.TabSubject {
+		t.Fatalf("SHA = %q, want %q", lines[0].SHA, f.TabSubject)
+	}
 }
 
 func TestBlameOlderRevDiffers(t *testing.T) {
-	t.Parallel()
 	f := newFixtureRepo(t)
 	ctx := context.Background()
 
@@ -89,28 +124,40 @@ func TestBlameOlderRevDiffers(t *testing.T) {
 	}
 
 	tip, err := Blame(ctx, f.Mirror, BlameOptions{Rev: "main", Path: "foo.go"})
-	require.NoError(t, err)
+	if err != nil {
+		t.Fatalf("Blame at tip: %v", err)
+	}
 	tipLine := byContent(tip, "return \"")
-	require.Equal(t, f.Lockfile, tipLine.SHA)
-	require.Equal(t, `	return "two"`, tipLine.Content)
+	if tipLine.SHA != f.Lockfile {
+		t.Fatalf("tip line SHA = %q, want lockfile %q", tipLine.SHA, f.Lockfile)
+	}
+	if tipLine.Content != "\treturn \"two\"" {
+		t.Fatalf("tip line Content = %q, want %q", tipLine.Content, "\treturn \"two\"")
+	}
 
 	old, err := Blame(ctx, f.Mirror, BlameOptions{Rev: f.Merge, Path: "foo.go"})
-	require.NoError(t, err)
+	if err != nil {
+		t.Fatalf("Blame at merge: %v", err)
+	}
 	oldLine := byContent(old, "return \"")
-	require.Equal(t, f.Root, oldLine.SHA)
-	require.Equal(t, `	return "one"`, oldLine.Content)
+	if oldLine.SHA != f.Root {
+		t.Fatalf("old line SHA = %q, want root %q", oldLine.SHA, f.Root)
+	}
+	if oldLine.Content != "\treturn \"one\"" {
+		t.Fatalf("old line Content = %q, want %q", oldLine.Content, "\treturn \"one\"")
+	}
 }
 
 func TestBlameMissingPath(t *testing.T) {
-	t.Parallel()
 	f := newFixtureRepo(t)
 
 	_, err := Blame(context.Background(), f.Mirror, BlameOptions{Rev: "main", Path: "nope.txt"})
-	require.ErrorIs(t, err, gitfile.ErrUnknownPath)
+	if !errors.Is(err, gitfile.ErrUnknownPath) {
+		t.Fatalf("error = %v, want ErrUnknownPath", err)
+	}
 }
 
 func TestBlameRangePastEOF(t *testing.T) {
-	t.Parallel()
 	f := newFixtureRepo(t)
 
 	_, err := Blame(context.Background(), f.Mirror, BlameOptions{
@@ -119,24 +166,35 @@ func TestBlameRangePastEOF(t *testing.T) {
 		StartLine: 100,
 		EndLine:   200,
 	})
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "has only 2 lines", "git's diagnostic must surface clearly")
+	if err == nil {
+		t.Fatal("expected error for range past EOF")
+	}
+	if !strings.Contains(err.Error(), "has only 2 lines") {
+		t.Fatalf("error = %q, want to contain %q (git's diagnostic must surface clearly)", err, "has only 2 lines")
+	}
 }
 
 func TestBlameValidation(t *testing.T) {
-	t.Parallel()
 	f := newFixtureRepo(t)
 	ctx := context.Background()
 
 	_, err := Blame(ctx, f.Mirror, BlameOptions{Rev: "main"})
-	require.ErrorContains(t, err, "requires a path")
+	if err == nil || !strings.Contains(err.Error(), "requires a path") {
+		t.Fatalf("error = %v, want to contain %q", err, "requires a path")
+	}
 
 	_, err = Blame(ctx, f.Mirror, BlameOptions{Rev: "main", Path: "-L1,2"})
-	require.ErrorContains(t, err, "must not start with")
+	if err == nil || !strings.Contains(err.Error(), "must not start with") {
+		t.Fatalf("error = %v, want to contain %q", err, "must not start with")
+	}
 
 	_, err = Blame(ctx, f.Mirror, BlameOptions{Rev: "main", Path: "doc.txt", StartLine: 3, EndLine: 2})
-	require.ErrorContains(t, err, "after end_line")
+	if err == nil || !strings.Contains(err.Error(), "after end_line") {
+		t.Fatalf("error = %v, want to contain %q", err, "after end_line")
+	}
 
 	_, err = Blame(ctx, f.Mirror, BlameOptions{Rev: "no-such-branch", Path: "doc.txt"})
-	require.ErrorIs(t, err, gitfile.ErrUnknownRev)
+	if !errors.Is(err, gitfile.ErrUnknownRev) {
+		t.Fatalf("error = %v, want ErrUnknownRev", err)
+	}
 }

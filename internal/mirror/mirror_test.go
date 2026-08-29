@@ -12,8 +12,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stretchr/testify/require"
-
 	"github.com/broderick-westrope/muninn/internal/discover"
 	"github.com/broderick-westrope/muninn/internal/gitcmd"
 )
@@ -268,12 +266,20 @@ func TestAuthConfigKeepsSafeDirectory(t *testing.T) {
 	r := gitcmd.Runner{ExtraConfig: authConfig("tok")}
 
 	out, err := r.Run(context.Background(), "-C", upstream, "config", "--get", "safe.directory")
-	require.NoError(t, err)
-	require.Equal(t, "*", out)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if out != "*" {
+		t.Fatalf("safe.directory = %q, want %q", out, "*")
+	}
 
 	out, err = r.Run(context.Background(), "-C", upstream, "config", "--get", "http.version")
-	require.NoError(t, err)
-	require.Equal(t, "HTTP/1.1", out)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if out != "HTTP/1.1" {
+		t.Fatalf("http.version = %q, want %q", out, "HTTP/1.1")
+	}
 }
 
 func equal(a, b []string) bool {
@@ -319,7 +325,9 @@ func refValue(t *testing.T, dir, ref string) string {
 // head SHA.
 func addUpstreamCommit(t *testing.T, upstream string) string {
 	t.Helper()
-	require.NoError(t, os.WriteFile(filepath.Join(upstream, "b.txt"), []byte("two\n"), 0o644))
+	if err := os.WriteFile(filepath.Join(upstream, "b.txt"), []byte("two\n"), 0o644); err != nil {
+		t.Fatalf("writing fixture file: %v", err)
+	}
 	git(t, upstream, "add", ".")
 	git(t, upstream, "commit", "-m", "second")
 	return git(t, upstream, "rev-parse", "HEAD")
@@ -331,28 +339,51 @@ func TestMarkIndexedTwoGenerations(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := m.Ensure(ctx, repo, "")
-	require.NoError(t, err)
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
 	dir := m.Dir(repo.FullName)
 	commitA, err := m.HeadCommit(ctx, dir, "main")
-	require.NoError(t, err)
+	if err != nil {
+		t.Fatalf("HeadCommit: %v", err)
+	}
 
 	// First generation: indexed at A, no prev.
-	require.NoError(t, m.MarkIndexed(ctx, dir, commitA))
-	require.Equal(t, commitA, refValue(t, dir, "refs/muninn/indexed"))
-	require.Empty(t, refValue(t, dir, "refs/muninn/indexed-prev"))
+	if err := m.MarkIndexed(ctx, dir, commitA); err != nil {
+		t.Fatalf("MarkIndexed: %v", err)
+	}
+	if got := refValue(t, dir, "refs/muninn/indexed"); got != commitA {
+		t.Fatalf("indexed = %q, want %q", got, commitA)
+	}
+	if got := refValue(t, dir, "refs/muninn/indexed-prev"); got != "" {
+		t.Fatalf("indexed-prev = %q, want empty", got)
+	}
 
 	// Second generation: indexed at B, prev rotated to A.
 	commitB := addUpstreamCommit(t, upstream)
-	_, err = m.Ensure(ctx, repo, "")
-	require.NoError(t, err)
-	require.NoError(t, m.MarkIndexed(ctx, dir, commitB))
-	require.Equal(t, commitB, refValue(t, dir, "refs/muninn/indexed"))
-	require.Equal(t, commitA, refValue(t, dir, "refs/muninn/indexed-prev"))
+	if _, err = m.Ensure(ctx, repo, ""); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if err := m.MarkIndexed(ctx, dir, commitB); err != nil {
+		t.Fatalf("MarkIndexed: %v", err)
+	}
+	if got := refValue(t, dir, "refs/muninn/indexed"); got != commitB {
+		t.Fatalf("indexed = %q, want %q", got, commitB)
+	}
+	if got := refValue(t, dir, "refs/muninn/indexed-prev"); got != commitA {
+		t.Fatalf("indexed-prev = %q, want %q", got, commitA)
+	}
 
 	// Same SHA again: a no-op that leaves both refs untouched.
-	require.NoError(t, m.MarkIndexed(ctx, dir, commitB))
-	require.Equal(t, commitB, refValue(t, dir, "refs/muninn/indexed"))
-	require.Equal(t, commitA, refValue(t, dir, "refs/muninn/indexed-prev"))
+	if err := m.MarkIndexed(ctx, dir, commitB); err != nil {
+		t.Fatalf("MarkIndexed: %v", err)
+	}
+	if got := refValue(t, dir, "refs/muninn/indexed"); got != commitB {
+		t.Fatalf("indexed = %q, want %q", got, commitB)
+	}
+	if got := refValue(t, dir, "refs/muninn/indexed-prev"); got != commitA {
+		t.Fatalf("indexed-prev = %q, want %q", got, commitA)
+	}
 }
 
 // TestMarkIndexedCreateRace exercises the create batch's must-not-exist
@@ -367,13 +398,18 @@ func TestMarkIndexedCreateRace(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := m.Ensure(ctx, repo, "")
-	require.NoError(t, err)
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
 	dir := m.Dir(repo.FullName)
 	commitA, err := m.HeadCommit(ctx, dir, "main")
-	require.NoError(t, err)
+	if err != nil {
+		t.Fatalf("HeadCommit: %v", err)
+	}
 	commitB := addUpstreamCommit(t, upstream)
-	_, err = m.Ensure(ctx, repo, "")
-	require.NoError(t, err)
+	if _, err = m.Ensure(ctx, repo, ""); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
 
 	// A concurrent first sync already pinned the ref at A; the create
 	// batch for B must be rejected rather than clobber it.
@@ -382,8 +418,12 @@ func TestMarkIndexedCreateRace(t *testing.T) {
 	cmd := exec.Command("git", "-C", dir, "update-ref", "--stdin")
 	cmd.Stdin = strings.NewReader(batch)
 	out, err := cmd.CombinedOutput()
-	require.Error(t, err, "create of an existing ref must fail: %s", out)
-	require.Equal(t, commitA, refValue(t, dir, "refs/muninn/indexed"))
+	if err == nil {
+		t.Fatalf("create of an existing ref must fail: %s", out)
+	}
+	if got := refValue(t, dir, "refs/muninn/indexed"); got != commitA {
+		t.Fatalf("indexed = %q, want %q", got, commitA)
+	}
 }
 
 // TestMarkIndexedStaleCAS exercises the CAS failure mode directly: a batch
@@ -396,23 +436,34 @@ func TestMarkIndexedStaleCAS(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := m.Ensure(ctx, repo, "")
-	require.NoError(t, err)
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
 	dir := m.Dir(repo.FullName)
 	commitA, err := m.HeadCommit(ctx, dir, "main")
-	require.NoError(t, err)
-	require.NoError(t, m.MarkIndexed(ctx, dir, commitA))
+	if err != nil {
+		t.Fatalf("HeadCommit: %v", err)
+	}
+	if err := m.MarkIndexed(ctx, dir, commitA); err != nil {
+		t.Fatalf("MarkIndexed: %v", err)
+	}
 
 	commitB := addUpstreamCommit(t, upstream)
-	_, err = m.Ensure(ctx, repo, "")
-	require.NoError(t, err)
+	if _, err = m.Ensure(ctx, repo, ""); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
 
 	// The ref is at A, but the batch claims it is at B: git must reject it.
 	batch := "update refs/muninn/indexed " + commitB + " " + commitB + "\n"
 	cmd := exec.Command("git", "-C", dir, "update-ref", "--stdin")
 	cmd.Stdin = strings.NewReader(batch)
 	out, err := cmd.CombinedOutput()
-	require.Error(t, err, "stale old-value batch must fail: %s", out)
-	require.Equal(t, commitA, refValue(t, dir, "refs/muninn/indexed"))
+	if err == nil {
+		t.Fatalf("stale old-value batch must fail: %s", out)
+	}
+	if got := refValue(t, dir, "refs/muninn/indexed"); got != commitA {
+		t.Fatalf("indexed = %q, want %q", got, commitA)
+	}
 }
 
 // TestMarkIndexedSurvivesHostileMaintenance is the two-generation
@@ -425,20 +476,31 @@ func TestMarkIndexedSurvivesHostileMaintenance(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := m.Ensure(ctx, repo, "")
-	require.NoError(t, err)
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
 	dir := m.Dir(repo.FullName)
 	commitA, err := m.HeadCommit(ctx, dir, "main")
-	require.NoError(t, err)
-	require.NoError(t, m.MarkIndexed(ctx, dir, commitA))
+	if err != nil {
+		t.Fatalf("HeadCommit: %v", err)
+	}
+	if err := m.MarkIndexed(ctx, dir, commitA); err != nil {
+		t.Fatalf("MarkIndexed: %v", err)
+	}
 
 	// Force-rewrite upstream so A is unreachable from any branch.
 	git(t, upstream, "commit", "--amend", "--allow-empty", "-m", "rewritten")
 	commitB := git(t, upstream, "rev-parse", "HEAD")
-	require.NotEqual(t, commitA, commitB, "fixture amend did not change the commit SHA")
+	if commitA == commitB {
+		t.Fatal("fixture amend did not change the commit SHA")
+	}
 
-	_, err = m.Ensure(ctx, repo, "")
-	require.NoError(t, err)
-	require.NoError(t, m.MarkIndexed(ctx, dir, commitB))
+	if _, err = m.Ensure(ctx, repo, ""); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if err := m.MarkIndexed(ctx, dir, commitB); err != nil {
+		t.Fatalf("MarkIndexed: %v", err)
+	}
 
 	git(t, dir, "gc", "--prune=now")
 	git(t, dir, "cat-file", "-e", commitA+"^{commit}")
@@ -452,7 +514,9 @@ func gitStdin(t *testing.T, dir, stdin string, args ...string) string {
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
 	cmd.Stdin = strings.NewReader(stdin)
 	out, err := cmd.CombinedOutput()
-	require.NoError(t, err, "git %v: %s", args, out)
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
 	return strings.TrimSpace(string(out))
 }
 
@@ -460,7 +524,9 @@ func gitStdin(t *testing.T, dir, stdin string, args ...string) string {
 func looseCount(t *testing.T, dir string) int {
 	t.Helper()
 	count, err := parseLooseCount(git(t, dir, "count-objects", "-v"))
-	require.NoError(t, err)
+	if err != nil {
+		t.Fatalf("parseLooseCount: %v", err)
+	}
 	return count
 }
 
@@ -475,7 +541,9 @@ func seedLooseObjects(t *testing.T, dir string, n int) {
 	var paths strings.Builder
 	for i := range n {
 		path := filepath.Join(blobDir, fmt.Sprintf("blob-%d.txt", i))
-		require.NoError(t, os.WriteFile(path, fmt.Appendf(nil, "content %d\n", i), 0o644))
+		if err := os.WriteFile(path, fmt.Appendf(nil, "content %d\n", i), 0o644); err != nil {
+			t.Fatalf("writing blob file: %v", err)
+		}
 		paths.WriteString(path + "\n")
 	}
 	shas := gitStdin(t, dir, paths.String(), "hash-object", "-w", "--stdin-paths")
@@ -490,13 +558,21 @@ func TestMaybeGCOverThreshold(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "repo.git")
 	git(t, "", "init", "--bare", dir)
 	seedLooseObjects(t, dir, 10)
-	require.Equal(t, 10, looseCount(t, dir))
+	if got := looseCount(t, dir); got != 10 {
+		t.Fatalf("loose objects = %d, want 10", got)
+	}
 
 	m := &Manager{BaseDir: t.TempDir(), GCLooseObjectThreshold: 5}
 	ran, err := m.MaybeGC(context.Background(), dir)
-	require.NoError(t, err)
-	require.True(t, ran)
-	require.Less(t, looseCount(t, dir), 10, "gc should have packed the loose objects")
+	if err != nil {
+		t.Fatalf("MaybeGC: %v", err)
+	}
+	if !ran {
+		t.Fatal("ran = false, want true")
+	}
+	if got := looseCount(t, dir); got >= 10 {
+		t.Fatalf("loose objects = %d, want < 10 (gc should have packed the loose objects)", got)
+	}
 }
 
 func TestMaybeGCUnderThreshold(t *testing.T) {
@@ -506,7 +582,13 @@ func TestMaybeGCUnderThreshold(t *testing.T) {
 
 	m := &Manager{BaseDir: t.TempDir(), GCLooseObjectThreshold: 5}
 	ran, err := m.MaybeGC(context.Background(), dir)
-	require.NoError(t, err)
-	require.False(t, ran)
-	require.Equal(t, 3, looseCount(t, dir), "gc must not have run")
+	if err != nil {
+		t.Fatalf("MaybeGC: %v", err)
+	}
+	if ran {
+		t.Fatal("ran = true, want false")
+	}
+	if got := looseCount(t, dir); got != 3 {
+		t.Fatalf("loose objects = %d, want 3 (gc must not have run)", got)
+	}
 }

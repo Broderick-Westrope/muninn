@@ -7,8 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/stretchr/testify/require"
 )
 
 // Fixture file contents referenced by tests across the package.
@@ -78,7 +76,9 @@ func fixGit(t *testing.T, dir string, env []string, args ...string) string {
 	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
 	cmd.Env = append(cmd.Env, env...)
 	out, err := cmd.CombinedOutput()
-	require.NoError(t, err, "git %v: %s", args, out)
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
 	return strings.TrimSpace(string(out))
 }
 
@@ -86,8 +86,12 @@ func fixGit(t *testing.T, dir string, env []string, args ...string) string {
 func writeFile(t *testing.T, dir, name, content string) {
 	t.Helper()
 	path := filepath.Join(dir, name)
-	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
-	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("creating fixture directory: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("writing fixture file %s: %v", name, err)
+	}
 }
 
 // newFixtureRepo builds the shared history fixture in a scratch repo and
