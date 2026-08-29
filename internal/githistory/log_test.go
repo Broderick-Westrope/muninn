@@ -198,9 +198,9 @@ for a in "$@"; do
     exit 0
   fi
 done
-printf 'sha1\t2024-01-01\talice\t\tone\n'
-printf 'sha2\t2024-01-02\tbob\tp1 p2\tsubject\twith tab\n'
-printf 'sha3\t2024-01-03\tcarol'
+printf 'sha1\t\t2024-01-01\talice\tone\n'
+printf 'sha2\tp1 p2\t2024-01-02\tbob\tsubject\twith tab\n'
+printf 'sha3\tp3\t2024-01-03'
 exec sleep 10
 `)
 

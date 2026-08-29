@@ -63,11 +63,13 @@ func SearchCommits(ctx context.Context, mirrorDir string, opts LogOptions) (comm
 		limit = defaultLogLimit
 	}
 
-	// %P is empty for root commits and space-separated for merges; %s may
-	// contain tabs, so it is the last field and parsing uses SplitN.
+	// %P is empty for root commits and space-separated for merges; both
+	// machine fields (%H, %P) precede the free-text fields so a tab in an
+	// author name cannot shift them; %s may contain tabs, so it is the
+	// last field and parsing uses SplitN.
 	args := []string{
 		"-C", mirrorDir, "log",
-		"--format=%H%x09%as%x09%an%x09%P%x09%s",
+		"--format=%H%x09%P%x09%as%x09%an%x09%s",
 		"-n", strconv.Itoa(limit + 1),
 	}
 	if opts.FirstParent == nil || *opts.FirstParent {
@@ -121,8 +123,9 @@ func SearchCommits(ctx context.Context, mirrorDir string, opts LogOptions) (comm
 		commit, parseErr := parseLogLine(line)
 		if parseErr != nil {
 			if timedOut {
-				// A killed git may leave a garbled tail; skip it.
-				continue
+				// A killed git can only garble the tail; stop at the
+				// first malformed line.
+				break
 			}
 			return nil, false, false, parseErr
 		}
@@ -135,7 +138,7 @@ func SearchCommits(ctx context.Context, mirrorDir string, opts LogOptions) (comm
 	return commits, truncated, timedOut, nil
 }
 
-// parseLogLine parses one %H%x09%as%x09%an%x09%P%x09%s log line. The
+// parseLogLine parses one %H%x09%P%x09%as%x09%an%x09%s log line. The
 // subject is the last field so SplitN preserves any tabs it contains; the
 // parents field is empty for root commits.
 func parseLogLine(line string) (Commit, error) {
@@ -145,9 +148,9 @@ func parseLogLine(line string) (Commit, error) {
 	}
 	return Commit{
 		SHA:        fields[0],
-		AuthorDate: fields[1],
-		Author:     fields[2],
-		IsMerge:    len(strings.Fields(fields[3])) > 1,
+		IsMerge:    len(strings.Fields(fields[1])) > 1,
+		AuthorDate: fields[2],
+		Author:     fields[3],
 		Subject:    fields[4],
 	}, nil
 }
