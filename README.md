@@ -1,6 +1,6 @@
 # muninn
 
-A single Go binary that indexes your GitHub repos for code search and serves them to agents over MCP. It syncs bare mirrors on a schedule (via launchd), builds Zoekt search shards, and exposes grep, glob, file access, and symbol lookup tools over stdio. Includes an on-demand local web UI for interactive search.
+A single Go binary that indexes your GitHub repos for code search and serves them to agents over MCP. It syncs bare mirrors on a schedule (via launchd), builds [Zoekt](https://github.com/sourcegraph/zoekt) search shards, and exposes grep, glob, file access, symbol lookup, and git history tools (commit search, diff, blame) over stdio. Includes an on-demand local web UI for interactive search.
 
 Named for Odin's raven that flies out over the world and brings back memory.
 
