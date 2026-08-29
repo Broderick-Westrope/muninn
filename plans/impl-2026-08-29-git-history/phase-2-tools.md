@@ -1,7 +1,7 @@
 # Phase 2: History Tools (`internal/githistory` + MCP)
 
 > **Status:** DRAFT
-> Part of `plans/impl-2026-08-29-git-history/` — see README. Requires phase 1 merged (`internal/gitcmd`, `ResolveRev`, two-gen pins).
+> Part of `plans/impl-2026-08-29-git-history/` — see README. Requires phase 1 merged (`internal/gitcmd` with partial output + exit codes + `RunStdin`, `ResolveRev`/`ErrUnknownRev`/`ErrUnknownPath`, two-gen pins).
 
 ## Specification
 
@@ -14,11 +14,12 @@
 **Success Criteria** (from the spec, phase-2 subset):
 
 - [ ] Flagship scenario: fixture where `Foo` changed in commit C behind merge M — `search_commits(changed_literal:"Foo")` surfaces M annotated as a merge; `first_parent:false` surfaces C; `get_diff(rev:C)` shows the change.
+- [ ] `get_diff` on a **merge commit** shows the first-parent diff, not an empty combined diff.
 - [ ] `blame` line numbers agree exactly with `read_file` at the indexed commit.
 - [ ] Lockfile-heavy diff: source diffs intact, lockfiles as stat lines, budget respected.
 - [ ] Descendant/swapped revs under `merge_base:true` produce the warning header, not a bare empty diff.
-- [ ] Truncated diffs are always whole per-file patches (`git apply --check` against a temp worktree at the pre-image rev; binary files never emitted as patches).
-- [ ] A single over-budget file yields a stat line + notice, never a partial hunk.
+- [ ] Truncated output never contains a partial hunk; every emitted per-file patch is whole (verified with `git apply --check` on the raw patches).
+- [ ] A single over-budget file yields a stat line + notice.
 - [ ] Timeout on pickaxe returns labeled partial results, never a hang.
 - [ ] Renamed-file history continues past the rename for single-path queries.
 
@@ -28,8 +29,8 @@ _Run before starting:_
 
 ```bash
 read plans/design-2026-08-29-git-history.md   # authoritative tool contracts
-read internal/gitcmd/gitcmd.go                # Runner, ErrTimeout (phase 1)
-read internal/gitfile/gitfile.go              # ResolveRev, ErrUnknownRev, checkCommit, shortSHA
+read internal/gitcmd/gitcmd.go                # Runner, Error{ExitCode}, ErrTimeout, RunStdin (phase 1)
+read internal/gitfile/gitfile.go              # ResolveRev, ErrUnknownRev, ErrUnknownPath, checkCommit, shortSHA
 read internal/mcp/server.go                   # registration, textHandler, instructions
 read internal/mcp/tools_file.go               # arg struct + description + resolveIndexedCommit conventions
 read internal/mcp/tools_search.go             # clampLimit/clampNote/formatGrep conventions
@@ -37,26 +38,31 @@ read internal/mcp/tools_search.go             # clampLimit/clampNote/formatGrep 
 
 ## githistory Core Tasks
 
-All in `internal/githistory`, one test file per source file, fixtures built with helper `newFixtureRepo(t)` that shells git to create a bare mirror with a scripted history (branches, a merge, a rename, a lockfile commit, a binary file). Reuse `gitcmd.Runner`; every function takes `(ctx, mirrorDir, ...)` and validates caller-supplied revs via `gitfile.ResolveRev` first.
+All in `internal/githistory`. Shared decisions:
+
+- Every function takes `(ctx, mirrorDir, ...)`; caller-supplied revs go through `gitfile.ResolveRev` first.
+- **Literal pathspecs**: the package Runner env includes `GIT_LITERAL_PATHSPECS=1` — `path` params are literal paths, never globs (also what `--follow` requires). Tool descriptions say so.
+- Per-op timeouts: `logTimeout = 15s` (partial results supported), `diffTimeout = 60s`, `blameTimeout = 60s` (no partial semantics — a timeout is an error naming the narrowing options; state this in the error text).
+- Fixture: shared `newFixtureRepo(t)` in `fixture_test.go` shells git to build a bare mirror with scripted history: linear commits, a side branch merged with `--no-ff` (merge M containing change C to `Foo`), a rename, a lockfile commit, a binary file, a root commit (empty `%P` — parsers must accept it). All test-relevant commits stay reachable from branches so test clones see them.
 
 ### Task 1: `SearchCommits`
 
 **Files:**
-- Create: `internal/githistory/githistory.go` (package doc, shared types, `Commit` struct)
+- Create: `internal/githistory/githistory.go` (package doc, shared consts, `Commit` struct)
 - Create: `internal/githistory/log.go`
 - Create: `internal/githistory/log_test.go`
-- Create: `internal/githistory/fixture_test.go` (shared `newFixtureRepo`)
+- Create: `internal/githistory/fixture_test.go`
 
 **Steps:**
 
-1. [ ] `type Commit struct { SHA, AuthorDate, Author, Subject string; IsMerge bool }` and `type LogOptions struct { Rev, Author, Since, Until, Path, Message, ChangedLiteral, ChangedRegex string; FirstParent *bool; Limit int }` (nil `FirstParent` = true).
-2. [ ] `SearchCommits(ctx, mirrorDir string, opts LogOptions) (commits []Commit, truncated bool, timedOut bool, err error)`:
-   - Validate: `ChangedLiteral`/`ChangedRegex` mutually exclusive; resolve `Rev` (default: caller passes the indexed commit) via `gitfile.ResolveRev`.
-   - Build argv: `log --no-pager? (use git --no-pager log)`, format `%H%x09%as%x09%an%x09%P%x09%s` (parents field drives `IsMerge`: more than one parent), `-n <limit+1>`, `--first-parent` unless disabled, `--author`, `--since`/`--until`, `--grep=<message> --regexp-ignore-case`, `-S<literal>`/`-G<regex>` (as single argv tokens: `-S` + value concatenated), `--follow` iff exactly one `Path`, then `--end-of-options <rev> -- <path>`.
-   - `Path` starting with `-` or `:` → error (injection/pathspec-magic guard).
-   - Run with `RunRaw`; on `gitcmd.ErrTimeout`, parse whatever complete lines were captured and return `timedOut=true` (Runner must return partial stdout alongside `ErrTimeout` — if phase 1's Runner discards output on error, extend it here with a `RunPartial` variant; note it in the PR).
-   - `len > limit` → truncate to limit, `truncated=true`.
-3. [ ] Tests against the fixture: default first-parent excludes merge-side commits; `first_parent=false` includes them; pickaxe `-S` finds the commit that introduced a string and the one that removed it; `--follow` walks past the rename; mutual-exclusion and injection guards error; since/until filter; limit + truncated flag.
+1. [ ] `type Commit struct { SHA, AuthorDate, Author, Subject string; IsMerge bool }`; `type LogOptions struct { Rev, Author, Since, Until, Path, Message, ChangedLiteral, ChangedRegex string; FirstParent *bool; Limit int }` (nil `FirstParent` = true).
+2. [ ] `SearchCommits(ctx, mirrorDir string, opts LogOptions) (commits []Commit, truncated, timedOut bool, err error)`:
+   - Validate: `ChangedLiteral`/`ChangedRegex` mutually exclusive; `Path` rejected if leading `-` or `:`; resolve `Rev` via `gitfile.ResolveRev`.
+   - argv: `log`, `--format=%H%x09%as%x09%an%x09%P%x09%s`, `-n <limit+1>`, `--first-parent` unless disabled, `--author=`, `--since=`/`--until=`, `--grep=`, `-S<literal>`/`-G<regex>` (single concatenated tokens), `--follow` iff `Path != ""`, `--end-of-options`, `<sha>`, and `-- <path>` if set.
+   - Parse with `strings.SplitN(line, "\t", 5)` — **subjects may contain tabs**; subject is last field so SplitN preserves it. `%P` field: empty for root commits (accept), space-separated for merges → `IsMerge = len(fields) > 1` after `strings.Fields`.
+   - On `gitcmd.ErrTimeout`: parse the complete lines from the partial stdout (phase 1 guarantees output on error), return `timedOut = true`.
+   - `len > limit` → truncate, `truncated = true`.
+3. [ ] Tests: first-parent default excludes merge-side commits, `false` includes them; `-S` finds introduce + remove commits; `--follow` walks past the rename; root-commit line parses; tab-containing subject parses; mutual exclusion + injection guards; since/until; limit/truncated; timeout partial (fake slow git via PATH, as in gitcmd tests).
 
 **Verify:**
 ```bash
@@ -71,11 +77,12 @@ go test ./internal/githistory/ -run TestSearchCommits
 
 **Steps:**
 
-1. [ ] Types: `DiffOptions struct { Rev, Base, Path string; Patch, MergeBase, StatOnly, IncludeGenerated *bool }` (Patch default: false single-rev, true two-rev; MergeBase default true two-rev). Result: `Diff struct { Header CommitMeta; MergeBaseSHA string; Files []FileDiff; TruncatedFiles []StatLine; Warning string }` with `FileDiff { Path string; Patch string; StatLine string; Binary, Generated bool }`.
-2. [ ] Single-rev mode: `git show --no-patch --format=...` for metadata + `git show --stat` / `--patch` for content. Two-rev mode: resolve both revs; compute `git merge-base base rev`; diff `mb..rev` when MergeBase (equivalent to `base...rev`), `base..rev` otherwise; always compute ahead/behind (`git rev-list --count --left-right base...rev`) for the header; set `Warning` when the diff is empty or merge-base ≠ base (exact wording from the spec: swapped-arguments hint).
-3. [ ] File splitting: run diff with `--patch -z`? — no: parse on `diff --git ` boundaries from `RunRaw` output (git paths with spaces stay within the marker line; use `--src-prefix=a/ --dst-prefix=b/` defaults and split conservatively on `\ndiff --git `). Binary detection: `GIT binary patch` / `Binary files ... differ` → `Binary: true`, patch dropped, stat line kept (from a parallel `--numstat` invocation, one extra git call, acceptable).
-4. [ ] Budget: package const `diffByteBudget = 64 << 10`. Walk files in git's order: generated paths (package-level `generatedPatterns` var: `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `go.sum`, `*.pb.go`, `Cargo.lock`) and binaries → stat line unless `IncludeGenerated`; others append whole patch while budget lasts; a file whose patch alone exceeds the remaining budget (or the whole budget when first) → stat line + per-file notice. Never emit a partial hunk.
-5. [ ] Tests: single-rev metadata+stat; two-rev merge-base vs two-dot difference (fixture has divergent branches); descendant-rev empty diff sets Warning; swapped endpoints sets Warning; lockfile commit → stat-only for lockfile, patch for source; over-budget single file → stat+notice; binary file → stat only; every emitted `FileDiff.Patch` in a truncation scenario passes `git apply --check` in a temp worktree checked out at the pre-image (`git worktree` is unavailable on bare — use `git clone <mirror> <tmp>` + `git checkout <pre-image>` in the test helper).
+1. [ ] Types: `DiffOptions struct { Rev, Base, Path string; Patch, MergeBase, StatOnly, IncludeGenerated *bool }` (Patch default: false single-rev, true two-rev; MergeBase default true two-rev). Result: `Diff struct { Meta CommitMeta; MergeBaseSHA string; Ahead, Behind int; Files []FileDiff; OmittedStats []string; Warning string }`; `FileDiff { Path, Patch, StatLine string; Binary, Generated bool }`.
+2. [ ] Single-rev mode: metadata via `git show --no-patch --format=...`. Content: **merge commits get the first-parent diff `rev^1..rev` explicitly** — bare `git show` on a merge emits combined-diff format, which is empty for clean merges and would silently report "nothing changed" for exactly the commits agents inspect most. Detect via parent count (`%P`). Non-merges: `rev^..rev` (root commit: use `git show` semantics or diff against the empty tree `4b825dc642...`).
+3. [ ] Two-rev mode: resolve both revs; `git merge-base <base> <rev>` — **exit code 1 with empty stdout is a legitimate "no merge base" answer** (disjoint histories), distinguished via `gitcmd.Error.ExitCode`, not treated as failure: fall back to two-dot with a Warning line. Otherwise diff `mb..rev` when MergeBase (≡ `base...rev`) else `base..rev`; `git rev-list --count --left-right base...rev` for Ahead/Behind; Warning set when diff is empty or mb ≠ base (spec wording: swapped-arguments hint).
+4. [ ] File handling: get the file list + stats from `git diff --numstat -z` (binary files show `-\t-`); then fetch patches with `git diff --patch` and split on `\ndiff --git ` boundaries. Generated paths (package var `generatedPatterns`: `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `go.sum`, `*.pb.go`, `Cargo.lock` — matched on basename/glob) and binaries → stat line only, unless `IncludeGenerated`.
+5. [ ] Budget: `diffByteBudget = 64 << 10`, **total across the rendered patch sections**. Files in git's order: append whole patches while they fit; a file whose whole patch doesn't fit in the remaining budget → stat line + per-file notice (even the first file — spec: never a partial hunk, budget never violated; the notice names the path-filter escape hatch).
+6. [ ] Tests: single-rev metadata + stat; **merge-commit diff is non-empty and equals `rev^1..rev`**; two-rev merge-base vs two-dot on divergent branches; disjoint-history fallback (fixture: orphan branch via `checkout --orphan`); descendant-rev empty diff → Warning; swapped endpoints → Warning; lockfile stat-only + source patch intact; over-budget single file → stat + notice; binary → stat only; patch-wholeness: for a truncation scenario, apply each emitted `FileDiff.Patch` (raw, pre-render) with `git apply --check` in a scratch **local-path clone** of the fixture (`git clone /path/to/mirror` — plain-path clone hardlinks/copies the whole object store; do NOT use `file://` URL, which packs only reachable objects) checked out at the pre-image rev.
 
 **Verify:**
 ```bash
@@ -91,8 +98,8 @@ go test ./internal/githistory/ -run TestGetDiff
 **Steps:**
 
 1. [ ] `BlameOptions struct { Rev, Path string; StartLine, EndLine int }`; `BlameLine struct { Line int; SHA, AuthorDate, Author, Content string }`.
-2. [ ] Run `git blame --line-porcelain [-L start,end] --end-of-options <rev> -- <path>`; parse porcelain records (header line `<sha> <orig> <final> [count]`, then tag lines, `\t`-prefixed content line ends the record). Collect `author`, `author-time` (format as date), content, final line number.
-3. [ ] Tests: full-file blame line numbers and content match `gitfile.ReadFile` at the same rev line-for-line (the spec's flagship equality criterion); `-L` range returns exactly that range; blame at an older rev differs from the indexed rev appropriately; missing path → error wrapping `fs.ErrNotExist` semantics consistent with `gitfile`.
+2. [ ] `git blame --line-porcelain [-L start,end] --end-of-options <sha> -- <path>` under `blameTimeout`. Porcelain parsing: header `<sha> <origLine> <finalLine> [<numLines>]`, tag lines (`author`, `author-time` → format `2006-01-02`), content line prefixed `\t` ends each record. Map git's "no such path" failure through `gitfile.ClassifyPathErr` → `ErrUnknownPath`.
+3. [ ] Tests: full-file blame agrees line-for-line (number + content) with `gitfile.ReadFile` at the same rev; `-L` range exact; older rev differs appropriately; missing path → `ErrUnknownPath`; `-L` past EOF → clear error (git exits 128; surface the stderr message).
 
 **Verify:**
 ```bash
@@ -112,28 +119,29 @@ go test ./internal/githistory/ -run TestBlame
 
 **Steps:**
 
-1. [ ] `SearchCommitsArgs{Repo, Author, Since, Until, Path, Message, ChangedLiteral, ChangedRegex, Rev string; FirstParent *bool; Limit int}` → resolve repo via `s.resolveIndexedCommit` (default `Rev` = indexed commit), call `githistory.SearchCommits`, format `sha  date  author  subject` lines with `(merge — rerun with first_parent: false for the underlying commit)` annotation on merge rows **when a pickaxe filter was used**; truncation notice; timeout notice per spec ("partial results: timed out after Xs; narrow with path or since/until"); `clampLimit(30, 100)` + `clampNote`.
-2. [ ] `GetDiffArgs{Repo, Rev, Base, Path string; Patch, MergeBase, StatOnly, IncludeGenerated *bool}` → default `Rev` to indexed commit; render: header block (endpoints, merge-base, ahead/behind, Warning line when set), then file sections, then `[truncated: ...]` stat block. Tool description documents direction (base → rev), merge-base default, and budget behavior.
-3. [ ] `BlameArgs{Repo, Path, Rev string; StartLine, EndLine int}` → default `Rev` to indexed commit; output `line: short-sha date author | content`; line cap default 200 / max 500 with notice suggesting a range (skip the legend/dedup idea for v1 — inline always; note spec allows this). Description steers to ranges and states the indexed-commit default.
-4. [ ] Tool descriptions: one paragraph each, following existing tone; must cover: `search_commits` — commit-date filtering note, `-S` literal vs `-G` regex + slower, first-parent default; `get_diff` — direction, three-dot default + when to set `merge_base:false`; `blame` — pinned default, range steering.
-5. [ ] Register in `mcpServer()` with `textHandler`; update the package doc comment ("seven v1 tools" → ten) and the `instructions` const (mention history tools operate on the mirror's full fetched history while file reads stay pinned).
-6. [ ] Handler tests mirroring `tools_file_test.go` style: happy path per tool against a fixture mirror + status file; unknown repo error; unknown rev error surfaces `ErrUnknownRev` message; blame/read_file line agreement at the MCP layer.
+1. [ ] `SearchCommitsArgs{Repo, Author, Since, Until, Path, Message, ChangedLiteral, ChangedRegex, Rev string; FirstParent *bool; Limit int}` → resolve repo via `s.resolveIndexedCommit` (default `Rev` = indexed commit), call `githistory.SearchCommits`, render `sha  date  author  subject` lines. Merge rows are **always** annotated `(merge)`; when a pickaxe filter was used the annotation extends to `(merge — rerun with first_parent: false for the underlying commit)` because that is the case where the mainline hit hides the "why". Truncation notice; timeout notice ("partial results: timed out after Xs; narrow with path or since/until"); `clampLimit(30, 100)` + `clampNote`.
+2. [ ] `GetDiffArgs{Repo, Rev, Base, Path string; Patch, MergeBase, StatOnly, IncludeGenerated *bool}` → default `Rev` to indexed commit; render: header block (endpoints, merge-base, ahead/behind, Warning when set), file sections, `[omitted: ...]` stat block for `OmittedStats`. Description documents direction (base → rev), merge-base default + `merge_base:false` for point-to-point, literal paths, and budget behavior.
+3. [ ] `BlameArgs{Repo, Path, Rev string; StartLine, EndLine int}` → default `Rev` to indexed commit; output `line: short-sha date author | content` (inline always — no legend for v1); line cap default 200 / max 500 with notice suggesting a range. Description steers to ranges and states the indexed-commit default.
+4. [ ] Error rendering: `ErrUnknownRev` and `ErrUnknownPath` surface as tool errors with their remedial text; `ErrIndexMismatch` keeps its "run `muninn sync`" text; `gitcmd.ErrTimeout` on diff/blame → "timed out; narrow with a path filter / line range / closer revs".
+5. [ ] Descriptions (one paragraph each, existing tone): `search_commits` — commit-date filtering note, `-S` literal vs `-G` regex (+ slower), first-parent default, literal paths; `get_diff` — direction, three-dot default, merge-commit = first-parent diff; `blame` — pinned default, range steering.
+6. [ ] Register in `mcpServer()` via `textHandler`; update package doc ("seven v1 tools" → ten) and `instructions` const (history tools operate on full fetched history; file reads stay pinned).
+7. [ ] Handler tests in `tools_file_test.go` style: happy path per tool against a fixture mirror + status file; unknown repo; unknown rev/path error text; blame/read_file agreement at the MCP layer; merge annotation rendering both with and without pickaxe.
 
 **Verify:**
 ```bash
 go test ./internal/mcp/
 ```
 
-### Task 5: Staleness + docs
+### Task 5: Staleness parity + docs
 
 **Files:**
-- Modify: `internal/mcp/tools_history.go` (staleness warning parity)
+- Modify: `internal/mcp/tools_history.go`
 - Modify: `README.md` (tool list)
 
 **Steps:**
 
-1. [ ] Apply the same staleness-warning mechanism `list_repos` uses (check how `staleAfter` is consumed; if warnings are per-tool, append to history outputs; if only in `list_repos`, add a one-line stale suffix to history tools consistent with whatever `grep` does — match existing behavior exactly, do not invent a new pattern).
-2. [ ] Update README tool table with the three new tools and one-line descriptions.
+1. [ ] Inspect how existing tools consume `staleAfter` (check `list_repos` and whether `grep`/`read_file` append anything). Apply the **identical** mechanism to the three history tools. Concrete check: with a status file older than `staleAfter`, `search_commits` output contains the same staleness text `list_repos` produces for the same fixture (assert string equality of the warning fragment in a test).
+2. [ ] Update README tool table with the three new tools.
 
 **Verify:**
 ```bash
@@ -149,3 +157,7 @@ go test ./... && go build .
 ```
 
 Create PR for human review.
+
+## Review notes
+
+Devils-advocate review (round 1) caught: `git show` on merge commits emitting empty combined diffs (now first-parent diff, new success criterion + fixture case); `merge-base` exit 1 being a legitimate answer needing `ExitCode` (disjoint-history fallback added); `%s` subjects containing tabs (SplitN mandated) and empty `%P` on root commits; pathspec globbing ambiguity (GIT_LITERAL_PATHSPECS=1); `git apply --check` needing raw pre-render patches and a plain-path clone (file:// URL clones only pack reachable objects); 64 KiB budget semantics pinned (total, stat-fallback even for the first file); per-op timeouts for diff/blame (no partials — explicit error text); merge annotation gating rationale made explicit (always `(merge)`, extended advice only under pickaxe); staleness parity made concretely testable.
