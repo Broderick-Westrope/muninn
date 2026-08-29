@@ -102,7 +102,7 @@ func TestTimeout(t *testing.T) {
 	elapsed := time.Since(start)
 
 	if !errors.Is(err, ErrTimeout) {
-		t.Fatalf("error = %v, want ErrTimeout", err)
+		t.Fatalf("err = %v, want ErrTimeout", err)
 	}
 	if elapsed >= 2*time.Second {
 		t.Fatalf("elapsed = %v; timeout must fire well before the fake git's 10s sleep", elapsed)
@@ -186,12 +186,12 @@ func TestExitCodeAndStderr(t *testing.T) {
 
 	_, err := Runner{}.Run(context.Background(), "-C", repo, "cat-file", "-e", "doesnotexist")
 	if err == nil {
-		t.Fatal("expected error")
+		t.Fatal("err = nil, want error")
 	}
 
 	var gitErr *Error
 	if !errors.As(err, &gitErr) {
-		t.Fatalf("error = %v, want *Error", err)
+		t.Fatalf("err = %v, want *Error", err)
 	}
 	if gitErr.ExitCode != 128 {
 		t.Fatalf("ExitCode = %d, want 128", gitErr.ExitCode)
@@ -235,12 +235,12 @@ func TestValidateRejectsOldGit(t *testing.T) {
 
 	err := Validate()
 	if err == nil {
-		t.Fatal("expected error for old git version")
+		t.Fatal("err = nil, want error for old git version")
 	}
 	if !strings.Contains(err.Error(), "2.20") {
-		t.Fatalf("error = %q, want to contain %q", err, "2.20")
+		t.Fatalf("err = %q, want to contain %q", err, "2.20")
 	}
 	if !strings.Contains(err.Error(), "2.32") {
-		t.Fatalf("error = %q, want to contain %q", err, "2.32")
+		t.Fatalf("err = %q, want to contain %q", err, "2.32")
 	}
 }

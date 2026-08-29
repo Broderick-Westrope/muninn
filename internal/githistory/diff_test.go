@@ -411,10 +411,10 @@ func TestGetDiffValidation(t *testing.T) {
 
 	_, err := GetDiff(ctx, f.Mirror, DiffOptions{Rev: "main", Path: "-p"})
 	if err == nil || !strings.Contains(err.Error(), "must not start with") {
-		t.Fatalf("error = %v, want to contain %q", err, "must not start with")
+		t.Fatalf("err = %v, want to contain %q", err, "must not start with")
 	}
 
 	if _, err = GetDiff(ctx, f.Mirror, DiffOptions{Rev: "no-such-branch"}); err == nil {
-		t.Fatal("expected error for unknown branch")
+		t.Fatal("err = nil, want error for unknown branch")
 	}
 }

@@ -225,22 +225,22 @@ func TestSearchCommitsValidation(t *testing.T) {
 		ChangedRegex:   "b",
 	})
 	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
-		t.Fatalf("error = %v, want to contain %q", err, "mutually exclusive")
+		t.Fatalf("err = %v, want to contain %q", err, "mutually exclusive")
 	}
 
 	_, _, _, err = SearchCommits(ctx, f.Mirror, LogOptions{Rev: "main", Path: "--all"})
 	if err == nil || !strings.Contains(err.Error(), "must not start with") {
-		t.Fatalf("error = %v, want to contain %q", err, "must not start with")
+		t.Fatalf("err = %v, want to contain %q", err, "must not start with")
 	}
 
 	_, _, _, err = SearchCommits(ctx, f.Mirror, LogOptions{Rev: "main", Path: ":(glob)*.go"})
 	if err == nil || !strings.Contains(err.Error(), "must not start with") {
-		t.Fatalf("error = %v, want to contain %q", err, "must not start with")
+		t.Fatalf("err = %v, want to contain %q", err, "must not start with")
 	}
 
 	_, _, _, err = SearchCommits(ctx, f.Mirror, LogOptions{Rev: "no-such-branch"})
 	if !errors.Is(err, gitfile.ErrUnknownRev) {
-		t.Fatalf("error = %v, want ErrUnknownRev", err)
+		t.Fatalf("err = %v, want ErrUnknownRev", err)
 	}
 }
 

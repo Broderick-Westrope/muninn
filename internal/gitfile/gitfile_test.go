@@ -402,13 +402,13 @@ func TestResolveRevUnknown(t *testing.T) {
 
 	_, err := ResolveRev(context.Background(), mirror, strings.Repeat("a", 40))
 	if !errors.Is(err, ErrUnknownRev) {
-		t.Fatalf("error = %v, want ErrUnknownRev", err)
+		t.Fatalf("err = %v, want ErrUnknownRev", err)
 	}
 	if errors.Is(err, ErrIndexMismatch) {
-		t.Fatalf("error = %v, must not be ErrIndexMismatch", err)
+		t.Fatalf("err = %v, must not be ErrIndexMismatch", err)
 	}
 	if !strings.Contains(err.Error(), "rev-parse") {
-		t.Fatalf("error = %q, want to contain %q (underlying git error must be preserved)", err, "rev-parse")
+		t.Fatalf("err = %q, want to contain %q (underlying git error must be preserved)", err, "rev-parse")
 	}
 }
 
@@ -429,10 +429,10 @@ func TestResolveRevTimeoutIsNotUnknownRev(t *testing.T) {
 	defer cancel()
 	_, err := ResolveRev(ctx, t.TempDir(), "main")
 	if !errors.Is(err, gitcmd.ErrTimeout) {
-		t.Fatalf("error = %v, want ErrTimeout", err)
+		t.Fatalf("err = %v, want ErrTimeout", err)
 	}
 	if errors.Is(err, ErrUnknownRev) {
-		t.Fatalf("error = %v; a timeout must not be reported as an unknown rev", err)
+		t.Fatalf("err = %v; a timeout must not be reported as an unknown rev", err)
 	}
 }
 
@@ -477,13 +477,13 @@ func TestClassifyPathErr(t *testing.T) {
 			out := ClassifyPathErr(in)
 			if tt.unknown {
 				if !errors.Is(out, ErrUnknownPath) {
-					t.Fatalf("error = %v, want ErrUnknownPath", out)
+					t.Fatalf("err = %v, want ErrUnknownPath", out)
 				}
 				if !strings.Contains(out.Error(), tt.stderr) {
-					t.Fatalf("error = %q, want to contain %q (original diagnostics preserved)", out, tt.stderr)
+					t.Fatalf("err = %q, want to contain %q (original diagnostics preserved)", out, tt.stderr)
 				}
 			} else if out != in {
-				t.Fatalf("error = %v, want %v (non-path errors pass through unchanged)", out, in)
+				t.Fatalf("err = %v, want %v (non-path errors pass through unchanged)", out, in)
 			}
 		})
 	}

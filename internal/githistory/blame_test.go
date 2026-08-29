@@ -153,7 +153,7 @@ func TestBlameMissingPath(t *testing.T) {
 
 	_, err := Blame(context.Background(), f.Mirror, BlameOptions{Rev: "main", Path: "nope.txt"})
 	if !errors.Is(err, gitfile.ErrUnknownPath) {
-		t.Fatalf("error = %v, want ErrUnknownPath", err)
+		t.Fatalf("err = %v, want ErrUnknownPath", err)
 	}
 }
 
@@ -167,10 +167,10 @@ func TestBlameRangePastEOF(t *testing.T) {
 		EndLine:   200,
 	})
 	if err == nil {
-		t.Fatal("expected error for range past EOF")
+		t.Fatal("err = nil, want error for range past EOF")
 	}
 	if !strings.Contains(err.Error(), "has only 2 lines") {
-		t.Fatalf("error = %q, want to contain %q (git's diagnostic must surface clearly)", err, "has only 2 lines")
+		t.Fatalf("err = %q, want to contain %q (git's diagnostic must surface clearly)", err, "has only 2 lines")
 	}
 }
 
@@ -180,21 +180,21 @@ func TestBlameValidation(t *testing.T) {
 
 	_, err := Blame(ctx, f.Mirror, BlameOptions{Rev: "main"})
 	if err == nil || !strings.Contains(err.Error(), "requires a path") {
-		t.Fatalf("error = %v, want to contain %q", err, "requires a path")
+		t.Fatalf("err = %v, want to contain %q", err, "requires a path")
 	}
 
 	_, err = Blame(ctx, f.Mirror, BlameOptions{Rev: "main", Path: "-L1,2"})
 	if err == nil || !strings.Contains(err.Error(), "must not start with") {
-		t.Fatalf("error = %v, want to contain %q", err, "must not start with")
+		t.Fatalf("err = %v, want to contain %q", err, "must not start with")
 	}
 
 	_, err = Blame(ctx, f.Mirror, BlameOptions{Rev: "main", Path: "doc.txt", StartLine: 3, EndLine: 2})
 	if err == nil || !strings.Contains(err.Error(), "after end_line") {
-		t.Fatalf("error = %v, want to contain %q", err, "after end_line")
+		t.Fatalf("err = %v, want to contain %q", err, "after end_line")
 	}
 
 	_, err = Blame(ctx, f.Mirror, BlameOptions{Rev: "no-such-branch", Path: "doc.txt"})
 	if !errors.Is(err, gitfile.ErrUnknownRev) {
-		t.Fatalf("error = %v, want ErrUnknownRev", err)
+		t.Fatalf("err = %v, want ErrUnknownRev", err)
 	}
 }
