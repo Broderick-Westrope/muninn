@@ -167,8 +167,16 @@ func GetDiff(ctx context.Context, mirrorDir string, opts DiffOptions) (*Diff, er
 	}
 	if twoRev && len(d.Files) == 0 && len(d.OmittedStats) == 0 {
 		emptyWarning := fmt.Sprintf("diff from %s to %s is empty", shortSHA(from), shortSHA(revSHA))
-		if d.MergeBaseSHA == revSHA {
-			emptyWarning += " because rev is an ancestor of base — the arguments may be swapped, or use merge_base: false for a point-to-point comparison"
+		switch {
+		case d.BaseSHA == revSHA:
+			emptyWarning += " because base and rev are the same commit"
+		case d.MergeBaseSHA == revSHA:
+			emptyWarning += " because rev is an ancestor of base — the arguments may be swapped"
+			// resolveEndpoints may already have suggested merge_base:
+			// false; the advice must appear exactly once overall.
+			if !strings.Contains(d.Warning, "merge_base: false") {
+				emptyWarning += ", or use merge_base: false for a point-to-point comparison"
+			}
 		}
 		if d.Warning != "" {
 			d.Warning += "; "

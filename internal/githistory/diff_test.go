@@ -135,14 +135,31 @@ func TestGetDiffDescendantAndSwappedWarnings(t *testing.T) {
 	require.NotEmpty(t, d.Files)
 
 	// Swapped endpoints: rev is an ancestor of base, so the three-dot
-	// diff is silently empty — the warning must say so.
+	// diff is silently empty — the warning must say so. The merge_base:
+	// false advice arrives from both resolveEndpoints and the empty-diff
+	// check; it must be deduplicated to a single occurrence.
 	d, err = GetDiff(ctx, f.Mirror, DiffOptions{Rev: f.Root, Base: "main"})
 	require.NoError(t, err)
 	require.Empty(t, d.Files)
 	require.Empty(t, d.OmittedStats)
 	require.Contains(t, d.Warning, "empty")
 	require.Contains(t, d.Warning, "swapped")
-	require.Contains(t, d.Warning, "merge_base: false")
+	require.Equal(t, 1, strings.Count(d.Warning, "use merge_base: false for a point-to-point comparison"))
+}
+
+func TestGetDiffIdenticalEndpoints(t *testing.T) {
+	t.Parallel()
+	f := newFixtureRepo(t)
+
+	// base == rev: the diff is trivially empty, but the endpoints are
+	// not swapped — the warning must say "same commit" instead.
+	d, err := GetDiff(context.Background(), f.Mirror, DiffOptions{Rev: f.Root, Base: f.Root})
+	require.NoError(t, err)
+	require.Empty(t, d.Files)
+	require.Empty(t, d.OmittedStats)
+	require.Contains(t, d.Warning, "empty")
+	require.Contains(t, d.Warning, "same commit")
+	require.NotContains(t, d.Warning, "swapped")
 }
 
 func TestGetDiffLockfileStatOnly(t *testing.T) {
