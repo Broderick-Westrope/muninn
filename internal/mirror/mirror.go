@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,10 +23,21 @@ import (
 // gitcmd.DefaultTimeout on large repos or slow links.
 const fetchTimeout = 10 * time.Minute
 
+// gcTimeout bounds MaybeGC's git gc, which can legitimately run for
+// minutes on large mirrors.
+const gcTimeout = 10 * time.Minute
+
+// defaultGCLooseObjectThreshold is the loose-object count above which
+// MaybeGC repacks a mirror when Manager.GCLooseObjectThreshold is unset.
+const defaultGCLooseObjectThreshold = 5000
+
 // Manager performs git operations on the mirrors under BaseDir.
 // Callers pass the base directory (typically xdg.MirrorsDir()).
 type Manager struct {
 	BaseDir string
+	// GCLooseObjectThreshold is the loose-object count above which MaybeGC
+	// runs git gc; 0 means defaultGCLooseObjectThreshold.
+	GCLooseObjectThreshold int
 }
 
 // Dir returns the mirror directory for a repo's "owner/name".
@@ -156,6 +168,55 @@ func (m *Manager) MarkIndexed(ctx context.Context, dir, sha string) error {
 		return fmt.Errorf("rotating indexed refs in %s: %w", dir, err)
 	}
 	return nil
+}
+
+// MaybeGC runs git gc on the mirror at dir when its loose-object count
+// exceeds the threshold, reporting whether gc ran. Mirrors are cloned with
+// gc.auto=0, so this is the only mechanism bounding loose-object
+// accumulation from repeated fetches.
+//
+// It deliberately does NOT pass --prune=now: git gc's default two-week
+// grace period additionally protects any commit that a session older than
+// two syncs might still name explicitly, beyond the two generations held
+// by refs/muninn/*. A gc killed by the timeout can leave tmp packs
+// behind; git self-heals on the next run, which is acceptable.
+func (m *Manager) MaybeGC(ctx context.Context, dir string) (ran bool, err error) {
+	out, err := runGit(ctx, nil, "-C", dir, "count-objects", "-v")
+	if err != nil {
+		return false, fmt.Errorf("counting objects in %s: %w", dir, err)
+	}
+	loose, err := parseLooseCount(out)
+	if err != nil {
+		return false, fmt.Errorf("parsing object count in %s: %w", dir, err)
+	}
+	threshold := m.GCLooseObjectThreshold
+	if threshold == 0 {
+		threshold = defaultGCLooseObjectThreshold
+	}
+	if loose <= threshold {
+		return false, nil
+	}
+	if _, err := (gitcmd.Runner{Timeout: gcTimeout}).Run(ctx, "-C", dir, "gc", "--quiet"); err != nil {
+		return true, fmt.Errorf("running gc in %s: %w", dir, err)
+	}
+	return true, nil
+}
+
+// parseLooseCount extracts the loose-object count from
+// `git count-objects -v` output (its "count:" line).
+func parseLooseCount(out string) (int, error) {
+	for line := range strings.Lines(out) {
+		value, ok := strings.CutPrefix(strings.TrimSpace(line), "count:")
+		if !ok {
+			continue
+		}
+		count, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return 0, fmt.Errorf("parsing count line %q: %w", strings.TrimSpace(line), err)
+		}
+		return count, nil
+	}
+	return 0, fmt.Errorf("no count line in count-objects output %q", out)
 }
 
 // List returns the "owner/name" of every mirror on disk, sorted.

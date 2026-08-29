@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -398,4 +399,70 @@ func TestMarkIndexedSurvivesHostileMaintenance(t *testing.T) {
 	git(t, dir, "gc", "--prune=now")
 	git(t, dir, "cat-file", "-e", commitA+"^{commit}")
 	git(t, dir, "cat-file", "-e", commitB+"^{commit}")
+}
+
+// gitStdin runs a git command against dir with the given stdin, failing
+// the test on error.
+func gitStdin(t *testing.T, dir, stdin string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Stdin = strings.NewReader(stdin)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "git %v: %s", args, out)
+	return strings.TrimSpace(string(out))
+}
+
+// looseCount returns the loose-object count of the repo at dir.
+func looseCount(t *testing.T, dir string) int {
+	t.Helper()
+	count, err := parseLooseCount(git(t, dir, "count-objects", "-v"))
+	require.NoError(t, err)
+	return count
+}
+
+// seedLooseObjects writes n reachable loose blobs into the bare repo at
+// dir using a single hash-object invocation (thousands of process spawns
+// would be slow; fast-import is unusable because it writes packs, not
+// loose objects). Each blob is pinned by a ref so gc packs it rather than
+// leaving it loose as a fresh unreachable object.
+func seedLooseObjects(t *testing.T, dir string, n int) {
+	t.Helper()
+	blobDir := t.TempDir()
+	var paths strings.Builder
+	for i := range n {
+		path := filepath.Join(blobDir, fmt.Sprintf("blob-%d.txt", i))
+		require.NoError(t, os.WriteFile(path, fmt.Appendf(nil, "content %d\n", i), 0o644))
+		paths.WriteString(path + "\n")
+	}
+	shas := gitStdin(t, dir, paths.String(), "hash-object", "-w", "--stdin-paths")
+	var batch strings.Builder
+	for i, sha := range strings.Fields(shas) {
+		fmt.Fprintf(&batch, "create refs/muninn/test-keep-%d %s\n", i, sha)
+	}
+	gitStdin(t, dir, batch.String(), "update-ref", "--stdin")
+}
+
+func TestMaybeGCOverThreshold(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "repo.git")
+	git(t, "", "init", "--bare", dir)
+	seedLooseObjects(t, dir, 10)
+	require.Equal(t, 10, looseCount(t, dir))
+
+	m := &Manager{BaseDir: t.TempDir(), GCLooseObjectThreshold: 5}
+	ran, err := m.MaybeGC(context.Background(), dir)
+	require.NoError(t, err)
+	require.True(t, ran)
+	require.Less(t, looseCount(t, dir), 10, "gc should have packed the loose objects")
+}
+
+func TestMaybeGCUnderThreshold(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "repo.git")
+	git(t, "", "init", "--bare", dir)
+	seedLooseObjects(t, dir, 3)
+
+	m := &Manager{BaseDir: t.TempDir(), GCLooseObjectThreshold: 5}
+	ran, err := m.MaybeGC(context.Background(), dir)
+	require.NoError(t, err)
+	require.False(t, ran)
+	require.Equal(t, 3, looseCount(t, dir), "gc must not have run")
 }
