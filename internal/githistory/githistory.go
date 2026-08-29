@@ -63,6 +63,15 @@ func validatePath(path string) error {
 	return nil
 }
 
+// plural renders "n word" with an "s" appended when n != 1, so warning
+// text never reads "1 commits".
+func plural(n int, word string) string {
+	if n == 1 {
+		return "1 " + word
+	}
+	return fmt.Sprintf("%d %ss", n, word)
+}
+
 // shortSHA abbreviates a commit SHA for error and warning messages,
 // matching the 7-character abbreviation used in mcp tool output.
 func shortSHA(commit string) string {

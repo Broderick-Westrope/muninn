@@ -2,6 +2,7 @@ package githistory
 
 import (
 	"context"
+	"fmt"
 	"os/exec"
 	"path/filepath"
 	"slices"
@@ -159,6 +160,14 @@ func TestGetDiffTwoRevMergeBaseVsTwoDot(t *testing.T) {
 	}
 	if !strings.Contains(d.Warning, "merge_base: false") {
 		t.Fatalf("Warning = %q, want to contain %q", d.Warning, "merge_base: false")
+	}
+	// Counts must pluralize correctly: base is exactly one commit ahead
+	// ("1 commit", never "1 commits"); rev is several ahead.
+	if want := fmt.Sprintf("rev is %d commits ahead, base is 1 commit ahead", d.Ahead); !strings.Contains(d.Warning, want) {
+		t.Fatalf("Warning = %q, want to contain %q", d.Warning, want)
+	}
+	if strings.Contains(d.Warning, "1 commits") {
+		t.Fatalf("Warning = %q, must not contain %q", d.Warning, "1 commits")
 	}
 
 	// Two-dot: point-to-point tree comparison, so div.txt shows up as a

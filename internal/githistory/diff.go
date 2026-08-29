@@ -223,8 +223,8 @@ func resolveEndpoints(ctx context.Context, mirrorDir string, d *Diff, baseSHA, r
 	if useMergeBase && mb != "" {
 		from = mb
 		if mb != baseSHA {
-			d.Warning = fmt.Sprintf("merge-base %s differs from base %s: rev is %d commits ahead, base is %d commits ahead; the three-dot diff shows only rev-side changes — use merge_base: false for a point-to-point comparison",
-				shortSHA(mb), shortSHA(baseSHA), d.Ahead, d.Behind)
+			d.Warning = fmt.Sprintf("merge-base %s differs from base %s: rev is %s ahead, base is %s ahead; the three-dot diff shows only rev-side changes — use merge_base: false for a point-to-point comparison",
+				shortSHA(mb), shortSHA(baseSHA), plural(d.Ahead, "commit"), plural(d.Behind, "commit"))
 		}
 	}
 	return from, nil
