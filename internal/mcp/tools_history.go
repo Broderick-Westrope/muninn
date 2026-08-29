@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/broderick-westrope/muninn/internal/githistory"
+	"github.com/broderick-westrope/muninn/internal/status"
 )
 
 const (
@@ -68,11 +69,12 @@ func (s *Server) SearchCommits(ctx context.Context, args SearchCommitsArgs) (str
 		return "", err
 	}
 	if len(commits) == 0 && !timedOut {
-		return "no commits match", nil
+		return s.stalenessWarning() + "no commits match", nil
 	}
 
 	pickaxe := args.ChangedLiteral != "" || args.ChangedRegex != ""
 	var b strings.Builder
+	b.WriteString(s.stalenessWarning())
 	for _, c := range commits {
 		fmt.Fprintf(&b, "%s  %s  %s  %s", shortSHA(c.SHA), c.AuthorDate, c.Author, c.Subject)
 		if c.IsMerge {
@@ -132,6 +134,7 @@ func (s *Server) GetDiff(ctx context.Context, args GetDiffArgs) (string, error) 
 	}
 
 	var b strings.Builder
+	b.WriteString(s.stalenessWarning())
 	if args.Base == "" {
 		fmt.Fprintf(&b, "%s: commit %s  %s  %s\n", args.Repo, shortSHA(d.Meta.SHA), d.Meta.Author, d.Meta.AuthorDate)
 		if d.Meta.Message != "" {
@@ -219,6 +222,7 @@ func (s *Server) Blame(ctx context.Context, args BlameArgs) (string, error) {
 		revLabel = shortSHA(commit)
 	}
 	var b strings.Builder
+	b.WriteString(s.stalenessWarning())
 	fmt.Fprintf(&b, "%s/%s @ %s\n", args.Repo, args.Path, revLabel)
 	for _, l := range shown {
 		fmt.Fprintf(&b, "%d: %s %s %s | %s\n", l.Line, shortSHA(l.SHA), l.AuthorDate, l.Author, l.Content)
@@ -227,4 +231,21 @@ func (s *Server) Blame(ctx context.Context, args BlameArgs) (string, error) {
 		fmt.Fprintf(&b, "\n[truncated: %d more lines; use start_line/end_line to blame a range]\n", omitted)
 	}
 	return strings.TrimSuffix(b.String(), "\n"), nil
+}
+
+// stalenessWarning returns the same staleness warning fragment list_repos
+// emits, or "" when the index is fresh. History answers span the full
+// fetched history, but rev endpoints still default to the indexed commit,
+// so staleness matters here exactly as much as for file reads. The
+// missing-status case never renders in the history tools —
+// resolveIndexedCommit fails first — but it is kept for parity.
+func (s *Server) stalenessWarning() string {
+	st, err := status.Read(s.statusPath)
+	if err != nil {
+		return "WARNING: no sync status found; the index may be empty or stale — run `muninn sync`\n"
+	}
+	if age := status.Age(st); age > staleAfter {
+		return fmt.Sprintf("WARNING: index is stale: last sync finished %s ago — run `muninn sync`\n", formatAge(age))
+	}
+	return ""
 }

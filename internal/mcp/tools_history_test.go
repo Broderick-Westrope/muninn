@@ -350,3 +350,64 @@ func TestBlameUnknownPath(t *testing.T) {
 		t.Errorf("err = %q, want unknown-path error", err)
 	}
 }
+
+// warningLine extracts the staleness warning line from tool output, or ""
+// when there is none.
+func warningLine(out string) string {
+	for _, l := range strings.Split(out, "\n") {
+		if strings.HasPrefix(l, "WARNING:") {
+			return l
+		}
+	}
+	return ""
+}
+
+func TestHistoryStalenessParity(t *testing.T) {
+	// The full fixture (with a searcher) so list_repos works too; then age
+	// the status file past staleAfter.
+	f := newFixture(t, "")
+	writeStatus(t, f.statusPath, f.commit, time.Now().Add(-2*staleAfter))
+
+	ctx := context.Background()
+	reposOut, err := f.srv.ListRepos(ctx, ListReposArgs{})
+	if err != nil {
+		t.Fatalf("ListRepos: %v", err)
+	}
+	want := warningLine(reposOut)
+	if want == "" {
+		t.Fatalf("list_repos output missing staleness warning:\n%s", reposOut)
+	}
+
+	commitsOut, err := f.srv.SearchCommits(ctx, SearchCommitsArgs{Repo: "acme/widget"})
+	if err != nil {
+		t.Fatalf("SearchCommits: %v", err)
+	}
+	diffOut, err := f.srv.GetDiff(ctx, GetDiffArgs{Repo: "acme/widget"})
+	if err != nil {
+		t.Fatalf("GetDiff: %v", err)
+	}
+	blameOut, err := f.srv.Blame(ctx, BlameArgs{Repo: "acme/widget", Path: "widget.go"})
+	if err != nil {
+		t.Fatalf("Blame: %v", err)
+	}
+	for name, out := range map[string]string{
+		"search_commits": commitsOut,
+		"get_diff":       diffOut,
+		"blame":          blameOut,
+	} {
+		if got := warningLine(out); got != want {
+			t.Errorf("%s staleness warning = %q, want the list_repos wording %q", name, got, want)
+		}
+	}
+}
+
+func TestHistoryNoStalenessWarningWhenFresh(t *testing.T) {
+	f := newHistoryFixture(t)
+	out, err := f.srv.SearchCommits(context.Background(), SearchCommitsArgs{Repo: "acme/widget"})
+	if err != nil {
+		t.Fatalf("SearchCommits: %v", err)
+	}
+	if got := warningLine(out); got != "" {
+		t.Errorf("fresh index produced staleness warning %q", got)
+	}
+}
