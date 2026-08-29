@@ -475,6 +475,12 @@ func TestBlameUnknownPath(t *testing.T) {
 	if !strings.Contains(err.Error(), "path not found at revision") {
 		t.Errorf("err = %q, want unknown-path error", err)
 	}
+	// The clean classified error must not leak the mirror path or argv.
+	for _, leak := range []string{"mirrors", "git -C", "exit status", "stderr"} {
+		if strings.Contains(err.Error(), leak) {
+			t.Errorf("err = %q, must not leak %q", err, leak)
+		}
+	}
 }
 
 // warningLine extracts the staleness warning line from tool output, or ""

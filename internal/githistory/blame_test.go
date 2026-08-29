@@ -155,6 +155,16 @@ func TestBlameMissingPath(t *testing.T) {
 	if !errors.Is(err, gitfile.ErrUnknownPath) {
 		t.Fatalf("err = %v, want ErrUnknownPath", err)
 	}
+	if !strings.Contains(err.Error(), `path "nope.txt" not found at rev`) {
+		t.Fatalf("err = %q, want the clean not-found message", err)
+	}
+	// The raw gitcmd error carries the mirror path and full argv; neither
+	// may leak to the caller.
+	for _, leak := range []string{f.Mirror, "git -C", "exit status", "stderr"} {
+		if strings.Contains(err.Error(), leak) {
+			t.Fatalf("err = %q, must not leak %q", err, leak)
+		}
+	}
 }
 
 func TestBlameRangePastEOF(t *testing.T) {

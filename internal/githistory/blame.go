@@ -76,8 +76,11 @@ func Blame(ctx context.Context, mirrorDir string, opts BlameOptions) ([]BlameLin
 		if errors.Is(err, gitcmd.ErrTimeout) {
 			return nil, fmt.Errorf("blame of %q at %s timed out; narrow with a line range (start_line/end_line) or blame a smaller file: %w", opts.Path, shortSHA(sha), err)
 		}
-		if classified := gitfile.ClassifyPathErr(err); errors.Is(classified, gitfile.ErrUnknownPath) {
-			return nil, fmt.Errorf("blaming %q at %s: %w", opts.Path, shortSHA(sha), classified)
+		if errors.Is(gitfile.ClassifyPathErr(err), gitfile.ErrUnknownPath) {
+			// The classification is unambiguous, so drop the raw gitcmd
+			// error: its text carries the mirror path and full argv,
+			// which must not leak to the caller.
+			return nil, fmt.Errorf("path %q not found at rev %s: %w", opts.Path, shortSHA(sha), gitfile.ErrUnknownPath)
 		}
 		// Anything else (such as -L past EOF, git exit 128) surfaces
 		// verbatim — the gitcmd error carries git's stderr diagnostic.
