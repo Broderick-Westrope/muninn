@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/broderick-westrope/muninn/internal/gitfile"
+	"github.com/broderick-westrope/muninn/internal/githistory"
 )
 
 // historyFixture is a Server over a bare mirror of acme/widget with a
@@ -190,6 +191,88 @@ func TestSearchCommitsUnknownRev(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no-such-branch") {
 		t.Errorf("err = %q, want mention of the unknown rev", err)
+	}
+}
+
+func TestRenderDiffFilesStatLineCap(t *testing.T) {
+	d := &githistory.Diff{}
+	for i := range statLineCap + 50 {
+		d.Files = append(d.Files, githistory.FileDiff{
+			Path:     fmt.Sprintf("file%03d.txt", i),
+			StatLine: fmt.Sprintf("file%03d.txt | +1 -0", i),
+		})
+	}
+	var b strings.Builder
+	renderDiffFiles(&b, d)
+	out := b.String()
+	if got := strings.Count(out, " | +1 -0"); got != statLineCap {
+		t.Errorf("rendered %d stat lines, want %d", got, statLineCap)
+	}
+	notice := "[truncated: 50 more changed files; narrow with a path filter]"
+	if !strings.Contains(out, notice) {
+		t.Errorf("output missing truncation notice %q:\n%.300s", notice, out)
+	}
+}
+
+func TestRenderDiffFilesStatLineCapSpansOmitted(t *testing.T) {
+	// The cap counts stat-only files and omitted-block lines together;
+	// the omitted header renders only when at least one omitted line fits.
+	d := &githistory.Diff{}
+	for i := range statLineCap - 10 {
+		d.Files = append(d.Files, githistory.FileDiff{
+			Path:     fmt.Sprintf("file%03d.txt", i),
+			StatLine: fmt.Sprintf("file%03d.txt | +1 -0", i),
+		})
+	}
+	for i := range 20 {
+		d.OmittedStats = append(d.OmittedStats, fmt.Sprintf("omit%02d.dat | binary", i))
+	}
+	var b strings.Builder
+	renderDiffFiles(&b, d)
+	out := b.String()
+	if got := strings.Count(out, " | +1 -0") + strings.Count(out, " | binary"); got != statLineCap {
+		t.Errorf("rendered %d stat lines, want %d", got, statLineCap)
+	}
+	if !strings.Contains(out, "[omitted: patches withheld") {
+		t.Errorf("output missing omitted header:\n%.300s", out)
+	}
+	notice := "[truncated: 10 more changed files; narrow with a path filter]"
+	if !strings.Contains(out, notice) {
+		t.Errorf("output missing truncation notice %q:\n%.300s", notice, out)
+	}
+}
+
+func TestRenderDiffFilesSingularTruncationNotice(t *testing.T) {
+	d := &githistory.Diff{}
+	for i := range statLineCap + 1 {
+		d.Files = append(d.Files, githistory.FileDiff{
+			Path:     fmt.Sprintf("file%03d.txt", i),
+			StatLine: fmt.Sprintf("file%03d.txt | +1 -0", i),
+		})
+	}
+	var b strings.Builder
+	renderDiffFiles(&b, d)
+	notice := "[truncated: 1 more changed file; narrow with a path filter]"
+	if !strings.Contains(b.String(), notice) {
+		t.Errorf("output missing singular truncation notice %q", notice)
+	}
+}
+
+func TestRenderDiffFilesUnderCap(t *testing.T) {
+	d := &githistory.Diff{
+		Files:        []githistory.FileDiff{{Path: "a.txt", StatLine: "a.txt | +1 -0"}},
+		OmittedStats: []string{"b.dat | binary"},
+	}
+	var b strings.Builder
+	renderDiffFiles(&b, d)
+	out := b.String()
+	if strings.Contains(out, "[truncated") {
+		t.Errorf("under-cap output has unexpected truncation notice:\n%s", out)
+	}
+	for _, want := range []string{"a.txt | +1 -0", "[omitted: patches withheld", "b.dat | binary"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
 	}
 }
 

@@ -16,9 +16,14 @@ const (
 	maxCommitsLimit     = 100
 	defaultBlameLines   = 200
 	maxBlameLines       = 500
+	// statLineCap bounds the rendered stat lines across stat-only file
+	// sections and the omitted block, so stat output stays capped even
+	// for diffs touching hundreds of files (patches have their own byte
+	// budget).
+	statLineCap = 200
 )
 
-const searchCommitsDescription = `Search the commit history of one indexed repo ('repo' is required; cross-repo history search is not supported). Filters compose: 'author' (regex), 'since'/'until' (filter on commit date, though output shows author dates), 'message' (commit message regex), 'path' (a literal path, never a glob; single-path queries follow renames), and the mutually exclusive pickaxe filters 'changed_literal' (commits where the occurrence count of the literal string changed) and 'changed_regex' (commits whose diff has a hunk matching the regex; substantially slower). 'rev' is the starting point and defaults to the indexed commit. 'first_parent' defaults true so merge-heavy repos return mainline history; merge rows are annotated '(merge)'. Output lines are 'sha  date  author  subject'. Default limit 30, max 100.`
+const searchCommitsDescription = `Search the commit history of one indexed repo ('repo' is required; cross-repo history search is not supported). Filters compose: 'author' (regex), 'since'/'until' (filter on commit date, though output shows author dates), 'message' (commit message regex), 'path' (a literal path, never a glob; single-path queries follow renames), and the mutually exclusive pickaxe filters 'changed_literal' (commits where the occurrence count of the literal string changed) and 'changed_regex' (commits whose diff has a hunk matching the regex; substantially slower). 'rev' is the starting point and defaults to the indexed commit. 'first_parent' defaults true so merge-heavy repos return mainline history; merge rows are annotated '(merge)'. Output lines are 'sha  date  author  subject'. Default limit 30, max 100. Git parses since/until dates leniently and unparseable values are not rejected (they may silently match nothing), so use ISO dates like 2024-01-31.`
 
 const getDiffDescription = `Show one commit or compare two revs in an indexed repo. With 'rev' alone (default: the indexed commit): commit metadata plus per-file stats, and 'patch: true' adds the patches; merge commits are diffed against their first parent. Adding 'base' diffs from base to rev with patches on by default; 'merge_base' defaults true (three-dot semantics: only rev-side changes since the common ancestor) — set 'merge_base: false' for a literal point-to-point comparison. 'path' is a literal path filter, never a glob. Patches are truncated at file boundaries under a 64 KiB budget; files past the budget appear as stat lines, as do binary files (always) and generated/lockfile paths — 'include_generated: true' restores patches for generated/lockfile paths only, never for binary files.`
 
@@ -162,20 +167,44 @@ func (s *Server) GetDiff(ctx context.Context, args GetDiffArgs) (string, error) 
 		b.WriteString("\n(no changes)")
 		return b.String(), nil
 	}
+	renderDiffFiles(&b, d)
+	return strings.TrimSuffix(b.String(), "\n"), nil
+}
+
+// renderDiffFiles renders the per-file sections and the omitted-stats
+// block. Patch sections are already budgeted upstream and render in full;
+// stat lines (stat-only files plus the omitted block) are capped at
+// statLineCap in total, with a truncation notice naming the overflow.
+func renderDiffFiles(b *strings.Builder, d *githistory.Diff) {
+	statLines, skipped := 0, 0
 	for _, f := range d.Files {
 		if f.Patch != "" {
-			fmt.Fprintf(&b, "\n--- %s ---\n%s", f.Path, f.Patch)
-		} else {
-			fmt.Fprintf(&b, "%s\n", f.StatLine)
+			fmt.Fprintf(b, "\n--- %s ---\n%s", f.Path, f.Patch)
+			continue
 		}
-	}
-	if len(d.OmittedStats) > 0 {
-		b.WriteString("\n[omitted: patches withheld for the following files]\n")
-		for _, stat := range d.OmittedStats {
-			fmt.Fprintf(&b, "%s\n", stat)
+		if statLines >= statLineCap {
+			skipped++
+			continue
 		}
+		fmt.Fprintf(b, "%s\n", f.StatLine)
+		statLines++
 	}
-	return strings.TrimSuffix(b.String(), "\n"), nil
+	wroteOmittedHeader := false
+	for _, stat := range d.OmittedStats {
+		if statLines >= statLineCap {
+			skipped++
+			continue
+		}
+		if !wroteOmittedHeader {
+			b.WriteString("\n[omitted: patches withheld for the following files]\n")
+			wroteOmittedHeader = true
+		}
+		fmt.Fprintf(b, "%s\n", stat)
+		statLines++
+	}
+	if skipped > 0 {
+		fmt.Fprintf(b, "\n[truncated: %s; narrow with a path filter]\n", plural(skipped, "more changed file"))
+	}
 }
 
 // BlameArgs are the parameters of the blame tool.
