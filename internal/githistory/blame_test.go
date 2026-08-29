@@ -54,6 +54,23 @@ func TestBlameLineRange(t *testing.T) {
 	require.Equal(t, f.TabSubject, lines[0].SHA)
 }
 
+func TestBlameOpenEndedLineRange(t *testing.T) {
+	t.Parallel()
+	f := newFixtureRepo(t)
+
+	// StartLine without EndLine blames from that line to EOF.
+	lines, err := Blame(context.Background(), f.Mirror, BlameOptions{
+		Rev:       "main",
+		Path:      "doc.txt",
+		StartLine: 2,
+	})
+	require.NoError(t, err)
+	require.Len(t, lines, 1)
+	require.Equal(t, 2, lines[0].Line)
+	require.Equal(t, "more", lines[0].Content)
+	require.Equal(t, f.TabSubject, lines[0].SHA)
+}
+
 func TestBlameOlderRevDiffers(t *testing.T) {
 	t.Parallel()
 	f := newFixtureRepo(t)
