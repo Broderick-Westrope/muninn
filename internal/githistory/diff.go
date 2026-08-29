@@ -333,6 +333,9 @@ func populateFiles(ctx context.Context, mirrorDir string, d *Diff, from, to, pat
 			continue
 		}
 		section := sections[i]
+		// The budget is spent greedily and non-contiguously: a file
+		// whose patch exceeds the remaining budget is omitted as a stat
+		// line, while later smaller files that still fit keep theirs.
 		if len(section) > budget {
 			d.OmittedStats = append(d.OmittedStats, entry.statLine+" (patch exceeds the output budget; use a path filter with a smaller range or read the file at each rev)")
 			continue
