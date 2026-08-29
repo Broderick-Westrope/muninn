@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/broderick-westrope/muninn/internal/gitfile"
 	"github.com/broderick-westrope/muninn/internal/githistory"
 	"github.com/broderick-westrope/muninn/internal/status"
 )
@@ -19,7 +20,7 @@ const (
 
 const searchCommitsDescription = `Search the commit history of one indexed repo ('repo' is required; cross-repo history search is not supported). Filters compose: 'author' (regex), 'since'/'until' (filter on commit date, though output shows author dates), 'message' (commit message regex), 'path' (a literal path, never a glob; single-path queries follow renames), and the mutually exclusive pickaxe filters 'changed_literal' (commits where the occurrence count of the literal string changed) and 'changed_regex' (commits whose diff has a hunk matching the regex; substantially slower). 'rev' is the starting point and defaults to the indexed commit. 'first_parent' defaults true so merge-heavy repos return mainline history; merge rows are annotated '(merge)'. Output lines are 'sha  date  author  subject'. Default limit 30, max 100.`
 
-const getDiffDescription = `Show one commit or compare two revs in an indexed repo. With 'rev' alone (default: the indexed commit): commit metadata plus per-file stats, and 'patch: true' adds the patches; merge commits are diffed against their first parent. Adding 'base' diffs from base to rev with patches on by default; 'merge_base' defaults true (three-dot semantics: only rev-side changes since the common ancestor) — set 'merge_base: false' for a literal point-to-point comparison. 'path' is a literal path filter, never a glob. Patches are truncated at file boundaries under a 64 KiB budget; files past the budget — and always binary and generated/lockfile paths unless 'include_generated: true' — appear as stat lines instead.`
+const getDiffDescription = `Show one commit or compare two revs in an indexed repo. With 'rev' alone (default: the indexed commit): commit metadata plus per-file stats, and 'patch: true' adds the patches; merge commits are diffed against their first parent. Adding 'base' diffs from base to rev with patches on by default; 'merge_base' defaults true (three-dot semantics: only rev-side changes since the common ancestor) — set 'merge_base: false' for a literal point-to-point comparison. 'path' is a literal path filter, never a glob. Patches are truncated at file boundaries under a 64 KiB budget; files past the budget appear as stat lines, as do binary files (always) and generated/lockfile paths — 'include_generated: true' restores patches for generated/lockfile paths only, never for binary files.`
 
 const blameDescription = `Attribute each line of a file to the commit that introduced it. 'rev' defaults to the indexed commit so line numbers agree exactly with read_file and grep. Prefer a line range ('start_line'/'end_line', both 1-based and inclusive): full-file output is capped at 200 lines (an explicit range raises the cap to 500) with a truncation notice. 'path' is a literal path. Output lines are 'line: sha date author | content'.`
 
@@ -66,7 +67,7 @@ func (s *Server) SearchCommits(ctx context.Context, args SearchCommitsArgs) (str
 		Limit:          limit,
 	})
 	if err != nil {
-		return "", err
+		return "", defaultedRevErr(err, args.Rev == "")
 	}
 	if len(commits) == 0 && !timedOut {
 		return s.stalenessWarning() + "no commits match", nil
@@ -90,9 +91,9 @@ func (s *Server) SearchCommits(ctx context.Context, args SearchCommitsArgs) (str
 		b.WriteString("\n[truncated: more commits match; narrow with since/until or a path filter, or raise limit]\n")
 	}
 	if timedOut {
-		b.WriteString("\n[partial results: timed out; narrow with path or since/until]\n")
+		fmt.Fprintf(&b, "\n[partial results: timed out after %s; narrow with path or since/until]\n", githistory.LogTimeout)
 	}
-	fmt.Fprintf(&b, "\n%d commits", len(commits))
+	b.WriteString("\n" + plural(len(commits), "commit"))
 	return b.String() + clampNote(args.Limit, maxCommitsLimit), nil
 }
 
@@ -130,7 +131,7 @@ func (s *Server) GetDiff(ctx context.Context, args GetDiffArgs) (string, error) 
 		IncludeGenerated: args.IncludeGenerated,
 	})
 	if err != nil {
-		return "", err
+		return "", defaultedRevErr(err, args.Rev == "")
 	}
 
 	var b strings.Builder
@@ -141,10 +142,16 @@ func (s *Server) GetDiff(ctx context.Context, args GetDiffArgs) (string, error) 
 			fmt.Fprintf(&b, "%s\n", d.Meta.Message)
 		}
 	} else {
-		fmt.Fprintf(&b, "%s: diff from %s to %s\n", args.Repo, args.Base, shortSHA(d.Meta.SHA))
+		// Name the resolved base SHA; keep the caller's spelling too when
+		// it is not already a prefix of the SHA (a branch or tag name).
+		base := shortSHA(d.BaseSHA)
+		if !strings.HasPrefix(d.BaseSHA, args.Base) {
+			base = fmt.Sprintf("%s (%s)", args.Base, shortSHA(d.BaseSHA))
+		}
+		fmt.Fprintf(&b, "%s: diff from %s to %s\n", args.Repo, base, shortSHA(d.Meta.SHA))
 		if d.MergeBaseSHA != "" {
-			fmt.Fprintf(&b, "merge-base: %s; rev is %d commits ahead, base is %d commits ahead\n",
-				shortSHA(d.MergeBaseSHA), d.Ahead, d.Behind)
+			fmt.Fprintf(&b, "merge-base: %s; rev is %s ahead, base is %s ahead\n",
+				shortSHA(d.MergeBaseSHA), plural(d.Ahead, "commit"), plural(d.Behind, "commit"))
 		}
 	}
 	if d.Warning != "" {
@@ -203,14 +210,14 @@ func (s *Server) Blame(ctx context.Context, args BlameArgs) (string, error) {
 		EndLine:   args.EndLine,
 	})
 	if err != nil {
-		return "", err
+		return "", defaultedRevErr(err, args.Rev == "")
 	}
 
+	// An explicit range signals intent, so honor it up to the hard max
+	// even when it is open-ended (start_line without end_line).
 	lineCap := defaultBlameLines
-	if args.StartLine > 0 && args.EndLine >= args.StartLine {
-		if want := args.EndLine - args.StartLine + 1; want > lineCap {
-			lineCap = min(want, maxBlameLines)
-		}
+	if args.StartLine > 0 {
+		lineCap = maxBlameLines
 	}
 	shown := lines
 	if len(shown) > lineCap {
@@ -228,9 +235,33 @@ func (s *Server) Blame(ctx context.Context, args BlameArgs) (string, error) {
 		fmt.Fprintf(&b, "%d: %s %s %s | %s\n", l.Line, shortSHA(l.SHA), l.AuthorDate, l.Author, l.Content)
 	}
 	if omitted := len(lines) - len(shown); omitted > 0 {
-		fmt.Fprintf(&b, "\n[truncated: %d more lines; use start_line/end_line to blame a range]\n", omitted)
+		advice := "use start_line/end_line to blame a range"
+		if args.StartLine > 0 {
+			advice = "narrow the line range"
+		}
+		fmt.Fprintf(&b, "\n[truncated: %s; %s]\n", plural(omitted, "more line"), advice)
 	}
 	return strings.TrimSuffix(b.String(), "\n"), nil
+}
+
+// defaultedRevErr maps an unknown-rev failure onto ErrIndexMismatch when
+// the rev was defaulted to muninn's own recorded indexed commit: the
+// caller supplied nothing, so a resolution failure means the index and
+// the mirror have diverged and `muninn sync` — not a different rev — is
+// the remedy.
+func defaultedRevErr(err error, defaulted bool) error {
+	if defaulted && errors.Is(err, gitfile.ErrUnknownRev) {
+		return fmt.Errorf("resolving the indexed commit: %w", gitfile.ErrIndexMismatch)
+	}
+	return err
+}
+
+// plural renders "n word" with an "s" appended when n != 1.
+func plural(n int, word string) string {
+	if n == 1 {
+		return "1 " + word
+	}
+	return fmt.Sprintf("%d %ss", n, word)
 }
 
 // stalenessWarning returns the same staleness warning fragment list_repos
@@ -242,10 +273,10 @@ func (s *Server) Blame(ctx context.Context, args BlameArgs) (string, error) {
 func (s *Server) stalenessWarning() string {
 	st, err := status.Read(s.statusPath)
 	if err != nil {
-		return "WARNING: no sync status found; the index may be empty or stale — run `muninn sync`\n"
+		return noStatusWarning
 	}
 	if age := status.Age(st); age > staleAfter {
-		return fmt.Sprintf("WARNING: index is stale: last sync finished %s ago — run `muninn sync`\n", formatAge(age))
+		return fmt.Sprintf(staleWarningFormat, formatAge(age))
 	}
 	return ""
 }

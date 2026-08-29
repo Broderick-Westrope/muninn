@@ -2,12 +2,15 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/broderick-westrope/muninn/internal/gitfile"
 )
 
 // historyFixture is a Server over a bare mirror of acme/widget with a
@@ -243,18 +246,58 @@ func TestGetDiffDescendantWarning(t *testing.T) {
 
 func TestGetDiffTwoRevHeader(t *testing.T) {
 	f := newHistoryFixture(t)
-	out, err := f.srv.GetDiff(context.Background(), GetDiffArgs{Repo: "acme/widget", Base: f.root, Rev: f.post})
+	// A branch-name base must render its resolved short SHA in the
+	// header, not just the caller's spelling.
+	out, err := f.srv.GetDiff(context.Background(), GetDiffArgs{Repo: "acme/widget", Base: "feature", Rev: f.post})
 	if err != nil {
 		t.Fatalf("GetDiff two-rev: %v", err)
 	}
-	if !strings.Contains(out, fmt.Sprintf("diff from %s to %s", f.root, shortSHA(f.post))) {
-		t.Errorf("output missing endpoints header:\n%s", out)
+	want := fmt.Sprintf("diff from feature (%s) to %s", shortSHA(f.side), shortSHA(f.post))
+	if !strings.Contains(out, want) {
+		t.Errorf("output missing endpoints header %q:\n%s", want, out)
 	}
-	if !strings.Contains(out, "merge-base: "+shortSHA(f.root)) {
+	if !strings.Contains(out, "merge-base: "+shortSHA(f.side)) {
 		t.Errorf("output missing merge-base header:\n%s", out)
 	}
-	if !strings.Contains(out, "--- foo.go ---") {
-		t.Errorf("two-rev diff missing foo.go patch:\n%s", out)
+	if !strings.Contains(out, "--- baz.txt ---") {
+		t.Errorf("two-rev diff missing baz.txt patch:\n%s", out)
+	}
+}
+
+func TestHistoryDefaultRevIndexMismatch(t *testing.T) {
+	// A status file naming a commit absent from the mirror means the
+	// index and mirror have diverged: every history tool that defaults
+	// rev to the indexed commit must answer with ErrIndexMismatch (which
+	// names `muninn sync`), never unknown-rev.
+	f := newHistoryFixture(t)
+	writeStatus(t, f.statusPath, strings.Repeat("0", 40), time.Now())
+	ctx := context.Background()
+
+	for name, call := range map[string]func() error{
+		"search_commits": func() error {
+			_, err := f.srv.SearchCommits(ctx, SearchCommitsArgs{Repo: "acme/widget"})
+			return err
+		},
+		"get_diff": func() error {
+			_, err := f.srv.GetDiff(ctx, GetDiffArgs{Repo: "acme/widget"})
+			return err
+		},
+		"blame": func() error {
+			_, err := f.srv.Blame(ctx, BlameArgs{Repo: "acme/widget", Path: "foo.go"})
+			return err
+		},
+	} {
+		err := call()
+		if err == nil {
+			t.Errorf("%s: err = nil, want index-mismatch error", name)
+			continue
+		}
+		if !errors.Is(err, gitfile.ErrIndexMismatch) {
+			t.Errorf("%s err = %v, want ErrIndexMismatch", name, err)
+		}
+		if !strings.Contains(err.Error(), "muninn sync") {
+			t.Errorf("%s err = %q, want mention of `muninn sync`", name, err)
+		}
 	}
 }
 

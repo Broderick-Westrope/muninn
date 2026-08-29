@@ -87,6 +87,9 @@ type FileDiff struct {
 type Diff struct {
 	// Meta describes the rev endpoint's commit.
 	Meta CommitMeta
+	// BaseSHA is the resolved base commit in two-rev mode; empty in
+	// single-rev mode.
+	BaseSHA string
 	// MergeBaseSHA is the computed merge base in two-rev mode; empty in
 	// single-rev mode or for disjoint histories.
 	MergeBaseSHA string
@@ -143,6 +146,7 @@ func GetDiff(ctx context.Context, mirrorDir string, opts DiffOptions) (*Diff, er
 		if err != nil {
 			return nil, err
 		}
+		d.BaseSHA = baseSHA
 		from, err = resolveEndpoints(ctx, mirrorDir, d, baseSHA, revSHA, opts.MergeBase == nil || *opts.MergeBase)
 		if err != nil {
 			return nil, err
@@ -286,19 +290,21 @@ func populateFiles(ctx context.Context, mirrorDir string, d *Diff, from, to, pat
 		return nil
 	}
 
-	patches := map[string]string{}
+	var sections []string
 	if patch {
 		raw, err := run.RunRaw(ctx, diffArgs("--patch")...)
 		if err != nil {
 			return diffErr(from, to, err)
 		}
-		if patches, err = splitPatches(raw); err != nil {
-			return err
+		sections = splitPatches(raw)
+		if len(sections) != len(stats) {
+			return fmt.Errorf("diff %s..%s: %d patch sections for %d numstat entries",
+				shortSHA(from), shortSHA(to), len(sections), len(stats))
 		}
 	}
 
 	budget := diffByteBudget
-	for _, entry := range stats {
+	for i, entry := range stats {
 		generated := isGenerated(entry.path)
 		file := FileDiff{
 			Path:      entry.path,
@@ -318,10 +324,7 @@ func populateFiles(ctx context.Context, mirrorDir string, d *Diff, from, to, pat
 			d.OmittedStats = append(d.OmittedStats, entry.statLine+" (generated; pass include_generated: true for the patch)")
 			continue
 		}
-		section, ok := patches[entry.path]
-		if !ok {
-			return fmt.Errorf("no patch section for %q in diff %s..%s", entry.path, shortSHA(from), shortSHA(to))
-		}
+		section := sections[i]
 		if len(section) > budget {
 			d.OmittedStats = append(d.OmittedStats, entry.statLine+" (patch exceeds the output budget; use a path filter with a smaller range or read the file at each rev)")
 			continue
@@ -343,12 +346,16 @@ func diffErr(from, to string, err error) error {
 }
 
 // splitPatches splits raw `git diff --patch` output into whole per-file
-// sections keyed by path, preserving every byte so each section applies
-// cleanly on its own.
-func splitPatches(raw string) (map[string]string, error) {
-	sections := map[string]string{}
+// sections in git's emission order, preserving every byte so each section
+// applies cleanly on its own. Sections are matched to numstat entries by
+// position rather than by path: both invocations use identical diff flags,
+// so the file order is identical, and header paths are unreliable —
+// core.quotepath C-quotes non-ASCII names in "diff --git" headers while
+// --numstat -z emits them raw. Order matching also keeps typechange
+// entries distinct, where two sections can share one path.
+func splitPatches(raw string) []string {
 	if raw == "" {
-		return sections, nil
+		return nil
 	}
 	parts := strings.Split(raw, "\ndiff --git ")
 	for i, part := range parts {
@@ -359,53 +366,9 @@ func splitPatches(raw string) (map[string]string, error) {
 			// Re-add the newline the split consumed.
 			part += "\n"
 		}
-		p, err := patchPath(part)
-		if err != nil {
-			return nil, err
-		}
-		if p == "" {
-			// Sections without a resolvable path (binary or mode-only
-			// changes) are never emitted as patches; skip them.
-			continue
-		}
-		sections[p] = part
+		parts[i] = part
 	}
-	return sections, nil
-}
-
-// patchPath extracts the file path from one per-file patch section via the
-// +++/--- header lines (the +++ side is /dev/null for deletions). A
-// trailing tab — git's marker for paths with trailing whitespace — is
-// stripped. Binary and mode-only sections carry no +++/--- lines; the
-// diff --git header is tried instead (unambiguous under --no-renames,
-// where both sides name the same path), and "" is returned when even
-// that is ambiguous.
-func patchPath(section string) (string, error) {
-	for line := range strings.Lines(section) {
-		line = strings.TrimSuffix(line, "\n")
-		if p, ok := strings.CutPrefix(line, "+++ b/"); ok {
-			return strings.TrimSuffix(p, "\t"), nil
-		}
-		if line == "+++ /dev/null" {
-			continue
-		}
-		if p, ok := strings.CutPrefix(line, "--- a/"); ok {
-			return strings.TrimSuffix(p, "\t"), nil
-		}
-	}
-	first, _, _ := strings.Cut(section, "\n")
-	rest, ok := strings.CutPrefix(first, "diff --git a/")
-	if !ok {
-		return "", fmt.Errorf("no path found in patch section starting %q", first)
-	}
-	// Under --no-renames both sides are the same path: find the split
-	// point where "<p> b/<p>" holds, which is unique for real paths.
-	for i := 0; i+3 <= len(rest); i++ {
-		if strings.HasPrefix(rest[i:], " b/") && rest[:i] == rest[i+3:] {
-			return rest[:i], nil
-		}
-	}
-	return "", nil
+	return parts
 }
 
 // isGenerated reports whether the path's basename matches one of the

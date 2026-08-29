@@ -58,9 +58,10 @@ type fixture struct {
 	Binary      string // day 11: adds bin.dat (NUL bytes)
 	Big         string // day 12: adds big.txt (> budget on its own)
 	Mixed       string // day 13: rewrites big.txt, adds small.txt
-	Divergent   string // day 14: branch divergent forked from Root
-	Orphan      string // day 15: orphan branch root (disjoint history)
-	Head        string // main tip (== Mixed)
+	NonASCII    string // day 14: adds café.txt (non-ASCII path)
+	Divergent   string // day 15: branch divergent forked from Root
+	Orphan      string // day 16: orphan branch root (disjoint history)
+	Head        string // main tip (== NonASCII)
 }
 
 // fixGit runs a git command for fixture setup, failing the test on error.
@@ -168,7 +169,11 @@ func newFixtureRepo(t *testing.T) fixture {
 	writeFile(t, src, "small.txt", "small\n")
 	fixGit(t, src, nil, "add", ".")
 	f.Mixed = commit("small and big")
-	f.Head = f.Mixed
+
+	writeFile(t, src, "café.txt", "café v1\n")
+	fixGit(t, src, nil, "add", ".")
+	f.NonASCII = commit("add café")
+	f.Head = f.NonASCII
 
 	fixGit(t, src, nil, "checkout", "-b", "divergent", f.Root)
 	writeFile(t, src, "div.txt", "divergent\n")

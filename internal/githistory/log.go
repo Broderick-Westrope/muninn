@@ -99,7 +99,7 @@ func SearchCommits(ctx context.Context, mirrorDir string, opts LogOptions) (comm
 		args = append(args, "--", opts.Path)
 	}
 
-	out, err := runner(logTimeout).RunRaw(ctx, args...)
+	out, err := runner(LogTimeout).RunRaw(ctx, args...)
 	if err != nil {
 		if !errors.Is(err, gitcmd.ErrTimeout) {
 			return nil, false, false, fmt.Errorf("searching commits from %s: %w", shortSHA(sha), err)

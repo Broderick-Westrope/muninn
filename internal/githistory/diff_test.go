@@ -117,9 +117,9 @@ func TestGetDiffDisjointHistoriesFallback(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, d.MergeBaseSHA)
 	require.Contains(t, d.Warning, "no merge base")
-	require.NotEmpty(t, append(d.Files, FileDiff{}), "two-dot fallback must still diff")
-	all := strings.Join(append(filePaths(d.Files), d.OmittedStats...), "\n")
-	require.Contains(t, all, "orphan.txt")
+	all := append(filePaths(d.Files), d.OmittedStats...)
+	require.NotEmpty(t, all, "two-dot fallback must still diff")
+	require.Contains(t, strings.Join(all, "\n"), "orphan.txt")
 }
 
 func TestGetDiffDescendantAndSwappedWarnings(t *testing.T) {
@@ -216,6 +216,20 @@ func TestGetDiffTruncationKeepsPatchesWhole(t *testing.T) {
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, "git apply --check %s: %s", file.Path, out)
 	}
+}
+
+func TestGetDiffNonASCIIPath(t *testing.T) {
+	t.Parallel()
+	f := newFixtureRepo(t)
+
+	// core.quotepath (default true) C-quotes non-ASCII names in --patch
+	// headers while --numstat -z emits them raw; order matching must
+	// still pair the patch with its stat entry.
+	d, err := GetDiff(context.Background(), f.Mirror, DiffOptions{Rev: f.NonASCII, Patch: boolPtr(true)})
+	require.NoError(t, err)
+	require.Equal(t, []string{"café.txt"}, filePaths(d.Files))
+	require.Contains(t, d.Files[0].Patch, "+café v1")
+	require.Empty(t, d.OmittedStats)
 }
 
 func TestGetDiffValidation(t *testing.T) {

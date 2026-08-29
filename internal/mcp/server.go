@@ -18,6 +18,13 @@ import (
 // that the index is stale.
 const staleAfter = 24 * time.Hour
 
+// Staleness warning fragments shared by ListRepos and stalenessWarning so
+// every tool renders the identical wording.
+const (
+	noStatusWarning    = "WARNING: no sync status found; the index may be empty or stale — run `muninn sync`\n"
+	staleWarningFormat = "WARNING: index is stale: last sync finished %s ago — run `muninn sync`\n"
+)
+
 // instructions is sent to clients at initialization so agents know how to
 // interpret results.
 const instructions = `muninn serves code search over locally indexed GitHub repositories.

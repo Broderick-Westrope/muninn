@@ -17,8 +17,11 @@ import (
 // Per-operation deadlines. SearchCommits supports labeled partial results
 // on timeout; GetDiff and Blame do not — their timeouts surface as errors
 // naming the narrowing options.
+//
+// LogTimeout is exported so tool output can name the deadline in partial
+// result notices.
 const (
-	logTimeout   = 15 * time.Second
+	LogTimeout   = 15 * time.Second
 	diffTimeout  = 60 * time.Second
 	blameTimeout = 60 * time.Second
 )
