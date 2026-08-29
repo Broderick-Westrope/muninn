@@ -64,7 +64,9 @@ type fixture struct {
 }
 
 // fixGit runs a git command for fixture setup, failing the test on error.
-// Extra env entries let commits carry deterministic dates.
+// Extra env entries let commits carry deterministic dates. Global and
+// system config are disabled so host configuration (commit templates,
+// hooks paths, ...) cannot leak into the fixture history.
 func fixGit(t *testing.T, dir string, env []string, args ...string) string {
 	t.Helper()
 	base := []string{"-c", "user.name=test", "-c", "user.email=test@example.com"}
@@ -72,7 +74,8 @@ func fixGit(t *testing.T, dir string, env []string, args ...string) string {
 		base = append(base, "-C", dir)
 	}
 	cmd := exec.Command("git", append(base, args...)...)
-	cmd.Env = append(os.Environ(), env...)
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
+	cmd.Env = append(cmd.Env, env...)
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, "git %v: %s", args, out)
 	return strings.TrimSpace(string(out))
