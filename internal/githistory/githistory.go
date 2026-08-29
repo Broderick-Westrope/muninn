@@ -63,10 +63,11 @@ func validatePath(path string) error {
 	return nil
 }
 
-// shortSHA abbreviates a commit SHA for error and warning messages.
+// shortSHA abbreviates a commit SHA for error and warning messages,
+// matching the 7-character abbreviation used in mcp tool output.
 func shortSHA(commit string) string {
-	if len(commit) > 12 {
-		return commit[:12]
+	if len(commit) > 7 {
+		return commit[:7]
 	}
 	return commit
 }
