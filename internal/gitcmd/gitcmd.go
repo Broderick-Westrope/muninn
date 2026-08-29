@@ -76,8 +76,17 @@ func (e *Error) Unwrap() error { return e.Err }
 type Runner struct {
 	// Timeout is the per-invocation deadline; 0 means DefaultTimeout.
 	Timeout time.Duration
-	// ExtraEnv is appended after the hermetic environment.
+	// ExtraEnv is appended after the hermetic environment. It must not
+	// carry the numbered GIT_CONFIG_* block or the hermetic keys
+	// (GIT_CONFIG_COUNT/KEY_*/VALUE_*, GIT_CONFIG_GLOBAL,
+	// GIT_CONFIG_NOSYSTEM, GIT_TERMINAL_PROMPT): entries with those names
+	// are silently dropped so no caller can clobber the config block or
+	// punch a hole in hermeticity. Use ExtraConfig for git config values.
 	ExtraEnv []string
+	// ExtraConfig holds "key=value" git config pairs injected through the
+	// numbered GIT_CONFIG_* environment block, after the built-in
+	// safe.directory=*. Values may contain '='; the split is on the first.
+	ExtraConfig []string
 }
 
 // Run executes git with args and returns its trimmed stdout. Captured
@@ -136,6 +145,8 @@ func (r Runner) run(ctx context.Context, stdin string, args []string) (string, e
 	if errors.As(err, &exitErr) {
 		exitCode = exitErr.ExitCode()
 	}
+	// Note that a caller deadline that was already expired on entry is
+	// also labeled ErrTimeout here.
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		err = fmt.Errorf("%w: %v", ErrTimeout, err)
 	}
@@ -154,10 +165,14 @@ func (r Runner) run(ctx context.Context, stdin string, args []string) (string, e
 // system config disabled, terminal prompts off, and safe.directory=*
 // re-injected (wiping global config also wipes any safe.directory entries;
 // mirrors owned by a different uid — Docker, shared volumes — must keep
-// working). ExtraEnv is appended last so callers can extend or override.
+// working). The numbered GIT_CONFIG_* block is owned entirely here:
+// safe.directory=* and ExtraConfig are merged into one correctly counted
+// block, so no caller can accidentally shadow it. ExtraEnv is appended
+// last so callers can extend or override anything else; entries naming
+// the config block or the hermetic keys are dropped (see Runner).
 func (r Runner) env() []string {
 	base := os.Environ()
-	env := make([]string, 0, len(base)+6+len(r.ExtraEnv))
+	env := make([]string, 0, len(base)+4+2*len(r.ExtraConfig)+len(r.ExtraEnv))
 	for _, kv := range base {
 		if dropVar(kv) {
 			continue
@@ -168,11 +183,43 @@ func (r Runner) env() []string {
 		"GIT_CONFIG_GLOBAL=/dev/null",
 		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_TERMINAL_PROMPT=0",
-		"GIT_CONFIG_COUNT=1",
-		"GIT_CONFIG_KEY_0=safe.directory",
-		"GIT_CONFIG_VALUE_0=*",
 	)
-	return append(env, r.ExtraEnv...)
+	configs := make([]string, 0, 1+len(r.ExtraConfig))
+	configs = append(configs, "safe.directory=*")
+	configs = append(configs, r.ExtraConfig...)
+	for i, kv := range configs {
+		key, value, _ := strings.Cut(kv, "=")
+		env = append(env,
+			fmt.Sprintf("GIT_CONFIG_KEY_%d=%s", i, key),
+			fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", i, value),
+		)
+	}
+	env = append(env, "GIT_CONFIG_COUNT="+strconv.Itoa(len(configs)))
+	for _, kv := range r.ExtraEnv {
+		// Silently drop entries that would corrupt the config block or
+		// break hermeticity.
+		if reservedVar(kv) {
+			continue
+		}
+		env = append(env, kv)
+	}
+	return env
+}
+
+// reservedVar reports whether an ExtraEnv entry names an environment
+// variable that env() owns: the numbered GIT_CONFIG_* block or one of the
+// hermetic keys.
+func reservedVar(kv string) bool {
+	name, _, ok := strings.Cut(kv, "=")
+	if !ok {
+		return false
+	}
+	switch name {
+	case "GIT_CONFIG_COUNT", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_TERMINAL_PROMPT":
+		return true
+	}
+	return strings.HasPrefix(name, "GIT_CONFIG_KEY_") ||
+		strings.HasPrefix(name, "GIT_CONFIG_VALUE_")
 }
 
 // dropVar reports whether an environment entry is a GIT_* variable that must

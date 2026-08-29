@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/broderick-westrope/muninn/internal/discover"
+	"github.com/broderick-westrope/muninn/internal/gitcmd"
 )
 
 // git runs a git command against dir (or without -C when dir is empty),
@@ -233,34 +234,46 @@ func TestListRemove(t *testing.T) {
 	}
 }
 
-func TestAuthEnv(t *testing.T) {
+func TestAuthConfig(t *testing.T) {
 	const token = "gho_secret123"
 	lowSpeed := []string{
-		"GIT_CONFIG_KEY_0=http.lowSpeedLimit",
-		"GIT_CONFIG_VALUE_0=1000",
-		"GIT_CONFIG_KEY_1=http.lowSpeedTime",
-		"GIT_CONFIG_VALUE_1=60",
-		"GIT_CONFIG_KEY_2=http.version",
-		"GIT_CONFIG_VALUE_2=HTTP/1.1",
+		"http.lowSpeedLimit=1000",
+		"http.lowSpeedTime=60",
+		"http.version=HTTP/1.1",
 	}
 	want := append(append([]string{}, lowSpeed...),
-		"GIT_CONFIG_KEY_3=http.extraHeader",
-		"GIT_CONFIG_VALUE_3=Authorization: Basic "+base64.StdEncoding.EncodeToString([]byte("x-access-token:"+token)),
-		"GIT_CONFIG_COUNT=4",
+		"http.extraHeader=Authorization: Basic "+base64.StdEncoding.EncodeToString([]byte("x-access-token:"+token)),
 	)
-	env := authEnv(token)
-	if !equal(env, want) {
-		t.Errorf("authEnv = %v, want %v", env, want)
+	cfg := authConfig(token)
+	if !equal(cfg, want) {
+		t.Errorf("authConfig = %v, want %v", cfg, want)
 	}
-	for _, entry := range env {
+	for _, entry := range cfg {
 		if strings.Contains(entry, token) {
-			t.Errorf("raw token leaked into env entry %q", entry)
+			t.Errorf("raw token leaked into config entry %q", entry)
 		}
 	}
-	wantEmpty := append(append([]string{}, lowSpeed...), "GIT_CONFIG_COUNT=3")
-	if env := authEnv(""); !equal(env, wantEmpty) {
-		t.Errorf("authEnv(\"\") = %v, want %v", env, wantEmpty)
+	if cfg := authConfig(""); !equal(cfg, lowSpeed) {
+		t.Errorf("authConfig(\"\") = %v, want %v", cfg, lowSpeed)
 	}
+}
+
+// TestAuthConfigKeepsSafeDirectory asserts the auth config extends
+// gitcmd's numbered GIT_CONFIG_* block instead of shadowing it (the
+// original collision dropped safe.directory=* on every authenticated
+// fetch and clone).
+func TestAuthConfigKeepsSafeDirectory(t *testing.T) {
+	repo, _ := fixtureRepo(t, "acme/widget")
+	upstream := strings.TrimPrefix(repo.CloneURL, "file://")
+	r := gitcmd.Runner{ExtraConfig: authConfig("tok")}
+
+	out, err := r.Run(context.Background(), "-C", upstream, "config", "--get", "safe.directory")
+	require.NoError(t, err)
+	require.Equal(t, "*", out)
+
+	out, err = r.Run(context.Background(), "-C", upstream, "config", "--get", "http.version")
+	require.NoError(t, err)
+	require.Equal(t, "HTTP/1.1", out)
 }
 
 func equal(a, b []string) bool {
@@ -340,6 +353,37 @@ func TestMarkIndexedTwoGenerations(t *testing.T) {
 	require.NoError(t, m.MarkIndexed(ctx, dir, commitB))
 	require.Equal(t, commitB, refValue(t, dir, "refs/muninn/indexed"))
 	require.Equal(t, commitA, refValue(t, dir, "refs/muninn/indexed-prev"))
+}
+
+// TestMarkIndexedCreateRace exercises the create batch's must-not-exist
+// guard: if a concurrent first sync pins the ref between MarkIndexed's
+// read and its write, the create must fail loudly and leave the other
+// pin untouched. (The interleaving is not orchestrable from a test, so
+// the ref is pre-created behind the batch's back and the batch issued
+// raw.)
+func TestMarkIndexedCreateRace(t *testing.T) {
+	m := &Manager{BaseDir: t.TempDir()}
+	repo, upstream := fixtureRepo(t, "acme/widget")
+	ctx := context.Background()
+
+	_, err := m.Ensure(ctx, repo, "")
+	require.NoError(t, err)
+	dir := m.Dir(repo.FullName)
+	commitA, err := m.HeadCommit(ctx, dir, "main")
+	require.NoError(t, err)
+	commitB := addUpstreamCommit(t, upstream)
+	_, err = m.Ensure(ctx, repo, "")
+	require.NoError(t, err)
+
+	// A concurrent first sync already pinned the ref at A; the create
+	// batch for B must be rejected rather than clobber it.
+	git(t, dir, "update-ref", "refs/muninn/indexed", commitA)
+	batch := "create refs/muninn/indexed " + commitB + "\n"
+	cmd := exec.Command("git", "-C", dir, "update-ref", "--stdin")
+	cmd.Stdin = strings.NewReader(batch)
+	out, err := cmd.CombinedOutput()
+	require.Error(t, err, "create of an existing ref must fail: %s", out)
+	require.Equal(t, commitA, refValue(t, dir, "refs/muninn/indexed"))
 }
 
 // TestMarkIndexedStaleCAS exercises the CAS failure mode directly: a batch

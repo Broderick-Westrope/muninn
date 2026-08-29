@@ -102,6 +102,45 @@ func TestPartialOutputOnTimeout(t *testing.T) {
 	require.Contains(t, out, "partial-line")
 }
 
+// TestExtraConfigKeepsSafeDirectory is the regression test for the
+// GIT_CONFIG_* collision: extra config values must extend the numbered
+// block rather than shadow it, so safe.directory=* survives.
+func TestExtraConfigKeepsSafeDirectory(t *testing.T) {
+	t.Parallel()
+	repo := scratchRepo(t)
+	r := Runner{ExtraConfig: []string{"muninn.probe=hello=world"}}
+
+	out, err := r.Run(context.Background(), "-C", repo, "config", "--get", "safe.directory")
+	require.NoError(t, err)
+	require.Equal(t, "*", out, "safe.directory must survive ExtraConfig")
+
+	out, err = r.Run(context.Background(), "-C", repo, "config", "--get", "muninn.probe")
+	require.NoError(t, err)
+	require.Equal(t, "hello=world", out, "extra config value visible, '=' in value preserved")
+}
+
+// TestExtraEnvCannotClobberConfigBlock asserts that ExtraEnv entries naming
+// the numbered GIT_CONFIG_* block or the hermetic keys are dropped.
+func TestExtraEnvCannotClobberConfigBlock(t *testing.T) {
+	t.Parallel()
+	repo := scratchRepo(t)
+	r := Runner{ExtraEnv: []string{
+		"GIT_CONFIG_COUNT=0",
+		"GIT_CONFIG_KEY_0=evil.key",
+		"GIT_CONFIG_VALUE_0=evil",
+		"GIT_CONFIG_GLOBAL=/nonexistent",
+		"GIT_CONFIG_NOSYSTEM=0",
+		"GIT_TERMINAL_PROMPT=1",
+	}}
+
+	out, err := r.Run(context.Background(), "-C", repo, "config", "--get", "safe.directory")
+	require.NoError(t, err)
+	require.Equal(t, "*", out, "reserved ExtraEnv entries must be filtered")
+
+	_, err = r.Run(context.Background(), "-C", repo, "config", "--get", "evil.key")
+	require.Error(t, err, "injected config key must not be visible")
+}
+
 func TestExitCodeAndStderr(t *testing.T) {
 	t.Parallel()
 	repo := scratchRepo(t)

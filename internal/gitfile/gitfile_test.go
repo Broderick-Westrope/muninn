@@ -9,8 +9,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/broderick-westrope/muninn/internal/gitcmd"
 )
 
 // git runs a git command against dir (or without -C when dir is empty),
@@ -390,6 +393,25 @@ func TestResolveRevUnknown(t *testing.T) {
 	_, err := ResolveRev(context.Background(), mirror, strings.Repeat("a", 40))
 	require.ErrorIs(t, err, ErrUnknownRev)
 	require.NotErrorIs(t, err, ErrIndexMismatch)
+	require.Contains(t, err.Error(), "rev-parse", "underlying git error must be preserved")
+}
+
+// TestResolveRevTimeoutIsNotUnknownRev asserts a timed-out rev-parse is
+// not conflated with an unknown revision: a slow mirror must not be
+// reported to the user as a bad rev.
+func TestResolveRevTimeoutIsNotUnknownRev(t *testing.T) {
+	// Uses t.Setenv, so no t.Parallel. exec replaces the shell so the kill
+	// on deadline reaches sleep directly.
+	fakeDir := t.TempDir()
+	script := "#!/bin/sh\nexec sleep 10\n"
+	require.NoError(t, os.WriteFile(filepath.Join(fakeDir, "git"), []byte(script), 0o755))
+	t.Setenv("PATH", fakeDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_, err := ResolveRev(ctx, t.TempDir(), "main")
+	require.ErrorIs(t, err, gitcmd.ErrTimeout)
+	require.NotErrorIs(t, err, ErrUnknownRev, "a timeout must not be reported as an unknown rev")
 }
 
 // TestResolveRevRejectsOptionLookalikes asserts dash-prefixed and empty

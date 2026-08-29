@@ -339,7 +339,16 @@ func ResolveRev(ctx context.Context, mirrorDir, rev string) (string, error) {
 	}
 	sha, err := runGit(ctx, "-C", mirrorDir, "rev-parse", "--verify", "--end-of-options", rev+"^{commit}")
 	if err != nil {
-		return "", fmt.Errorf("rev %q not found in mirror; it may not exist upstream or predates the last sync: %w", rev, ErrUnknownRev)
+		// Only rev-parse's normal unknown-rev failure (a git error exiting
+		// 128, or 1 under --quiet-style probes) means the rev does not
+		// exist; timeouts and non-git failures pass through so they are
+		// not misreported as a bad revision.
+		var gitErr *gitcmd.Error
+		if errors.As(err, &gitErr) && !errors.Is(err, gitcmd.ErrTimeout) &&
+			(gitErr.ExitCode == 128 || gitErr.ExitCode == 1) {
+			return "", fmt.Errorf("rev %q not found in mirror; it may not exist upstream or predates the last sync: %w (%w)", rev, ErrUnknownRev, err)
+		}
+		return "", fmt.Errorf("resolving rev %q: %w", rev, err)
 	}
 	return sha, nil
 }
@@ -348,6 +357,11 @@ func ResolveRev(ctx context.Context, mirrorDir, rev string) (string, error) {
 // that revision" onto errors wrapping ErrUnknownPath, so callers (such as
 // blame and log handlers) can render them as user errors rather than
 // internal failures. Any other error, and nil, is passed through unchanged.
+//
+// Callers must resolve the revision via ResolveRev before running the
+// command whose error is classified here: "Not a valid object name" is
+// also git's diagnostic for an unknown rev, so an unresolved rev would be
+// misclassified as a missing path.
 func ClassifyPathErr(err error) error {
 	if err == nil {
 		return nil
