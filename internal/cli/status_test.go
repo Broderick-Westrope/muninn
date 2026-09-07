@@ -150,7 +150,7 @@ func TestPrintStatusSeparatesClocks(t *testing.T) {
 		t.Fatalf("printStatus: %v", err)
 	}
 	out := buf.String()
-	for _, want := range []string{"last run:", "last success:", "bad credentials", "consecutive failures: 71"} {
+	for _, want := range []string{"last run:", "last clean sweep:", "bad credentials", "consecutive failures: 71"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}
@@ -167,7 +167,7 @@ func TestPrintStatusNeverSucceeded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("printStatus: %v", err)
 	}
-	if !strings.Contains(buf.String(), "last success: never") {
+	if !strings.Contains(buf.String(), "last clean sweep: never") {
 		t.Errorf("output should say a success has never happened:\n%s", buf.String())
 	}
 }

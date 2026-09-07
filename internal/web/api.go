@@ -28,9 +28,10 @@ const (
 	// binarySniffBytes is how much of a file's head is scanned for NUL
 	// bytes to reject binary content.
 	binarySniffBytes = 8 << 10 // 8 KiB
-	// staleAfter is how old the last successful sync may be before repos
-	// are reported stale.
-	staleAfter = 24 * time.Hour
+	// staleAfter is how long a repo may go without a successful sync
+	// before it is reported stale. It aliases the shared definition so
+	// this and the MCP server cannot drift apart.
+	staleAfter = status.StaleAfter
 	// maxFacetRepos and maxFacetExts bound the facet params: every value
 	// becomes a branch of a regex alternation compiled on each search.
 	maxFacetRepos = 50
@@ -416,22 +417,22 @@ func (s *Server) handleRepos(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// One status read feeds both the age string and the stale flag so
-	// they can never disagree. Both are measured from the last successful
-	// sync, not the last run: a failing job keeps updating FinishedAt, so
-	// reporting that would show a rotting index as freshly synced. A
-	// missing status file, or one with no successful run, means stale with
-	// an unknown age.
-	indexAge, stale := "unknown", true
-	if st, err := status.Read(s.statusPath); err == nil {
-		if age, ok := status.SuccessAge(st); ok {
-			indexAge = formatAge(age)
-		}
-		stale = status.Stale(st, staleAfter)
+	// One status read feeds every repo's age and stale flag so they can
+	// never disagree. Both are per-repo: repoJSON has always had these
+	// fields, but they were filled with a fleet-wide value, so one
+	// unreachable repo marked all fifty stale.
+	st, err := status.Read(s.statusPath)
+	if err != nil {
+		st = nil // a missing status file means nothing has synced
 	}
 
 	out := make([]repoJSON, 0, len(repos))
 	for _, repo := range repos {
+		indexAge, stale := "unknown", true
+		if age, ok := status.RepoSuccessAge(st, repo.Name); ok && age >= 0 {
+			indexAge = formatAge(age)
+			stale = age > staleAfter
+		}
 		out = append(out, repoJSON{
 			Name:        repo.Name,
 			Branch:      repo.Branch,

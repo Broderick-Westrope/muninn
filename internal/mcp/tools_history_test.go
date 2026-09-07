@@ -494,26 +494,27 @@ func warningLine(out string) string {
 	return ""
 }
 
+// TestHistoryStalenessParity pins that every history tool renders the same
+// repo-scoped warning. They deliberately do NOT match list_repos, which is
+// fleet-scoped: a tool answering about one repo must describe that repo's
+// data, not name unrelated repos the agent cannot act on.
 func TestHistoryStalenessParity(t *testing.T) {
-	// The full fixture (with a searcher) so list_repos works too; then age
-	// the status file past staleAfter.
 	f := newFixture(t, "")
 	writeStatus(t, f.statusPath, f.commit, time.Now().Add(-2*staleAfter))
 
 	ctx := context.Background()
-	reposOut, err := f.srv.ListRepos(ctx, ListReposArgs{})
-	if err != nil {
-		t.Fatalf("ListRepos: %v", err)
-	}
-	want := warningLine(reposOut)
-	if want == "" {
-		t.Fatalf("list_repos output missing staleness warning:\n%s", reposOut)
-	}
-
 	commitsOut, err := f.srv.SearchCommits(ctx, SearchCommitsArgs{Repo: "acme/widget"})
 	if err != nil {
 		t.Fatalf("SearchCommits: %v", err)
 	}
+	want := warningLine(commitsOut)
+	if want == "" {
+		t.Fatalf("search_commits output missing staleness warning:\n%s", commitsOut)
+	}
+	if !strings.Contains(want, "acme/widget") {
+		t.Errorf("warning = %q, want it to name the repo being queried", want)
+	}
+
 	diffOut, err := f.srv.GetDiff(ctx, GetDiffArgs{Repo: "acme/widget"})
 	if err != nil {
 		t.Fatalf("GetDiff: %v", err)
@@ -523,12 +524,11 @@ func TestHistoryStalenessParity(t *testing.T) {
 		t.Fatalf("Blame: %v", err)
 	}
 	for name, out := range map[string]string{
-		"search_commits": commitsOut,
-		"get_diff":       diffOut,
-		"blame":          blameOut,
+		"get_diff": diffOut,
+		"blame":    blameOut,
 	} {
 		if got := warningLine(out); got != want {
-			t.Errorf("%s staleness warning = %q, want the list_repos wording %q", name, got, want)
+			t.Errorf("%s staleness warning = %q, want the same repo-scoped wording %q", name, got, want)
 		}
 	}
 }

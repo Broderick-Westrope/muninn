@@ -91,12 +91,21 @@ cannot capture the schedule. `muninn status` reports the agent's real state,
 asking launchd whether the job is loaded rather than trusting the plist on
 disk.
 
-Staleness is always measured from the last *successful* sync, and a failed run
-records its cause and bumps a failure count. `list_repos` and the history tools
-warn while the index is stale or its sync is failing; `muninn status` is the
-full picture. A broken sync cannot masquerade as a fresh index: a discovery
-that returns nothing, a clock that has moved backwards, and a run that died
-mid-flight are all reported rather than recorded as success.
+Staleness is per repo, measured from that repo's last successful sync, so one
+unreachable repo does not age the rest of the index. `read_file`, `list_tree`
+and the history tools warn when *the repo you touched* is behind; `list_repos`
+shows an age column for every repo and is the fleet view; `muninn status` is the
+full picture.
+
+A run that fetched everything it could reach is not treated as a broken sync:
+only a total failure (bad credentials, missing ctags, a discovery that returned
+nothing) or a run that died mid-flight switches the scheduler to the retry
+cadence. That distinction is what stops one permanently failing repo from
+refetching the whole fleet every few minutes forever.
+
+A broken sync cannot masquerade as a fresh index: a discovery that returns
+nothing, a clock that has moved backwards, and a run that died mid-flight are
+all reported rather than recorded as success.
 
 ### MCP
 

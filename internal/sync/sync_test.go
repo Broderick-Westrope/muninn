@@ -622,12 +622,28 @@ func TestRunFailureDoesNotAdvanceSuccessClock(t *testing.T) {
 		if !st.FinishedAt.After(st.LastSuccessAt) {
 			t.Errorf("%s: FinishedAt %v not after LastSuccessAt %v", name, st.FinishedAt, st.LastSuccessAt)
 		}
-		if !status.Degraded(st) {
-			t.Errorf("%s: Degraded = false, want true", name)
-		}
 		if st.Error == "" {
 			t.Errorf("%s: Error is empty, want a recorded cause", name)
 		}
+	}
+	// Only a total failure means the mechanism is broken. A run that
+	// completed with one repo failing did its job, and calling it degraded
+	// is what pinned the scheduler to the retry cadence forever.
+	if status.Degraded(bad) {
+		t.Error("per-repo failure: Degraded = true, want false")
+	}
+	if !status.Degraded(aborted) {
+		t.Error("total failure: Degraded = false, want true")
+	}
+	// The failing repo keeps the age of the data it is still serving.
+	// Compared against the first run's *repo* clock, not the fleet clock:
+	// syncRepo stamps each repo as it finishes, before the run ends.
+	firstRepoSuccess := good.Repos["acme/a"].LastSuccessAt
+	if firstRepoSuccess.IsZero() {
+		t.Fatal("first run recorded no per-repo success clock")
+	}
+	if rs := bad.Repos["acme/a"]; !rs.LastSuccessAt.Equal(firstRepoSuccess) {
+		t.Errorf("failed repo LastSuccessAt = %v, want the carried-forward %v", rs.LastSuccessAt, firstRepoSuccess)
 	}
 	if bad.ConsecutiveFailures != 1 {
 		t.Errorf("ConsecutiveFailures after one failure = %d, want 1", bad.ConsecutiveFailures)
@@ -737,84 +753,105 @@ func TestRunOnlyIfDue(t *testing.T) {
 		}
 	})
 
-	// Degraded and stale: reattempts follow the retry cadence, which is
-	// why a tick minutes after a failure runs instead of waiting out the
-	// full interval. The seed establishes a real prior success first, so
-	// this exercises degraded-after-success rather than never-succeeded.
-	t.Run("degraded", func(t *testing.T) {
+	// A total failure gets the retry cadence: the mechanism is broken and
+	// the cause is plausibly transient, so a reattempt minutes later beats
+	// waiting out the full interval.
+	t.Run("total failure", func(t *testing.T) {
 		e := newEnv(t)
 		repo := fileRepo("acme/a", src)
 		if _, err := Run(context.Background(), cfg, e.deps(&stubDiscoverer{repos: []discover.Repo{repo}}, nil)); err != nil {
 			t.Fatalf("seed success: %v", err)
 		}
 
-		// Fail a run two hours later, putting the last success outside the
-		// interval while the last attempt is recent.
-		failIx := func(string) Indexer { return failingIndexer{e.indexer()} }
-		failed := e.deps(&stubDiscoverer{repos: []discover.Repo{repo}}, failIx)
+		failed := e.deps(&stubDiscoverer{err: errors.New("bad credentials")}, nil)
 		failed.Now = func() time.Time { return time.Now().Add(2 * time.Hour) }
-		if _, err := Run(context.Background(), cfg, failed); err != nil {
-			t.Fatalf("seed failure: %v", err)
+		if _, err := Run(context.Background(), cfg, failed); err == nil {
+			t.Fatal("seed failure: want discovery error, got nil")
 		}
 		prev, err := status.Read(e.statusPath())
 		if err != nil {
 			t.Fatal(err)
 		}
 		if !status.Degraded(prev) {
-			t.Fatal("seed run is not degraded")
-		}
-		if prev.LastSuccessAt.IsZero() {
-			t.Fatal("seed has no prior success, so this would test the never-succeeded branch")
+			t.Fatal("a total failure should read as degraded")
 		}
 
 		deps := e.deps(&stubDiscoverer{repos: []discover.Repo{repo}}, nil)
 		deps.OnlyIfDue = true
 
-		// Five minutes on: stale but inside the retry cooldown.
+		// Five minutes on: inside the retry cooldown.
 		deps.Now = func() time.Time { return prev.FinishedAt.Add(5 * time.Minute) }
 		if _, err := Run(context.Background(), cfg, deps); !errors.Is(err, ErrNotDue) {
-			t.Errorf("5m after a failure: err = %v, want ErrNotDue", err)
+			t.Errorf("5m after a total failure: err = %v, want ErrNotDue", err)
 		}
 
-		// Eleven minutes on: the retry interval has elapsed, so the
-		// reattempt happens well before the hourly interval would.
+		// Eleven minutes on: the retry interval has elapsed, well before
+		// the hourly interval would.
 		deps.Now = func() time.Time { return prev.FinishedAt.Add(11 * time.Minute) }
 		st, err := Run(context.Background(), cfg, deps)
 		if err != nil {
-			t.Fatalf("11m after a failure: %v", err)
+			t.Fatalf("11m after a total failure: %v", err)
 		}
 		if !st.Success {
 			t.Errorf("Success = false, want true: %+v", st.Repos)
 		}
 	})
 
-	// Never succeeded: the retry cadence applies from the failed attempt,
-	// covering the branch the degraded subtest used to hit by accident.
-	t.Run("never succeeded", func(t *testing.T) {
+	// The behaviour this model exists for: one repo fails every run, so
+	// the fleet clock is frozen, but the runs themselves work. The normal
+	// interval must apply — otherwise the whole fleet is refetched and
+	// reindexed every retry interval, forever, over one bad repo.
+	t.Run("partial failure keeps the normal cadence", func(t *testing.T) {
 		e := newEnv(t)
-		repo := fileRepo("acme/a", src)
-		failIx := func(string) Indexer { return failingIndexer{e.indexer()} }
-		if _, err := Run(context.Background(), cfg, e.deps(&stubDiscoverer{repos: []discover.Repo{repo}}, failIx)); err != nil {
+		good, broken := fileRepo("acme/a", src), fileRepo("acme/broken", filepath.Join(e.base, "nonexistent.git"))
+		repos := []discover.Repo{good, broken}
+
+		st, err := Run(context.Background(), cfg, e.deps(&stubDiscoverer{repos: repos}, nil))
+		if err != nil {
 			t.Fatalf("seed Run: %v", err)
+		}
+		if st.Success {
+			t.Fatal("seed run should have one failing repo")
 		}
 		prev, err := status.Read(e.statusPath())
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !prev.LastSuccessAt.IsZero() {
-			t.Fatal("seed unexpectedly succeeded")
+		if status.Degraded(prev) {
+			t.Fatal("one bad repo must not mark the mechanism degraded")
 		}
 
-		deps := e.deps(&stubDiscoverer{repos: []discover.Repo{repo}}, nil)
+		deps := e.deps(&stubDiscoverer{repos: repos}, nil)
 		deps.OnlyIfDue = true
 
-		deps.Now = func() time.Time { return prev.FinishedAt.Add(5 * time.Minute) }
-		if _, err := Run(context.Background(), cfg, deps); !errors.Is(err, ErrNotDue) {
-			t.Errorf("5m after a failure: err = %v, want ErrNotDue", err)
-		}
+		// Past the retry interval but inside the normal one: no run.
 		deps.Now = func() time.Time { return prev.FinishedAt.Add(11 * time.Minute) }
+		if _, err := Run(context.Background(), cfg, deps); !errors.Is(err, ErrNotDue) {
+			t.Errorf("11m after a partial failure: err = %v, want ErrNotDue (not the retry cadence)", err)
+		}
+
+		// Past the normal interval: the run happens as usual.
+		deps.Now = func() time.Time { return prev.FinishedAt.Add(61 * time.Minute) }
 		if _, err := Run(context.Background(), cfg, deps); err != nil {
-			t.Fatalf("11m after a failure: %v", err)
+			t.Fatalf("61m after a partial failure: %v", err)
+		}
+
+		// The healthy repo kept its own clock moving throughout; only the
+		// broken one has none. Asserted on the clocks rather than through
+		// RepoStale, because this subtest injects a future clock and
+		// RepoStale correctly treats a future timestamp as unusable.
+		final, err := status.Read(e.statusPath())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if final.Repos["acme/a"].LastSuccessAt.IsZero() {
+			t.Error("acme/a has no success clock, but it synced successfully every run")
+		}
+		if !final.Repos["acme/a"].LastSuccessAt.After(prev.Repos["acme/a"].LastSuccessAt) {
+			t.Error("acme/a's clock did not advance on the later run")
+		}
+		if !final.Repos["acme/broken"].LastSuccessAt.IsZero() {
+			t.Error("acme/broken has a success clock, but it has never synced")
 		}
 	})
 }

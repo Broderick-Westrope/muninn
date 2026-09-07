@@ -136,7 +136,7 @@ func writeStatus(t *testing.T, path, commit string, finishedAt time.Time) {
 		LastSuccessAt: finishedAt,
 		Success:       true,
 		Repos: map[string]status.RepoStatus{
-			"acme/widget": {Fetched: true, Indexed: true, IndexedCommit: commit},
+			"acme/widget": {Fetched: true, Indexed: true, IndexedCommit: commit, LastSuccessAt: finishedAt},
 		},
 	})
 	if err != nil {
@@ -144,9 +144,9 @@ func writeStatus(t *testing.T, path, commit string, finishedAt time.Time) {
 	}
 }
 
-// writeDegradedStatus writes a status whose most recent run failed just
-// now while the last success is lastSuccess old: the shape that used to
-// report as perfectly fresh.
+// writeDegradedStatus writes a status whose most recent run failed as a
+// whole while the repo's own data is lastSuccess old: a broken sync
+// mechanism over an index that may still be fresh.
 func writeDegradedStatus(t *testing.T, path, commit string, lastSuccess time.Time, failures int) {
 	t.Helper()
 	err := status.Write(path, &status.SyncStatus{
@@ -154,10 +154,11 @@ func writeDegradedStatus(t *testing.T, path, commit string, lastSuccess time.Tim
 		FinishedAt:          time.Now(),
 		LastSuccessAt:       lastSuccess,
 		Success:             false,
+		TotalFailure:        true,
 		Error:               "discovering repos: bad credentials",
 		ConsecutiveFailures: failures,
 		Repos: map[string]status.RepoStatus{
-			"acme/widget": {Fetched: true, Indexed: true, IndexedCommit: commit},
+			"acme/widget": {Fetched: true, Indexed: true, IndexedCommit: commit, LastSuccessAt: lastSuccess},
 		},
 	})
 	if err != nil {
@@ -400,8 +401,8 @@ func TestListRepos(t *testing.T) {
 	if !strings.Contains(out, want) {
 		t.Errorf("output missing %q:\n%s", want, out)
 	}
-	if !strings.Contains(out, "last sync:") {
-		t.Errorf("output missing sync age line:\n%s", out)
+	if !strings.Contains(out, "last sync run:") {
+		t.Errorf("output missing sync run line:\n%s", out)
 	}
 	if strings.Contains(out, "WARNING") {
 		t.Errorf("fresh index should not warn:\n%s", out)
@@ -423,8 +424,14 @@ func TestListReposStale(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListRepos: %v", err)
 	}
-	if !strings.HasPrefix(out, "WARNING: index is stale") {
-		t.Errorf("stale index output should start with warning:\n%s", out)
+	if !strings.HasPrefix(out, "WARNING: 1 of 1 repos have not synced") {
+		t.Errorf("stale repo output should start with the fleet warning:\n%s", out)
+	}
+	if !strings.Contains(out, "acme/widget") {
+		t.Errorf("output should name the stale repo:\n%s", out)
+	}
+	if !strings.Contains(out, "(STALE)") {
+		t.Errorf("output should mark the repo's own age column stale:\n%s", out)
 	}
 
 	if err := os.Remove(f.statusPath); err != nil {
@@ -439,10 +446,9 @@ func TestListReposStale(t *testing.T) {
 	}
 }
 
-// TestListReposDegraded covers the failure mode that motivated splitting
-// the two clocks: hourly runs that all fail keep FinishedAt fresh, so
-// staleness measured from it never fires and the agent is told the index is
-// minutes old while it is really days stale.
+// TestListReposDegraded covers a broken sync mechanism: a total failure
+// keeps FinishedAt fresh, so the failure is only visible through the
+// mechanism warning, not through any repo's age.
 func TestListReposDegraded(t *testing.T) {
 	f := newFixture(t, "")
 	writeDegradedStatus(t, f.statusPath, f.commit, time.Now().Add(-72*time.Hour), 5)
@@ -451,22 +457,20 @@ func TestListReposDegraded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListRepos: %v", err)
 	}
-	if !strings.HasPrefix(out, "WARNING: index is stale") {
-		t.Errorf("output should lead with the staleness warning:\n%s", out)
-	}
-	if !strings.Contains(out, "the last 5 sync attempt(s) failed") {
+	if !strings.Contains(out, "the last 5 sync attempt(s) failed outright") {
 		t.Errorf("output missing the degradation warning:\n%s", out)
 	}
 	if !strings.Contains(out, "bad credentials") {
 		t.Errorf("output missing the recorded cause:\n%s", out)
 	}
-	if !strings.Contains(out, "last success:") {
-		t.Errorf("output missing the success clock while degraded:\n%s", out)
+	// The repo's own data is 72h old, so it is also reported stale.
+	if !strings.Contains(out, "1 of 1 repos have not synced") {
+		t.Errorf("output missing the stale-repo warning:\n%s", out)
 	}
 }
 
 // A still-fresh index whose sync has started failing must warn about the
-// failures even though it is not stale yet — that is the window in which
+// failures even though nothing is stale yet — that is the window in which
 // the problem is cheap to fix.
 func TestListReposDegradedButFresh(t *testing.T) {
 	f := newFixture(t, "")
@@ -476,23 +480,79 @@ func TestListReposDegradedButFresh(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListRepos: %v", err)
 	}
-	if strings.Contains(out, "index is stale") {
-		t.Errorf("index is within staleAfter, should not warn stale:\n%s", out)
+	if strings.Contains(out, "have not synced") {
+		t.Errorf("repo is within staleAfter, should not warn stale:\n%s", out)
 	}
-	if !strings.Contains(out, "the last 1 sync attempt(s) failed") {
+	if !strings.Contains(out, "the last 1 sync attempt(s) failed outright") {
 		t.Errorf("output missing the degradation warning:\n%s", out)
 	}
 }
 
-func TestListReposNeverSucceeded(t *testing.T) {
+// TestListReposPartialFailureDoesNotAgeTheFleet is the regression test for
+// the behaviour this model exists to provide: one permanently failing repo
+// must not make the other repos report as stale.
+func TestListReposPartialFailureDoesNotAgeTheFleet(t *testing.T) {
 	f := newFixture(t, "")
-	writeDegradedStatus(t, f.statusPath, f.commit, time.Time{}, 3)
+	now := time.Now()
+	err := status.Write(f.statusPath, &status.SyncStatus{
+		StartedAt:  now.Add(-time.Minute),
+		FinishedAt: now,
+		// No clean sweep for days because one repo keeps failing.
+		LastSuccessAt:       now.Add(-96 * time.Hour),
+		Success:             false,
+		Error:               "1 of 2 repos failed",
+		ConsecutiveFailures: 40,
+		Repos: map[string]status.RepoStatus{
+			// Freshly synced despite the run being marked failed.
+			"acme/widget": {Fetched: true, Indexed: true, IndexedCommit: f.commit, LastSuccessAt: now},
+			"acme/broken": {Error: "authentication failed", LastSuccessAt: now.Add(-96 * time.Hour)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("status.Write: %v", err)
+	}
 
 	out, err := f.srv.ListRepos(context.Background(), ListReposArgs{})
 	if err != nil {
 		t.Fatalf("ListRepos: %v", err)
 	}
-	if !strings.HasPrefix(out, "WARNING: no sync has ever succeeded") {
-		t.Errorf("output should warn that nothing has ever succeeded:\n%s", out)
+	if strings.Contains(out, "acme/widget") && strings.Contains(out, "STALE") {
+		// acme/broken has no shard, so only acme/widget is listed; it
+		// must not be marked stale.
+		t.Errorf("a fresh repo was marked stale because another repo failed:\n%s", out)
+	}
+	if strings.Contains(out, "failed outright") {
+		t.Errorf("a partial failure is not a broken mechanism:\n%s", out)
+	}
+}
+
+func TestListReposNeverSucceeded(t *testing.T) {
+	f := newFixture(t, "")
+	// A repo that has never synced has no clock and is not indexed: the
+	// two always move together in a real run.
+	err := status.Write(f.statusPath, &status.SyncStatus{
+		StartedAt:           time.Now().Add(-time.Minute),
+		FinishedAt:          time.Now(),
+		Success:             false,
+		TotalFailure:        true,
+		Error:               "discovering repos: bad credentials",
+		ConsecutiveFailures: 3,
+		Repos: map[string]status.RepoStatus{
+			"acme/widget": {Error: "authentication failed"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("status.Write: %v", err)
+	}
+
+	out, err := f.srv.ListRepos(context.Background(), ListReposArgs{})
+	if err != nil {
+		t.Fatalf("ListRepos: %v", err)
+	}
+	if !strings.Contains(out, "failed outright") {
+		t.Errorf("output should report the broken sync mechanism:\n%s", out)
+	}
+	if !strings.Contains(out, "never synced") {
+		t.Errorf("output should mark the repo as never synced:\n%s", out)
 	}
 }

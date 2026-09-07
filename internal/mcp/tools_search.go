@@ -35,7 +35,7 @@ Results are capped at 'limit' line matches (default 50, max 200); a truncation n
 
 const globDescription = `Find files by path glob across all indexed repos. Supports *, ?, ** and {a,b} alternation; matching is case-insensitive against the full path within each repo (e.g. '**/*.go', 'src/**/*.{ts,tsx}'). Results are capped at 'limit' files (default 100, max 500) and grouped by repo.`
 
-const listReposDescription = `List indexed repositories: name, branch, and indexed commit, plus the age of the last sync. Optional 'query' regex filters by repo name. Output starts with a warning when the last successful sync is over 24h old, has never happened, or when syncs are currently failing.`
+const listReposDescription = `List indexed repositories: name, branch, indexed commit, and how long ago each one last synced (marked STALE past 24h). Optional 'query' regex filters by repo name. Output starts with a warning when repos have fallen behind or when syncing itself is failing.`
 
 // GrepArgs are the parameters of the grep tool.
 type GrepArgs struct {
@@ -157,10 +157,11 @@ func (s *Server) ListRepos(ctx context.Context, args ListReposArgs) (string, err
 		return "", err
 	}
 
-	// One status read feeds the warnings and the sync-age lines so they
-	// can never disagree.
+	// One status read feeds the warnings and every age column so they can
+	// never disagree.
 	var b strings.Builder
-	if st, err := status.Read(s.statusPath); err != nil {
+	st, err := status.Read(s.statusPath)
+	if err != nil {
 		b.WriteString(noStatusWarning)
 	} else {
 		b.WriteString(formatWarnings(st))
@@ -168,14 +169,9 @@ func (s *Server) ListRepos(ctx context.Context, args ListReposArgs) (string, err
 		// killed, so it is never formatted unguarded: doing so renders the
 		// zero time as an age of ~292 years.
 		if st.FinishedAt.IsZero() {
-			b.WriteString("last sync: in progress or interrupted\n")
+			b.WriteString("last sync run: in progress or interrupted\n")
 		} else {
-			fmt.Fprintf(&b, "last sync: %s (%s ago)\n", st.FinishedAt.Format(time.RFC3339), formatAge(status.Age(st)))
-		}
-		// Only shown when the two clocks disagree; when they match the
-		// line above already says it.
-		if age, ok := status.SuccessAge(st); ok && status.Degraded(st) {
-			fmt.Fprintf(&b, "last success: %s (%s ago)\n", st.LastSuccessAt.Format(time.RFC3339), formatAge(age))
+			fmt.Fprintf(&b, "last sync run: %s (%s ago)\n", st.FinishedAt.Format(time.RFC3339), formatAge(status.Age(st)))
 		}
 	}
 
@@ -184,11 +180,33 @@ func (s *Server) ListRepos(ctx context.Context, args ListReposArgs) (string, err
 		if filter != nil && !filter.MatchString(r.Name) {
 			continue
 		}
-		fmt.Fprintf(&b, "%s  %s  %s\n", r.Name, r.Branch, shortSHA(r.IndexedCommit))
+		// Each repo carries its own age: the fleet-wide figure hid the
+		// case this exists for, where one repo is days behind and the
+		// rest are minutes fresh.
+		fmt.Fprintf(&b, "%s  %s  %s  %s\n", r.Name, r.Branch, shortSHA(r.IndexedCommit), repoAge(st, r.Name))
 		shown++
 	}
 	fmt.Fprintf(&b, "\n%d repos", shown)
 	return b.String(), nil
+}
+
+// repoAge renders how long ago a repo last synced, for the list_repos age
+// column. A repo present in the index but absent from the status has no
+// recorded sync, which is worth saying rather than leaving blank.
+func repoAge(st *status.SyncStatus, repo string) string {
+	if st == nil {
+		return "age unknown"
+	}
+	age, ok := status.RepoSuccessAge(st, repo)
+	switch {
+	case !ok:
+		return "never synced"
+	case age < 0:
+		return "age unknown (clock moved backwards)"
+	case age > staleAfter:
+		return formatAge(age) + " ago (STALE)"
+	}
+	return formatAge(age) + " ago"
 }
 
 // formatGrep renders search results as repo/path:line lines, enforcing the
@@ -333,8 +351,10 @@ func formatAge(d time.Duration) string {
 	case d < time.Minute:
 		return d.Round(time.Second).String()
 	case d < time.Hour:
-		return d.Round(time.Minute).String()
+		// Round to minutes, then drop the "0s" tail Duration.String always
+		// emits: these strings go to agents, where the noise is token cost.
+		return strings.TrimSuffix(d.Round(time.Minute).String(), "0s")
 	default:
-		return d.Round(time.Hour).String()
+		return strings.TrimSuffix(strings.TrimSuffix(d.Round(time.Hour).String(), "0s"), "0m")
 	}
 }

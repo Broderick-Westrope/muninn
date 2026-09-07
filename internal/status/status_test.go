@@ -160,8 +160,11 @@ func TestDegraded(t *testing.T) {
 	}{
 		{"nil", nil, false},
 		{"healthy", &SyncStatus{FinishedAt: now, LastSuccessAt: now}, false},
-		{"last run failed", &SyncStatus{FinishedAt: now, LastSuccessAt: now.Add(-time.Hour)}, true},
-		{"never succeeded", &SyncStatus{FinishedAt: now}, true},
+		// A run that completed with some repos failing is NOT degraded: the
+		// machinery worked. Treating it as degraded is what pinned the
+		// scheduler to the retry cadence over one unreachable repo.
+		{"partial repo failure", &SyncStatus{FinishedAt: now, LastSuccessAt: now.Add(-time.Hour)}, false},
+		{"total failure", &SyncStatus{FinishedAt: now, TotalFailure: true, LastSuccessAt: now.Add(-time.Hour)}, true},
 		// An interrupted run is degraded: it records no error and no
 		// failure count, so treating it as healthy is what let a
 		// crash-looping sync stay invisible until the index went stale.
@@ -237,34 +240,47 @@ func TestDue(t *testing.T) {
 			true,
 		},
 		{
-			// The degraded case: stale and the last attempt failed, so
-			// the retry cadence applies instead of the full interval.
-			"degraded, retry elapsed",
-			&SyncStatus{FinishedAt: ago(11 * time.Minute), LastSuccessAt: ago(3 * time.Hour)},
+			// A total failure gets the retry cadence: the mechanism is
+			// broken and the cause is plausibly transient.
+			"total failure, retry elapsed",
+			&SyncStatus{FinishedAt: ago(11 * time.Minute), TotalFailure: true, LastSuccessAt: ago(3 * time.Hour)},
 			true,
 		},
 		{
 			// Same state, but too soon — reattempts are faster, not
 			// unbounded.
-			"degraded, retry not elapsed",
-			&SyncStatus{FinishedAt: ago(2 * time.Minute), LastSuccessAt: ago(3 * time.Hour)},
+			"total failure, retry not elapsed",
+			&SyncStatus{FinishedAt: ago(2 * time.Minute), TotalFailure: true, LastSuccessAt: ago(3 * time.Hour)},
 			false,
 		},
 		{
-			// A failing run must not buy freshness: were staleness
-			// measured from FinishedAt this would be "fresh" forever.
-			"degraded but success still within interval",
-			&SyncStatus{FinishedAt: ago(time.Minute), LastSuccessAt: ago(30 * time.Minute)},
+			// The case this model exists for: one repo has been failing for
+			// hours, so the fleet clock is frozen, but the runs themselves
+			// are working. The normal interval applies, not the retry
+			// cadence — otherwise the whole fleet is refetched every few
+			// minutes forever over a single bad repo.
+			"partial failure uses the normal interval",
+			&SyncStatus{FinishedAt: ago(11 * time.Minute), LastSuccessAt: ago(3 * time.Hour)},
+			false,
+		},
+		{
+			"partial failure, interval elapsed",
+			&SyncStatus{FinishedAt: ago(61 * time.Minute), LastSuccessAt: ago(9 * time.Hour)},
+			true,
+		},
+		{
+			"recent successful run is not due",
+			&SyncStatus{FinishedAt: ago(time.Minute), LastSuccessAt: ago(time.Minute), Success: true},
 			false,
 		},
 		{
 			"never succeeded, retry elapsed",
-			&SyncStatus{FinishedAt: ago(30 * time.Minute)},
+			&SyncStatus{FinishedAt: ago(30 * time.Minute), TotalFailure: true},
 			true,
 		},
 		{
 			"never succeeded, retry not elapsed",
-			&SyncStatus{FinishedAt: ago(time.Minute)},
+			&SyncStatus{FinishedAt: ago(time.Minute), TotalFailure: true},
 			false,
 		},
 		{
@@ -346,4 +362,139 @@ func TestConcurrentReadDuringWrite(t *testing.T) {
 	}
 	close(done)
 	wg.Wait()
+}
+
+// TestReadBackfillsRepoClocksFromRepoOutcome is the regression test for a
+// migration that would have failed in exactly the state it was written
+// for. Keying the per-repo backfill off the fleet-wide Success flag zeroes
+// every clock whenever one repo is failing — and a permanently failing repo
+// is precisely why per-repo clocks exist, so the fix would have reported
+// "every repo never synced" on upgrade.
+func TestReadBackfillsRepoClocksFromRepoOutcome(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "status.json")
+	finished := time.Date(2026, 8, 24, 10, 5, 0, 0, time.UTC)
+	// A pre-versioning file: the run failed overall because one repo
+	// failed, but the other two are indexed and error-free.
+	legacy := fmt.Sprintf(`{
+	  "startedAt": %q,
+	  "finishedAt": %q,
+	  "success": false,
+	  "error": "1 of 3 repos failed",
+	  "repos": {
+	    "acme/ok":     {"fetched": true, "indexed": true, "indexedCommit": "aaa"},
+	    "acme/also":   {"fetched": true, "indexed": true, "indexedCommit": "bbb"},
+	    "acme/broken": {"fetched": true, "error": "auth failed"}
+	  }
+	}`, finished.Add(-time.Minute).Format(time.RFC3339), finished.Format(time.RFC3339))
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Read(path)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	for _, name := range []string{"acme/ok", "acme/also"} {
+		if !got.Repos[name].LastSuccessAt.Equal(finished) {
+			t.Errorf("%s LastSuccessAt = %v, want %v backfilled from its own outcome",
+				name, got.Repos[name].LastSuccessAt, finished)
+		}
+	}
+	if !got.Repos["acme/broken"].LastSuccessAt.IsZero() {
+		t.Errorf("acme/broken LastSuccessAt = %v, want zero: it failed in the recorded run",
+			got.Repos["acme/broken"].LastSuccessAt)
+	}
+	// The fixture's timestamps are historical, so the two indexed repos
+	// are legitimately stale now. What matters is that acme/broken is
+	// excluded entirely: it holds no shards, so naming it as stale data
+	// would describe results that cannot be returned.
+	for _, name := range StaleRepos(got, time.Minute) {
+		if name == "acme/broken" {
+			t.Error("StaleRepos included a repo that was never indexed")
+		}
+	}
+	if len(StaleRepos(got, time.Minute)) != 2 {
+		t.Errorf("StaleRepos = %v, want the two indexed repos", StaleRepos(got, time.Minute))
+	}
+}
+
+// TestReadDoesNotMigrateCurrentFiles guards the ambiguity that makes the
+// backfill safe: in a versioned file a zero clock is a fact ("never
+// succeeded"), so guessing a value would overwrite it.
+func TestReadDoesNotMigrateCurrentFiles(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "status.json")
+	now := time.Now().Truncate(time.Second)
+	// Written by the current code, so Version is stamped in.
+	if err := Write(path, &SyncStatus{
+		StartedAt:  now.Add(-time.Minute),
+		FinishedAt: now,
+		Success:    false,
+		Repos: map[string]RepoStatus{
+			// Indexed and error-free, but genuinely never succeeded: only
+			// reachable in a hand-built status, which is the point — the
+			// migration must not invent a clock for it.
+			"acme/odd": {Fetched: true, Indexed: true, IndexedCommit: "aaa"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Read(path)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if got.Version != schemaVersion {
+		t.Errorf("Version = %d, want %d written by Write", got.Version, schemaVersion)
+	}
+	if !got.Repos["acme/odd"].LastSuccessAt.IsZero() {
+		t.Errorf("LastSuccessAt = %v, want it left zero in a current-version file",
+			got.Repos["acme/odd"].LastSuccessAt)
+	}
+}
+
+func TestRepoStaleAndStaleRepos(t *testing.T) {
+	now := time.Now()
+	st := &SyncStatus{
+		Version:    schemaVersion,
+		FinishedAt: now,
+		Repos: map[string]RepoStatus{
+			"acme/fresh":  {Indexed: true, IndexedCommit: "a", LastSuccessAt: now.Add(-time.Minute)},
+			"acme/old":    {Indexed: true, IndexedCommit: "b", LastSuccessAt: now.Add(-72 * time.Hour)},
+			"acme/never":  {Indexed: true, IndexedCommit: "c"},
+			"acme/absent": {Error: "auth failed"},
+			"acme/future": {Indexed: true, IndexedCommit: "d", LastSuccessAt: now.Add(48 * time.Hour)},
+		},
+	}
+
+	if RepoStale(st, "acme/fresh", StaleAfter) {
+		t.Error("acme/fresh reported stale")
+	}
+	if !RepoStale(st, "acme/old", StaleAfter) {
+		t.Error("acme/old not reported stale")
+	}
+	if !RepoStale(st, "acme/never", StaleAfter) {
+		t.Error("a repo that never synced should be stale")
+	}
+	if !RepoStale(st, "acme/future", StaleAfter) {
+		t.Error("a future clock should be stale, not impossibly fresh")
+	}
+	if !RepoStale(st, "acme/missing", StaleAfter) {
+		t.Error("a repo absent from the status should be stale")
+	}
+
+	// Repos that were never indexed hold no searchable data, so calling
+	// them stale would describe results that cannot be returned at all.
+	got := StaleRepos(st, StaleAfter)
+	want := []string{"acme/future", "acme/never", "acme/old"}
+	if len(got) != len(want) {
+		t.Fatalf("StaleRepos = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("StaleRepos = %v, want %v (sorted)", got, want)
+		}
+	}
+	if _, ok := RepoSuccessAge(nil, "acme/fresh"); ok {
+		t.Error("RepoSuccessAge(nil) = ok, want false")
+	}
 }

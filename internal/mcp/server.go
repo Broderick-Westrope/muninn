@@ -9,7 +9,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -17,21 +16,33 @@ import (
 	"github.com/broderick-westrope/muninn/internal/status"
 )
 
-// staleAfter is how old the last successful sync may be before tools warn
-// that the index is stale.
-const staleAfter = 24 * time.Hour
+// staleAfter is how long a repo may go without a successful sync before
+// tools warn that its data is old. It aliases the shared definition so the
+// MCP server and the web API cannot disagree.
+const staleAfter = status.StaleAfter
 
-// Staleness warning fragments shared by ListRepos and stalenessWarning so
-// every tool renders the identical wording. Staleness is always measured
-// from the last *successful* sync: a failing job still updates FinishedAt,
-// so warning on that would mean a broken index never looks stale.
+// Warning fragments, shared so every tool renders identical wording.
+//
+// Staleness is a property of a repo, not of the fleet: it is measured from
+// that repo's last *successful* sync. A failing run still updates
+// FinishedAt, so warning on that would mean a broken index never looks
+// stale; and one unreachable repo must not make the other forty-nine
+// report as old.
 const (
 	noStatusWarning       = "WARNING: no sync status found; the index may be empty or stale — run `muninn sync`\n"
-	neverSucceededWarning = "WARNING: no sync has ever succeeded; the index may be empty — run `muninn sync` to see why\n"
 	futureClockWarning    = "WARNING: the last sync is dated in the future; the system clock has moved backwards, so the index age is unknown — run `muninn sync`\n"
 	interruptedWarning    = "WARNING: a sync is in progress or the last one was interrupted; the index may be mid-update — run `muninn status`\n"
-	staleWarningFormat    = "WARNING: index is stale: last successful sync finished %s ago — run `muninn sync`\n"
-	degradedWarningFormat = "WARNING: the last %d sync attempt(s) failed (%s); the index is no longer being updated — run `muninn status`\n"
+	degradedWarningFormat = "WARNING: the last %d sync attempt(s) failed outright (%s); the index is no longer being updated — run `muninn status`\n"
+
+	// Repo-scoped: rendered when the agent is working with one known repo,
+	// so it describes the data actually being returned.
+	repoStaleWarningFormat = "WARNING: %s was last synced %s ago; the content below may be out of date — run `muninn sync`\n"
+	repoNeverSyncedFormat  = "WARNING: %s has never been synced successfully; the content below may be missing or stale — run `muninn status`\n"
+
+	// Fleet-scoped: only list_repos, which is the one tool whose job is to
+	// describe the whole index.
+	fleetStaleWarningFormat = "WARNING: %d of %d repos have not synced in over %s: %s — run `muninn status`\n"
+	neverSucceededWarning   = "WARNING: no sync has ever succeeded; the index may be empty — run `muninn sync` to see why\n"
 )
 
 // instructions is sent to clients at initialization so agents know how to
@@ -43,8 +54,9 @@ the repos' latest commits until the next sync. The history tools
 (search_commits, get_diff, blame) operate on each repo's full fetched
 history, while file reads stay pinned to the indexed commit; blame
 defaults to that commit so its line numbers agree with read_file. Use
-list_repos to see which repos are indexed and how old the index is; it
-warns when the index is stale.`
+list_repos to see which repos are indexed and how old each one is; tools
+warn when the repo they touched is stale or when syncing itself is
+failing.`
 
 // Server holds the dependencies of the MCP tool handlers. Each tool is a
 // plain method so tests can call handlers directly without a stdio
@@ -90,34 +102,75 @@ func (s *Server) mcpServer() *sdk.Server {
 	return srv
 }
 
-// formatWarnings renders the staleness and degradation warnings for st, or
-// "" when the index is fresh and the last run succeeded. Degradation is
-// reported alongside staleness rather than instead of it: an index that is
-// still fresh but whose sync keeps failing is the early warning that
-// matters, since it is the state that silently becomes a stale one.
+// formatWarnings renders the fleet-wide warnings for st: whether the sync
+// mechanism is working, and which repos have fallen behind. It is used by
+// list_repos, whose job is to describe the whole index. Tools that operate
+// on a single repo use repoWarning instead, so their output is bounded and
+// describes the data they are actually returning.
+//
+// Stale repo names are capped: fifty names repeated in every response is
+// noise an agent cannot act on, and `muninn status` has the full list.
 func formatWarnings(st *status.SyncStatus) string {
 	var b strings.Builder
-	age, ok := status.SuccessAge(st)
+	b.WriteString(mechanismWarning(st))
+
+	stale := status.StaleRepos(st, staleAfter)
+	if len(stale) == 0 {
+		return b.String()
+	}
+	if _, ok := status.SuccessAge(st); !ok && len(stale) == len(st.Repos) {
+		// Nothing has ever synced; naming every repo adds nothing.
+		b.WriteString(neverSucceededWarning)
+		return b.String()
+	}
+	fmt.Fprintf(&b, fleetStaleWarningFormat,
+		len(stale), len(st.Repos), formatAge(staleAfter), summarizeRepos(stale, 3))
+	return b.String()
+}
+
+// repoWarning renders the warnings relevant to a single repo: whether the
+// sync mechanism is broken, and whether this repo's own data is old.
+func repoWarning(st *status.SyncStatus, repo string) string {
+	var b strings.Builder
+	b.WriteString(mechanismWarning(st))
+
+	age, ok := status.RepoSuccessAge(st, repo)
 	switch {
 	case !ok:
-		b.WriteString(neverSucceededWarning)
+		fmt.Fprintf(&b, repoNeverSyncedFormat, repo)
 	case age < 0:
 		b.WriteString(futureClockWarning)
 	case age > staleAfter:
-		fmt.Fprintf(&b, staleWarningFormat, formatAge(age))
+		fmt.Fprintf(&b, repoStaleWarningFormat, repo, formatAge(age))
 	}
+	return b.String()
+}
+
+// mechanismWarning reports that syncing itself is broken, which is
+// independent of any repo's age: the fleet may be minutes fresh and still
+// have a sync that can no longer run.
+func mechanismWarning(st *status.SyncStatus) string {
 	if status.Interrupted(st) {
 		// An interrupted run records no cause, so the degraded wording
 		// ("attempts failed") would be both unsupported and misleading.
-		b.WriteString(interruptedWarning)
-	} else if status.Degraded(st) {
+		return interruptedWarning
+	}
+	if status.Degraded(st) {
 		reason := st.Error
 		if reason == "" {
 			reason = "cause not recorded"
 		}
-		fmt.Fprintf(&b, degradedWarningFormat, max(st.ConsecutiveFailures, 1), reason)
+		return fmt.Sprintf(degradedWarningFormat, max(st.ConsecutiveFailures, 1), reason)
 	}
-	return b.String()
+	return ""
+}
+
+// summarizeRepos joins up to limit names, noting how many were omitted.
+func summarizeRepos(names []string, limit int) string {
+	if len(names) <= limit {
+		return strings.Join(names, ", ")
+	}
+	return fmt.Sprintf("%s and %d more", strings.Join(names[:limit], ", "), len(names)-limit)
 }
 
 // textHandler adapts a text-returning tool method to the SDK's typed

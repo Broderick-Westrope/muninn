@@ -19,9 +19,9 @@ const (
 	maxTreeEntries       = 500
 )
 
-const readFileDescription = `Read a file from an indexed repo at its indexed commit: line numbers always agree with grep results, but content may lag the repo's latest commit until the next sync. 'repo' is the exact owner/name (see list_repos). 'offset' is the 1-based first line to return; 'limit' is the number of lines (default 500, max 2000).`
+const readFileDescription = `Read a file from an indexed repo at its indexed commit: line numbers always agree with grep results, but content may lag the repo's latest commit until the next sync. Output is prefixed with a warning when that repo has not synced recently. 'repo' is the exact owner/name (see list_repos). 'offset' is the 1-based first line to return; 'limit' is the number of lines (default 500, max 2000).`
 
-const listTreeDescription = `List directory entries of an indexed repo at its indexed commit (content may lag the latest commit until the next sync). 'path' defaults to the repo root; 'depth' is how many levels to descend (default 1, max 10). Directories end with '/'. Output is capped at 500 entries.`
+const listTreeDescription = `List directory entries of an indexed repo at its indexed commit (content may lag the latest commit until the next sync; output warns when that repo has not synced recently). 'path' defaults to the repo root; 'depth' is how many levels to descend (default 1, max 10). Directories end with '/'. Output is capped at 500 entries.`
 
 // ReadFileArgs are the parameters of the read_file tool.
 type ReadFileArgs struct {
@@ -32,7 +32,9 @@ type ReadFileArgs struct {
 }
 
 // ReadFile returns file content at the repo's indexed commit with a
-// "lines X-Y of Z" header.
+// "lines X-Y of Z" header, prefixed with a warning when this repo's data
+// is old — the content returned here is exactly what such a warning is
+// about, so it matters more than for any other tool.
 func (s *Server) ReadFile(ctx context.Context, args ReadFileArgs) (string, error) {
 	if args.Path == "" {
 		return "", errors.New("path is required")
@@ -48,12 +50,13 @@ func (s *Server) ReadFile(ctx context.Context, args ReadFileArgs) (string, error
 		return "", err
 	}
 
+	warning := s.stalenessWarning(args.Repo)
 	start := args.Offset
 	if start <= 0 {
 		start = 1
 	}
 	if start > totalLines {
-		return fmt.Sprintf("%s/%s @ %s: offset %d is past the last line (%d lines total)",
+		return warning + fmt.Sprintf("%s/%s @ %s: offset %d is past the last line (%d lines total)",
 			args.Repo, args.Path, shortSHA(commit), start, totalLines), nil
 	}
 	shown := strings.Count(content, "\n")
@@ -61,7 +64,7 @@ func (s *Server) ReadFile(ctx context.Context, args ReadFileArgs) (string, error
 		shown++
 	}
 	end := start + shown - 1
-	out := fmt.Sprintf("%s/%s @ %s (lines %d-%d of %d)\n%s",
+	out := warning + fmt.Sprintf("%s/%s @ %s (lines %d-%d of %d)\n%s",
 		args.Repo, args.Path, shortSHA(commit), start, end, totalLines, content)
 	if end < totalLines {
 		if !strings.HasSuffix(out, "\n") {
@@ -99,6 +102,7 @@ func (s *Server) ListTree(ctx context.Context, args ListTreeArgs) (string, error
 	}
 
 	var b strings.Builder
+	b.WriteString(s.stalenessWarning(args.Repo))
 	path := args.Path
 	if path == "" {
 		path = "."

@@ -8,13 +8,28 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 )
+
+// StaleAfter is how long a repo may go without a successful sync before
+// readers warn that its data is old. It lives here so the MCP server and
+// the web API cannot drift to two definitions of a repo-level fact.
+const StaleAfter = 24 * time.Hour
 
 // ErrNotExist indicates the status file does not exist (never synced).
 var ErrNotExist = errors.New("status file does not exist")
 
+// schemaVersion is written into every status file. It exists so migration
+// heuristics can be applied to old files without also firing on new ones:
+// a zero per-repo clock in a v1 file is a fact (that repo has never
+// succeeded), whereas in a versionless file it is merely absent.
+const schemaVersion = 1
+
 type SyncStatus struct {
+	// Version is the schema version of this file; absent (0) means it was
+	// written before versioning, so migrations apply.
+	Version   int       `json:"version,omitempty"`
 	StartedAt time.Time `json:"startedAt"`
 	// FinishedAt is when the most recent run ended, successful or not. It
 	// is an attempt clock, never a freshness clock: measuring staleness
@@ -22,9 +37,10 @@ type SyncStatus struct {
 	// Zero means the run recorded here is still in flight.
 	FinishedAt time.Time `json:"finishedAt"`
 	Success    bool      `json:"success"`
-	// LastSuccessAt is when the most recent fully successful run finished.
-	// It is carried forward across failed runs and is the only correct
-	// basis for staleness. Zero means no run has ever fully succeeded.
+	// LastSuccessAt is when the whole fleet was last simultaneously clean.
+	// It is a health signal for `muninn status`, not a freshness measure:
+	// one permanently failing repo freezes it while every other repo keeps
+	// updating, so per-repo staleness reads RepoStatus.LastSuccessAt.
 	LastSuccessAt time.Time `json:"lastSuccessAt,omitzero"`
 	// Error summarizes why the most recent run did not fully succeed
 	// (either the total-failure cause or a per-repo failure count). It is
@@ -33,8 +49,13 @@ type SyncStatus struct {
 	// ConsecutiveFailures counts runs since the last full success, so the
 	// difference between one flaky run and a week of silent breakage is
 	// visible without reading logs.
-	ConsecutiveFailures int                   `json:"consecutiveFailures,omitempty"`
-	Repos               map[string]RepoStatus `json:"repos"` // key: "owner/name"
+	ConsecutiveFailures int `json:"consecutiveFailures,omitempty"`
+	// TotalFailure records that the run failed as a whole rather than in
+	// individual repos (bad credentials, missing ctags, a discovery that
+	// returned nothing). It is what distinguishes a broken sync mechanism
+	// from a sync that worked and found one bad repo.
+	TotalFailure bool                  `json:"totalFailure,omitempty"`
+	Repos        map[string]RepoStatus `json:"repos"` // key: "owner/name"
 }
 
 type RepoStatus struct {
@@ -48,10 +69,16 @@ type RepoStatus struct {
 	// freshness clock and flip the whole index to "stale" over a bloated
 	// pack file.
 	GCError string `json:"gcError,omitempty"`
+	// LastSuccessAt is when this repo was last fetched and indexed. It is
+	// carried forward across failures alongside IndexedCommit, and is the
+	// basis for staleness: freshness is a property of a repo's data, not of
+	// the fleet, so one broken repo must not age the other forty-nine.
+	LastSuccessAt time.Time `json:"lastSuccessAt,omitzero"`
 }
 
 // Write atomically writes the status to path via a temp file and rename.
 func Write(path string, s *SyncStatus) error {
+	s.Version = schemaVersion
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshaling status: %w", err)
@@ -106,13 +133,37 @@ func Read(path string) (*SyncStatus, error) {
 	if err := json.Unmarshal(data, &s); err != nil {
 		return nil, fmt.Errorf("corrupt status file %s: %w", path, err)
 	}
-	// Migration: status files written before LastSuccessAt existed record a
-	// successful run only in FinishedAt. Backfilling here means an upgrade
-	// does not report "never succeeded" for an index that is in fact fresh.
+	if s.Version < schemaVersion {
+		migrate(&s)
+	}
+	return &s, nil
+}
+
+// migrate fills in fields added after a status file was written. It runs
+// only for files below the current schema version: the same absent value
+// means "not recorded yet" in an old file and "never happened" in a new
+// one, so guessing unconditionally would overwrite facts with defaults.
+func migrate(s *SyncStatus) {
+	// A successful run recorded its time only in FinishedAt, so without
+	// this an upgrade reports "never succeeded" for a fresh index.
 	if s.LastSuccessAt.IsZero() && s.Success && !s.FinishedAt.IsZero() {
 		s.LastSuccessAt = s.FinishedAt
 	}
-	return &s, nil
+	// Per-repo clocks are backfilled from each repo's own recorded
+	// outcome, never from the fleet-wide Success flag. A repo that is
+	// indexed with no error did succeed in the recorded run even when some
+	// *other* repo failed the run overall — and that partial-failure state
+	// is exactly what these clocks exist to describe, so keying off
+	// Success would zero every clock in the case that matters most.
+	if s.FinishedAt.IsZero() {
+		return
+	}
+	for name, rs := range s.Repos {
+		if rs.LastSuccessAt.IsZero() && rs.Indexed && rs.Error == "" {
+			rs.LastSuccessAt = s.FinishedAt
+			s.Repos[name] = rs
+		}
+	}
 }
 
 // maxErrorLen caps the recorded error text. The value is remote-derived
@@ -156,9 +207,55 @@ func SuccessAge(s *SyncStatus) (age time.Duration, ok bool) {
 // Stale reports whether the index has gone without a successful sync for
 // longer than after. A status with no successful run, or one whose success
 // is dated in the future, is always stale.
+//
+// This is the fleet-wide question and is only meaningful for overall
+// health; use RepoStale for whether a given repo's data is usable.
 func Stale(s *SyncStatus, after time.Duration) bool {
 	age, ok := SuccessAge(s)
 	return !ok || age < 0 || age > after
+}
+
+// RepoSuccessAge returns how long ago the named repo was last successfully
+// synced, and whether it ever was. A repo absent from the status has never
+// been synced.
+func RepoSuccessAge(s *SyncStatus, repo string) (age time.Duration, ok bool) {
+	if s == nil {
+		return 0, false
+	}
+	rs, found := s.Repos[repo]
+	if !found || rs.LastSuccessAt.IsZero() {
+		return 0, false
+	}
+	return time.Since(rs.LastSuccessAt), true
+}
+
+// RepoStale reports whether the named repo's data is older than after.
+// A repo that has never synced successfully is stale, as is one whose
+// success is dated in the future (see SuccessAge on backwards clocks).
+func RepoStale(s *SyncStatus, repo string, after time.Duration) bool {
+	age, ok := RepoSuccessAge(s, repo)
+	return !ok || age < 0 || age > after
+}
+
+// StaleRepos returns the names of indexed repos whose data is older than
+// after, sorted. Repos that have never been indexed are excluded: they hold
+// no searchable data, so calling them "stale" would describe results that
+// cannot be returned in the first place.
+func StaleRepos(s *SyncStatus, after time.Duration) []string {
+	if s == nil {
+		return nil
+	}
+	var stale []string
+	for name, rs := range s.Repos {
+		if !rs.Indexed && rs.IndexedCommit == "" {
+			continue
+		}
+		if RepoStale(s, name, after) {
+			stale = append(stale, name)
+		}
+	}
+	sort.Strings(stale)
+	return stale
 }
 
 // Interrupted reports whether the recorded run started but never finished.
@@ -169,11 +266,16 @@ func Interrupted(s *SyncStatus) bool {
 	return s != nil && !s.StartedAt.IsZero() && s.FinishedAt.IsZero()
 }
 
-// Degraded reports whether the index has stopped being updated even though
-// runs are still firing: either the last completed run failed, or it never
-// completed at all. An interrupted run counts, because a sync that dies
-// every time records no error and no failure count, and silence is exactly
-// what this reports on.
+// Degraded reports whether the sync *mechanism* is broken: the last run
+// failed as a whole, or never completed at all. It is deliberately not
+// "some repo is behind".
+//
+// A run that fetched and indexed forty-nine repos and hit one bad one did
+// its job; the machinery works and one repo is unreachable. Treating that
+// as degraded would put the scheduler on the retry cadence forever,
+// re-fetching the whole fleet every few minutes over a repo that will
+// never succeed. Per-repo staleness is reported through RepoStale instead,
+// which is where that failure actually shows up.
 func Degraded(s *SyncStatus) bool {
 	if s == nil {
 		return false
@@ -184,28 +286,29 @@ func Degraded(s *SyncStatus) bool {
 	if s.FinishedAt.IsZero() {
 		return false
 	}
-	return s.FinishedAt.After(s.LastSuccessAt)
+	return s.TotalFailure
 }
 
 // Due reports whether a scheduled sync should start at now.
 //
-// A success within interval means the index is fresh and nothing runs. Once
-// it is older than that an attempt is warranted, and how soon it may be
-// reattempted depends on Degraded: after a failed run the cadence drops to
-// retry so a transient cause (expired token, no network on wake) costs
-// minutes of staleness instead of a full interval.
+// The freshness gate measures from the end of the last run that actually
+// did its work, not from the last run in which *every* repo succeeded.
+// Those differ whenever one repo is permanently unreachable, and keying off
+// the latter would leave the scheduler convinced it was never fresh: it
+// would refetch and reindex the entire fleet at the retry cadence forever
+// over a single bad repo.
 //
-// The cooldown applies to interrupted runs too, measured from when they
-// started. Exempting them would make a sync that crashes every time retry
-// at the scheduler's tick rate rather than at retry, hammering the remote
-// for as long as the crash persists. Overlap itself is prevented by the
-// sync lock, not by this check.
+// When the mechanism itself is broken — a total failure, or a run that died
+// mid-flight — the cadence drops to retry so a transient cause (expired
+// token, no network on wake) costs minutes of staleness instead of a full
+// interval. The cooldown applies to interrupted runs too, measured from
+// when they started, since exempting them would retry at the scheduler's
+// tick rate for as long as the crash persists.
+//
+// Overlap is prevented by the sync lock, not by this check.
 func Due(s *SyncStatus, interval, retry time.Duration, now time.Time) bool {
 	if s == nil {
 		return true // never synced
-	}
-	if !s.LastSuccessAt.IsZero() && !now.Before(s.LastSuccessAt) && now.Sub(s.LastSuccessAt) < interval {
-		return false
 	}
 	cooldown := interval
 	if Degraded(s) {

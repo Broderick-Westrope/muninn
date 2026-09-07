@@ -145,3 +145,52 @@ func TestClampNote(t *testing.T) {
 		t.Errorf("clampNote(0, 200) = %q, want empty (unset limit)", note)
 	}
 }
+
+// TestReadFileWarnsWhenRepoStale covers a caveat read_file could not give
+// before staleness became per-repo: the content it returns is exactly what
+// an age warning is about, so the warning belongs on this output.
+func TestReadFileWarnsWhenRepoStale(t *testing.T) {
+	f := newFixture(t, "")
+	writeStatus(t, f.statusPath, f.commit, time.Now().Add(-72*time.Hour))
+
+	out, err := f.srv.ReadFile(context.Background(), ReadFileArgs{Repo: "acme/widget", Path: "widget.go"})
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !strings.HasPrefix(out, "WARNING:") {
+		t.Errorf("stale repo read should be prefixed with a warning:\n%s", out)
+	}
+	if !strings.Contains(out, "acme/widget was last synced") {
+		t.Errorf("warning should name the repo and its age:\n%s", out)
+	}
+	// The content must still be there, unchanged, after the caveat.
+	if !strings.Contains(out, "acme/widget/widget.go @ ") {
+		t.Errorf("output lost its content header:\n%s", out)
+	}
+}
+
+// A fresh repo must not be caveated: a warning on every read would be
+// noise an agent learns to ignore.
+func TestReadFileNoWarningWhenFresh(t *testing.T) {
+	f := newFixture(t, "")
+	out, err := f.srv.ReadFile(context.Background(), ReadFileArgs{Repo: "acme/widget", Path: "widget.go"})
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if strings.Contains(out, "WARNING") {
+		t.Errorf("fresh repo read should not warn:\n%s", out)
+	}
+}
+
+func TestListTreeWarnsWhenRepoStale(t *testing.T) {
+	f := newFixture(t, "")
+	writeStatus(t, f.statusPath, f.commit, time.Now().Add(-72*time.Hour))
+
+	out, err := f.srv.ListTree(context.Background(), ListTreeArgs{Repo: "acme/widget"})
+	if err != nil {
+		t.Fatalf("ListTree: %v", err)
+	}
+	if !strings.HasPrefix(out, "WARNING:") {
+		t.Errorf("stale repo tree listing should be prefixed with a warning:\n%s", out)
+	}
+}

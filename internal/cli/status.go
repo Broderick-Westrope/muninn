@@ -48,13 +48,15 @@ func printStatus(out io.Writer, st *status.SyncStatus) error {
 	}
 	// The success clock is reported separately from the attempt clock: a
 	// job that fails every hour keeps "last run" recent while the index
-	// silently rots, and only this line reveals it.
+	// silently rots, and only this line reveals it. This is the fleet-wide
+	// clock, so it stays frozen while any single repo keeps failing — the
+	// stale table below is what says whether data is actually old.
 	if age, ok := status.SuccessAge(st); !ok {
-		fmt.Fprintln(out, "last success: never")
+		fmt.Fprintln(out, "last clean sweep: never")
 	} else if age < 0 {
-		fmt.Fprintf(out, "last success: %s (dated in the future — the system clock has moved backwards)\n", st.LastSuccessAt.Format(time.RFC1123))
+		fmt.Fprintf(out, "last clean sweep: %s (dated in the future — the system clock has moved backwards)\n", st.LastSuccessAt.Format(time.RFC1123))
 	} else {
-		fmt.Fprintf(out, "last success: %s (%s ago)\n", st.LastSuccessAt.Format(time.RFC1123), age.Truncate(time.Second))
+		fmt.Fprintf(out, "last clean sweep: %s (%s ago)\n", st.LastSuccessAt.Format(time.RFC1123), age.Truncate(time.Second))
 	}
 
 	failed := failedRepos(st)
@@ -94,6 +96,28 @@ func printStatus(out io.Writer, st *status.SyncStatus) error {
 		if err := w.Flush(); err != nil {
 			return fmt.Errorf("writing gc table: %w", err)
 		}
+	}
+	// Stale data is a separate question from a failed run: a repo can be
+	// days old while every recent run "succeeded" at everything it could
+	// still reach.
+	if stale := status.StaleRepos(st, status.StaleAfter); len(stale) > 0 {
+		w := tabwriter.NewWriter(out, 2, 8, 2, ' ', 0)
+		fmt.Fprintf(w, "REPO\tSTALE (no successful sync in over %s)\n", status.StaleAfter)
+		for _, name := range stale {
+			if age, ok := status.RepoSuccessAge(st, name); ok {
+				fmt.Fprintf(w, "%s\t%s ago\n", name, age.Truncate(time.Second))
+			} else {
+				fmt.Fprintf(w, "%s\tnever synced\n", name)
+			}
+		}
+		if err := w.Flush(); err != nil {
+			return fmt.Errorf("writing stale table: %w", err)
+		}
+		// Every run refetches and reindexes the whole fleet, so a repo
+		// that will never succeed costs a full pass on every tick. Naming
+		// that here keeps the cost visible instead of leaving it as
+		// invisible background load once the warnings stopped shouting.
+		fmt.Fprintln(out, "note: every sync refetches all repos, so persistent failures above cost a full pass each run")
 	}
 	return nil
 }

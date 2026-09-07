@@ -244,7 +244,7 @@ func Run(ctx context.Context, cfg *config.Config, deps Deps) (*status.SyncStatus
 		wg.Add(1)
 		go func(repo discover.Repo) {
 			defer wg.Done()
-			rs := syncRepo(ctx, deps, ix, repo, prevRepos[repo.FullName], fetchSem, indexSem)
+			rs := syncRepo(ctx, deps, ix, repo, prevRepos[repo.FullName], now, fetchSem, indexSem)
 			mu.Lock()
 			st.Repos[repo.FullName] = rs
 			// Incremental write (best effort): keeps a live MCP session's
@@ -268,10 +268,16 @@ func Run(ctx context.Context, cfg *config.Config, deps Deps) (*status.SyncStatus
 			failed++
 		}
 	}
+	// The run reached the end of the pipeline, so the mechanism works even
+	// if individual repos did not. TotalFailure stays false, which keeps
+	// the scheduler on the normal cadence: a repo that will never succeed
+	// must not drive a full-fleet refetch every few minutes.
+	st.TotalFailure = false
 	if failed == 0 {
-		// Only a fully successful run advances the freshness clock. A
+		// The fleet-wide clock advances only on a clean sweep; per-repo
+		// clocks are set in syncRepo and are what staleness reads. A
 		// recorded GCError does not count: the repo is fetched, indexed,
-		// and pinned, so the index is genuinely fresh.
+		// and pinned, so its data is genuinely fresh.
 		st.Success = true
 		st.LastSuccessAt = st.FinishedAt
 		st.ConsecutiveFailures = 0
@@ -316,6 +322,10 @@ var preReconcile map[string]bool
 // would resurrect entries claiming a repo is indexed at a commit whose
 // shard no longer exists. Pass preReconcile when nothing can have been
 // deleted yet.
+//
+// TotalFailure is set: reaching here means the run failed as a whole
+// rather than in individual repos, which is what puts the scheduler on the
+// faster retry cadence.
 func abortRun(path string, st *status.SyncStatus, prevRepos map[string]status.RepoStatus, desired map[string]bool, now time.Time, err error) (*status.SyncStatus, error) {
 	for name, rs := range prevRepos {
 		if desired != nil && !desired[name] {
@@ -327,6 +337,7 @@ func abortRun(path string, st *status.SyncStatus, prevRepos map[string]status.Re
 	}
 	st.FinishedAt = now
 	st.Success = false
+	st.TotalFailure = true
 	st.Error = status.TruncateError(err.Error())
 	st.ConsecutiveFailures++
 	if werr := status.Write(path, st); werr != nil {
@@ -372,7 +383,13 @@ func reconcile(m Mirror, ix Indexer, desired map[string]bool, prevRepos map[stri
 			errs = append(errs, fmt.Sprintf("removing shards: %v", err))
 		}
 		if len(errs) > 0 {
+			// The repo is no longer desired and its removal failed, so it
+			// is retained only to report that error. Its shards may already
+			// be gone (RemoveShards can succeed while Remove fails), so the
+			// freshness clock is cleared: an unsearchable repo must not be
+			// named as stale data in every tool response.
 			rs := prevRepos[name]
+			rs.LastSuccessAt = time.Time{}
 			rs.Error = status.TruncateError(strings.Join(errs, "; "))
 			st.Repos[name] = rs
 		}
@@ -383,8 +400,14 @@ func reconcile(m Mirror, ix Indexer, desired map[string]bool, prevRepos map[stri
 // syncRepo fetches and indexes one repo, returning its status. Any error is
 // captured into RepoStatus.Error and the previously indexed commit retained,
 // so a failure never loses the read_file pinning guarantee.
-func syncRepo(ctx context.Context, deps Deps, ix Indexer, repo discover.Repo, prev status.RepoStatus, fetchSem, indexSem chan struct{}) status.RepoStatus {
-	rs := status.RepoStatus{IndexedCommit: prev.IndexedCommit}
+//
+// now is passed in rather than read from deps because Run resolves the nil
+// default into a local, so deps.Now is not safe to call here.
+func syncRepo(ctx context.Context, deps Deps, ix Indexer, repo discover.Repo, prev status.RepoStatus, now func() time.Time, fetchSem, indexSem chan struct{}) status.RepoStatus {
+	// The per-repo freshness clock is carried forward with IndexedCommit:
+	// a failed repo keeps serving its last good data, so it keeps the age
+	// of that data rather than appearing never-synced.
+	rs := status.RepoStatus{IndexedCommit: prev.IndexedCommit, LastSuccessAt: prev.LastSuccessAt}
 
 	fetchSem <- struct{}{}
 	_, err := deps.Mirror.Ensure(ctx, repo, deps.Token)
@@ -418,6 +441,7 @@ func syncRepo(ctx context.Context, deps Deps, ix Indexer, repo discover.Repo, pr
 	}
 	rs.Indexed = true
 	rs.IndexedCommit = head
+	rs.LastSuccessAt = now()
 	// Housekeeping after a successful pin. A gc failure is recorded
 	// separately from Error: the repo is fully synced either way, so it must
 	// not fail the run, freeze the freshness clock, or trip the degraded

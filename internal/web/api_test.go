@@ -154,13 +154,14 @@ func writeStatusRepos(t *testing.T, path string, finishedAt time.Time, commits m
 	t.Helper()
 	repos := make(map[string]status.RepoStatus, len(commits))
 	for name, commit := range commits {
-		repos[name] = status.RepoStatus{Fetched: true, Indexed: true, IndexedCommit: commit}
+		repos[name] = status.RepoStatus{Fetched: true, Indexed: true, IndexedCommit: commit, LastSuccessAt: finishedAt}
 	}
 	err := status.Write(path, &status.SyncStatus{
-		StartedAt:  finishedAt.Add(-time.Minute),
-		FinishedAt: finishedAt,
-		Success:    true,
-		Repos:      repos,
+		StartedAt:     finishedAt.Add(-time.Minute),
+		FinishedAt:    finishedAt,
+		LastSuccessAt: finishedAt,
+		Success:       true,
+		Repos:         repos,
 	})
 	if err != nil {
 		t.Fatalf("status.Write: %v", err)
@@ -1104,5 +1105,63 @@ func TestAPIOpenExecFailed(t *testing.T) {
 	rec := postOpen(t, srv, `{"repo":"acme/widget","path":"widget.go","line":1}`, nil)
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d, want 500: %s", rec.Code, errorBody(t, rec))
+	}
+}
+
+// TestAPIReposPerRepoStaleness covers the fields repoJSON always had but
+// which were filled with a fleet-wide value: one unreachable repo marked
+// every repo stale in the UI.
+func TestAPIReposPerRepoStaleness(t *testing.T) {
+	srv := newFacetFixture(t)
+
+	// Age one repo past the threshold and leave the other fresh.
+	var names []string
+	repos, err := srv.searcher.ListRepos(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range repos {
+		names = append(names, r.Name)
+	}
+	if len(names) < 2 {
+		t.Fatalf("fixture has %d repos, want at least 2", len(names))
+	}
+	now := time.Now()
+	err = status.Write(srv.statusPath, &status.SyncStatus{
+		StartedAt:  now.Add(-time.Minute),
+		FinishedAt: now,
+		Success:    false,
+		Error:      "1 of 2 repos failed",
+		Repos: map[string]status.RepoStatus{
+			names[0]: {Fetched: true, Indexed: true, LastSuccessAt: now},
+			names[1]: {Fetched: true, Indexed: true, LastSuccessAt: now.Add(-72 * time.Hour)},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/repos", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var got []repoJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+
+	byName := make(map[string]repoJSON, len(got))
+	for _, r := range got {
+		byName[r.Name] = r
+	}
+	if byName[names[0]].Stale {
+		t.Errorf("%s stale = true, want false: it synced just now", names[0])
+	}
+	if !byName[names[1]].Stale {
+		t.Errorf("%s stale = false, want true: it is 72h old", names[1])
+	}
+	if byName[names[0]].IndexAge == byName[names[1]].IndexAge {
+		t.Errorf("both repos report the same age (%q); the value is still fleet-wide", byName[names[0]].IndexAge)
 	}
 }
