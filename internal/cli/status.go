@@ -100,25 +100,37 @@ func printStatus(out io.Writer, st *status.SyncStatus) error {
 
 // agentState describes the launchd agent: not installed, healthy, or
 // installed but no longer usable. The last case is the one worth detail —
-// a plist pointing at a binary a package upgrade has moved is spawned by
-// launchd forever without ever running, and nothing else surfaces it.
+// a plist pointing at a binary a package upgrade has moved, or a job that
+// was never registered, is spawned by launchd never or not at all, and
+// nothing else surfaces it.
 func agentState() string {
 	plistPath, err := launchd.PlistPath()
 	if err != nil {
 		return "unknown (" + err.Error() + ")"
 	}
-	return describeAgent(plistPath)
+	return describeAgent(launchd.ExecLaunchctl{}, plistPath)
 }
 
-// describeAgent is agentState with the plist path injected so it can be
-// tested without depending on the real home directory.
-func describeAgent(plistPath string) string {
+// describeAgent is agentState with the plist path and launchctl injected so
+// it can be tested without a real home directory or a real launchd.
+func describeAgent(lc launchd.Launchctl, plistPath string) string {
 	plist, err := launchd.Installed(plistPath)
 	if errors.Is(err, launchd.ErrNotInstalled) {
 		return "not installed — run `muninn sync --install`"
 	}
 	if err != nil {
 		return "unknown (" + err.Error() + ")"
+	}
+
+	// Ask launchd, not the filesystem. A bootstrap that failed after the
+	// plist was written leaves a file identical to a healthy install, so
+	// the plist alone cannot distinguish "scheduled" from "not running".
+	loaded, lerr := lc.Loaded(launchd.Label)
+	switch {
+	case lerr != nil:
+		return fmt.Sprintf("installed (%s) — could not confirm it is loaded: %v", plistPath, lerr)
+	case !loaded:
+		return fmt.Sprintf("installed (%s) — BROKEN: the plist exists but launchd has not loaded the job, so no sync is scheduled; run `muninn sync --install`", plistPath)
 	}
 
 	bin, err := launchd.ProgramPath(plist)

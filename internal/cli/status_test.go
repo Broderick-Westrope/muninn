@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,20 @@ import (
 	"github.com/broderick-westrope/muninn/internal/launchd"
 	"github.com/broderick-westrope/muninn/internal/status"
 )
+
+// stubLaunchctl answers the loaded probe without a real launchd.
+type stubLaunchctl struct {
+	loaded    bool
+	loadedErr error
+}
+
+func (stubLaunchctl) Bootout(string) error   { return nil }
+func (stubLaunchctl) Bootstrap(string) error { return nil }
+
+func (s stubLaunchctl) Loaded(string) (bool, error) { return s.loaded, s.loadedErr }
+
+// loadedCtl is a launchctl reporting a healthy, registered job.
+func loadedCtl() stubLaunchctl { return stubLaunchctl{loaded: true} }
 
 // installPlist writes a plist for binPath at the returned path.
 func installPlist(t *testing.T, binPath string) string {
@@ -27,7 +42,7 @@ func installPlist(t *testing.T, binPath string) string {
 }
 
 func TestDescribeAgentNotInstalled(t *testing.T) {
-	got := describeAgent(filepath.Join(t.TempDir(), "missing.plist"))
+	got := describeAgent(loadedCtl(), filepath.Join(t.TempDir(), "missing.plist"))
 	if !strings.HasPrefix(got, "not installed") {
 		t.Errorf("state = %q, want the not-installed message", got)
 	}
@@ -38,9 +53,38 @@ func TestDescribeAgentHealthy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := describeAgent(installPlist(t, self))
+	got := describeAgent(loadedCtl(), installPlist(t, self))
 	if !strings.HasPrefix(got, "installed (") || strings.Contains(got, "—") {
 		t.Errorf("state = %q, want a plain installed message", got)
+	}
+}
+
+// TestDescribeAgentNotLoaded covers the state Install can leave behind: a
+// bootstrap that fails after the plist is written leaves a file identical
+// to a healthy install, so only launchd can reveal that nothing is
+// scheduled.
+func TestDescribeAgentNotLoaded(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := describeAgent(stubLaunchctl{loaded: false}, installPlist(t, self))
+	if !strings.Contains(got, "BROKEN") {
+		t.Errorf("state = %q, want it flagged BROKEN", got)
+	}
+	if !strings.Contains(got, "not loaded") {
+		t.Errorf("state = %q, want the unloaded job named as the cause", got)
+	}
+}
+
+func TestDescribeAgentLoadedProbeFails(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := describeAgent(stubLaunchctl{loadedErr: errors.New("launchctl missing")}, installPlist(t, self))
+	if !strings.Contains(got, "could not confirm") {
+		t.Errorf("state = %q, want the unknown-loaded-state message", got)
 	}
 }
 
@@ -49,7 +93,7 @@ func TestDescribeAgentHealthy(t *testing.T) {
 // spawns nothing, forever, without complaint.
 func TestDescribeAgentBrokenBinaryPath(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "Cellar", "muninn", "1.2.3", "bin", "muninn")
-	got := describeAgent(installPlist(t, missing))
+	got := describeAgent(loadedCtl(), installPlist(t, missing))
 	if !strings.Contains(got, "BROKEN") {
 		t.Errorf("state = %q, want it flagged BROKEN", got)
 	}
@@ -62,12 +106,13 @@ func TestDescribeAgentBrokenBinaryPath(t *testing.T) {
 }
 
 func TestDescribeAgentDifferentBinary(t *testing.T) {
-	// An existing but different binary: worth reporting, not broken.
+	// An existing but different binary: worth reporting, not broken, and
+	// deliberately not auto-repaired.
 	other := filepath.Join(t.TempDir(), "muninn")
 	if err := os.WriteFile(other, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	got := describeAgent(installPlist(t, other))
+	got := describeAgent(loadedCtl(), installPlist(t, other))
 	if strings.Contains(got, "BROKEN") {
 		t.Errorf("state = %q, should not be BROKEN when the binary exists", got)
 	}
@@ -81,7 +126,7 @@ func TestDescribeAgentUnrecognizedPlist(t *testing.T) {
 	if err := os.WriteFile(plistPath, []byte("<plist></plist>"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	got := describeAgent(plistPath)
+	got := describeAgent(loadedCtl(), plistPath)
 	if !strings.Contains(got, "unrecognized contents") {
 		t.Errorf("state = %q, want the parse failure reported", got)
 	}
@@ -124,5 +169,47 @@ func TestPrintStatusNeverSucceeded(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "last success: never") {
 		t.Errorf("output should say a success has never happened:\n%s", buf.String())
+	}
+}
+
+func TestPrintStatusFutureClock(t *testing.T) {
+	var buf bytes.Buffer
+	err := printStatus(&buf, &status.SyncStatus{
+		StartedAt:     time.Now(),
+		FinishedAt:    time.Now().Add(48 * time.Hour),
+		LastSuccessAt: time.Now().Add(48 * time.Hour),
+		Success:       true,
+		Repos:         map[string]status.RepoStatus{},
+	})
+	if err != nil {
+		t.Fatalf("printStatus: %v", err)
+	}
+	if !strings.Contains(buf.String(), "dated in the future") {
+		t.Errorf("output should flag a backwards clock rather than print a negative age:\n%s", buf.String())
+	}
+}
+
+// A gc failure leaves the repo fully indexed, so it is reported apart from
+// real failures and must not appear as one.
+func TestPrintStatusSeparatesGCFailures(t *testing.T) {
+	var buf bytes.Buffer
+	err := printStatus(&buf, &status.SyncStatus{
+		StartedAt:     time.Now().Add(-time.Minute),
+		FinishedAt:    time.Now(),
+		LastSuccessAt: time.Now(),
+		Success:       true,
+		Repos: map[string]status.RepoStatus{
+			"acme/a": {Fetched: true, Indexed: true, GCError: "gc boom"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("printStatus: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "result: success") {
+		t.Errorf("a gc-only failure must not make the run a failure:\n%s", out)
+	}
+	if !strings.Contains(out, "GC WARNING") || !strings.Contains(out, "gc boom") {
+		t.Errorf("output missing the gc section:\n%s", out)
 	}
 }

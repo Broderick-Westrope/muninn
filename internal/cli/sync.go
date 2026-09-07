@@ -22,7 +22,7 @@ import (
 )
 
 func newSyncCmd() *cobra.Command {
-	var install, uninstall, ifDue bool
+	var install, uninstall, ifDue, noRepair bool
 	cmd := &cobra.Command{
 		Use:   "sync",
 		Short: "Reconcile repos: clone/fetch mirrors, build index, GC removed repos",
@@ -35,12 +35,13 @@ func newSyncCmd() *cobra.Command {
 			case uninstall:
 				return runUninstall(cmd)
 			}
-			return runSync(cmd, ifDue)
+			return runSync(cmd, ifDue, noRepair)
 		},
 	}
 	cmd.Flags().BoolVar(&install, "install", false, "install the scheduled launchd sync agent")
 	cmd.Flags().BoolVar(&uninstall, "uninstall", false, "remove the scheduled launchd sync agent")
 	cmd.Flags().BoolVar(&ifDue, "if-due", false, "only sync when the index is stale (used by the scheduled agent)")
+	cmd.Flags().BoolVar(&noRepair, "no-repair", false, "never reinstall the launchd agent (used by the scheduled agent)")
 	return cmd
 }
 
@@ -57,7 +58,11 @@ func resolveConfigPath() string {
 // does not mark the job crashed for one bad repo. A run skipped because
 // another is in flight or because the index is fresh also exits zero: with
 // --if-due most scheduled ticks end that way by design.
-func runSync(cmd *cobra.Command, ifDue bool) error {
+//
+// noRepair suppresses the launchd agent repair. It is a separate flag from
+// ifDue so the "never reinstall from inside the scheduled job" guarantee
+// does not depend on the plist happening to pass --if-due.
+func runSync(cmd *cobra.Command, ifDue, noRepair bool) error {
 	// Git is a hard prerequisite, validated up front like ctags: fail the
 	// run loudly rather than failing every repo individually.
 	if err := gitcmd.Validate(); err != nil {
@@ -73,14 +78,6 @@ func runSync(cmd *cobra.Command, ifDue bool) error {
 	token, err := config.ResolveToken(cfg)
 	if err != nil {
 		return err
-	}
-
-	// Only the interactive path repairs the agent. The scheduled job is
-	// the one that passes --if-due, and repairing means booting the job
-	// out — which from inside that job would kill this very process
-	// mid-sync.
-	if !ifDue {
-		repairAgent(cmd, cfg)
 	}
 
 	out := cmd.OutOrStdout()
@@ -115,6 +112,13 @@ func runSync(cmd *cobra.Command, ifDue bool) error {
 		}
 	}
 	fmt.Fprintf(out, "synced %d repos, %d failed — see muninn status\n", synced, failed)
+
+	// Repair last, and never from the scheduled job. Reinstalling boots the
+	// job out, which would kill a scheduled run mid-sync; doing it after
+	// this run's work means the index is already updated if it happens.
+	if !noRepair {
+		repairAgent(cmd, cfg)
+	}
 	return nil
 }
 
@@ -214,32 +218,61 @@ func renderAgent(cfg *config.Config, cfgPath string) (plistPath string, plist []
 	return plistPath, plist, nil
 }
 
-// repairAgent reinstalls the launchd agent when the installed plist no
-// longer matches what the running binary and config imply — after an
-// upgrade moved the binary, or a config change altered the schedule. A
-// broken agent cannot fix itself (launchd is spawning a path that is gone),
-// so the repair has to ride along on an interactive run. Failures are
-// reported and otherwise ignored: the sync itself matters more.
+// repairAgent reinstalls the launchd agent when the binary its plist names
+// has gone missing, which is what a package upgrade does when it replaces
+// a versioned install directory. Such an agent cannot fix itself — launchd
+// spawns a path that no longer exists — so the repair rides along on an
+// interactive run.
+//
+// The trigger is deliberately narrow. Repointing the agent whenever the
+// plist merely *differs* from what the running binary implies would let any
+// `go run` or scratch build silently capture the schedule, and those paths
+// are deleted on exit: exactly the failure this is meant to prevent, only
+// self-inflicted. A plist naming a different but existing binary is
+// reported by `muninn status` and left alone for the user to decide.
+//
+// Failures are reported and otherwise ignored: the sync matters more. A
+// failed repair is stated as leaving no agent at all, because Install boots
+// the old job out before loading the new one and the plist left on disk
+// looks healthy either way.
 func repairAgent(cmd *cobra.Command, cfg *config.Config) {
+	plistPath, err := launchd.PlistPath()
+	if err != nil {
+		return
+	}
+	repairAgentAt(cmd, cfg, launchd.ExecLaunchctl{}, plistPath)
+}
+
+// repairAgentAt is repairAgent with the launchctl and plist path injected
+// so the repair decision can be tested without a real launchd.
+func repairAgentAt(cmd *cobra.Command, cfg *config.Config, lc launchd.Launchctl, plistPath string) {
 	out := cmd.OutOrStdout()
+	plist, err := launchd.Installed(plistPath)
+	if err != nil {
+		return // not installed, or unreadable: nothing to repair
+	}
+	bin, err := launchd.ProgramPath(plist)
+	if err != nil {
+		return // unrecognized plist; `muninn status` reports it
+	}
+	if _, err := os.Stat(bin); err == nil {
+		return // the scheduled binary is still there
+	}
+
 	cfgPath, err := filepath.Abs(resolveConfigPath())
 	if err != nil {
 		return
 	}
-	plistPath, want, err := renderAgent(cfg, cfgPath)
+	_, want, err := renderAgent(cfg, cfgPath)
 	if err != nil {
 		return
 	}
-	stale, err := launchd.NeedsRepair(plistPath, want)
-	if err != nil || !stale {
-		return // not installed, unreadable, or already correct
-	}
-	if err := launchd.Install(launchd.ExecLaunchctl{}, plistPath, want); err != nil {
-		fmt.Fprintf(out, "warning: the launchd agent is stale and could not be repaired: %v\n", err)
-		fmt.Fprintln(out, "         run `muninn sync --install` to fix it.")
+	if err := launchd.Install(lc, plistPath, want); err != nil {
+		fmt.Fprintf(out, "warning: the launchd agent points at a missing binary (%s) and could not be repaired: %v\n", bin, err)
+		fmt.Fprintln(out, "         no sync is scheduled until you run `muninn sync --install`.")
 		return
 	}
-	fmt.Fprintln(out, "repaired the launchd agent (it no longer matched this binary or config)")
+	fmt.Fprintf(out, "repaired the launchd agent: it pointed at %s, which no longer exists\n", bin)
 }
 
 func runUninstall(cmd *cobra.Command) error {

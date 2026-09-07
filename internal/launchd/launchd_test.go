@@ -14,6 +14,8 @@ type stubLaunchctl struct {
 	calls        []string
 	bootoutErr   error
 	bootstrapErr error
+	loaded       bool
+	loadedErr    error
 }
 
 func (s *stubLaunchctl) Bootout(label string) error {
@@ -23,7 +25,15 @@ func (s *stubLaunchctl) Bootout(label string) error {
 
 func (s *stubLaunchctl) Bootstrap(plistPath string) error {
 	s.calls = append(s.calls, "bootstrap "+plistPath)
+	if s.bootstrapErr == nil {
+		s.loaded = true
+	}
 	return s.bootstrapErr
+}
+
+func (s *stubLaunchctl) Loaded(label string) (bool, error) {
+	s.calls = append(s.calls, "loaded "+label)
+	return s.loaded, s.loadedErr
 }
 
 func TestRenderGolden(t *testing.T) {

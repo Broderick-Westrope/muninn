@@ -72,6 +72,11 @@ func ProgramPath(plist []byte) (string, error) {
 // from want, meaning the agent no longer reflects the running binary or
 // the current config. It returns an error wrapping ErrNotInstalled when
 // there is no agent to repair.
+//
+// Note this answers "is it different", not "is it broken": a plist naming
+// a different but working binary also differs. Automatic repair keys off a
+// missing binary instead, so that a scratch build cannot capture the
+// schedule; this is for reporting and for tests.
 func NeedsRepair(plistPath string, want []byte) (bool, error) {
 	got, err := Installed(plistPath)
 	if err != nil {
@@ -88,6 +93,11 @@ type Launchctl interface {
 	Bootout(label string) error
 	// Bootstrap loads the plist into the user's GUI domain.
 	Bootstrap(plistPath string) error
+	// Loaded reports whether launchd currently knows the label. A plist on
+	// disk proves only that install wrote one, not that the job is
+	// registered, so this is the only way to detect a bootstrap that
+	// failed after the plist was already in place.
+	Loaded(label string) (bool, error)
 }
 
 // ExecLaunchctl runs the real launchctl binary against gui/<uid>.
@@ -99,6 +109,23 @@ func (ExecLaunchctl) Bootout(label string) error {
 
 func (ExecLaunchctl) Bootstrap(plistPath string) error {
 	return runLaunchctl("bootstrap", fmt.Sprintf("gui/%d", os.Getuid()), plistPath)
+}
+
+// Loaded shells out to `launchctl print`, which exits non-zero when the
+// label is unknown. A non-zero exit is therefore reported as "not loaded"
+// rather than an error; only a failure to run launchctl at all is an error,
+// since that means the answer is genuinely unknown.
+func (ExecLaunchctl) Loaded(label string) (bool, error) {
+	cmd := exec.Command("launchctl", "print", fmt.Sprintf("gui/%d/%s", os.Getuid(), label))
+	err := cmd.Run()
+	if err == nil {
+		return true, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return false, nil
+	}
+	return false, fmt.Errorf("running launchctl print: %w", err)
 }
 
 func runLaunchctl(args ...string) error {
@@ -120,6 +147,7 @@ var plistTemplate = template.Must(template.New("plist").Parse(`<?xml version="1.
 		<string>{{.BinaryPath}}</string>
 		<string>sync</string>
 		<string>--if-due</string>
+		<string>--no-repair</string>
 		<string>--config</string>
 		<string>{{.ConfigPath}}</string>
 	</array>
@@ -174,6 +202,12 @@ func Render(binaryPath, configPath, logPath string, tickMinutes int) ([]byte, er
 // Install writes the plist and (re)loads the job. The job is booted out
 // first because a bare bootstrap errors when it is already loaded; the
 // bootout error is ignored so install is idempotent.
+//
+// The steps are not atomic: if Bootstrap fails after Bootout succeeded,
+// the previously working job is left unloaded and the plist on disk is
+// byte-identical to a healthy install. Callers must treat an Install error
+// as "there is now no agent" and say so, because nothing on disk records
+// it — only Loaded can see that state.
 func Install(lc Launchctl, plistPath string, plist []byte) error {
 	if err := os.MkdirAll(filepath.Dir(plistPath), 0o755); err != nil {
 		return fmt.Errorf("creating LaunchAgents directory: %w", err)
