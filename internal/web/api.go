@@ -417,13 +417,17 @@ func (s *Server) handleRepos(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// One status read feeds both the age string and the stale flag so
-	// they can never disagree. A missing status file means never synced:
-	// age unknown, stale.
+	// they can never disagree. Both are measured from the last successful
+	// sync, not the last run: a failing job keeps updating FinishedAt, so
+	// reporting that would show a rotting index as freshly synced. A
+	// missing status file, or one with no successful run, means stale with
+	// an unknown age.
 	indexAge, stale := "unknown", true
 	if st, err := status.Read(s.statusPath); err == nil {
-		age := status.Age(st)
-		indexAge = formatAge(age)
-		stale = age > staleAfter
+		if age, ok := status.SuccessAge(st); ok {
+			indexAge = formatAge(age)
+		}
+		stale = status.Stale(st, staleAfter)
 	}
 
 	out := make([]repoJSON, 0, len(repos))

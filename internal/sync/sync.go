@@ -16,6 +16,7 @@ import (
 	"github.com/broderick-westrope/muninn/internal/config"
 	"github.com/broderick-westrope/muninn/internal/ctags"
 	"github.com/broderick-westrope/muninn/internal/discover"
+	"github.com/broderick-westrope/muninn/internal/lock"
 	"github.com/broderick-westrope/muninn/internal/status"
 )
 
@@ -23,6 +24,15 @@ const (
 	defaultFetchConcurrency = 8
 	defaultIndexConcurrency = 2
 )
+
+// ErrLocked reports that another sync process holds the lock, so this run
+// did nothing. It is a normal outcome, not a failure: callers should report
+// it and exit successfully.
+var ErrLocked = errors.New("another sync is already running")
+
+// ErrNotDue reports that OnlyIfDue was set and the index is fresh enough,
+// so this run did nothing. Also a normal outcome.
+var ErrNotDue = errors.New("sync is not due yet")
 
 // Discoverer resolves the desired set of repositories.
 type Discoverer interface {
@@ -60,21 +70,36 @@ type Deps struct {
 	ResolveCtags func(configured string) (string, error)
 	Token        string
 	StatusPath   string
+	// LockPath is the advisory lock file that serializes runs. Required:
+	// two concurrent runs corrupt each other's temp files and clobber the
+	// status file.
+	LockPath string
+	// OnlyIfDue skips the run when the index is fresh, per status.Due and
+	// the cadences in cfg.Sync. Scheduled runs set it; a manual `muninn
+	// sync` does not.
+	OnlyIfDue bool
+	// Now supplies the current time for the due check; nil means
+	// time.Now.
+	Now func() time.Time
 	// FetchConcurrency bounds concurrent clones/fetches; 0 means 8.
 	FetchConcurrency int
 	// IndexConcurrency bounds concurrent Zoekt builds; 0 means 2.
 	IndexConcurrency int
 }
 
-// Run executes one sync: seed status from the previous run, validate ctags,
-// discover repos, GC removed mirrors and shards, then fetch and index every
-// repo with per-repo failure isolation. The status file is rewritten after
-// each repo completes so readers see at most a few seconds of skew. It
-// returns a non-nil error only on total failure; per-repo failures are
-// recorded in the returned status with Success=false.
+// Run executes one sync: take the exclusive lock, seed status from the
+// previous run, validate ctags, discover repos, GC removed mirrors and
+// shards, then fetch and index every repo with per-repo failure isolation.
+// The status file is rewritten after each repo completes so readers see at
+// most a few seconds of skew.
+//
+// It returns a non-nil error only on total failure; per-repo failures are
+// recorded in the returned status with Success=false. ErrLocked and
+// ErrNotDue mean the run deliberately did nothing and are returned with the
+// existing status (which may be nil) for reporting.
 func Run(ctx context.Context, cfg *config.Config, deps Deps) (*status.SyncStatus, error) {
-	if deps.Discoverer == nil || deps.Mirror == nil || deps.NewIndexer == nil || deps.StatusPath == "" {
-		return nil, errors.New("sync: Deps requires Discoverer, Mirror, NewIndexer, and StatusPath")
+	if deps.Discoverer == nil || deps.Mirror == nil || deps.NewIndexer == nil || deps.StatusPath == "" || deps.LockPath == "" {
+		return nil, errors.New("sync: Deps requires Discoverer, Mirror, NewIndexer, StatusPath, and LockPath")
 	}
 	fetchN := deps.FetchConcurrency
 	if fetchN <= 0 {
@@ -88,6 +113,27 @@ func Run(ctx context.Context, cfg *config.Config, deps Deps) (*status.SyncStatus
 	if resolveCtags == nil {
 		resolveCtags = ctags.Resolve
 	}
+	now := deps.Now
+	if now == nil {
+		now = time.Now
+	}
+
+	// The lock is taken before the status read so the due check below sees
+	// state no other run can be mutating: without it two schedulers firing
+	// together would both read "due" and both proceed.
+	lk, err := lock.TryAcquire(deps.LockPath)
+	if err != nil {
+		if errors.Is(err, lock.ErrLocked) {
+			prev, _ := status.Read(deps.StatusPath)
+			return prev, fmt.Errorf("%w: %w", ErrLocked, err)
+		}
+		return nil, err
+	}
+	defer func() {
+		if err := lk.Release(); err != nil {
+			fmt.Fprintf(os.Stderr, "muninn: releasing sync lock: %v\n", err)
+		}
+	}()
 
 	// Seed from the previous run so IndexedCommit carries forward when a
 	// repo (or the whole run) fails before indexing a new tip.
@@ -100,20 +146,35 @@ func Run(ctx context.Context, cfg *config.Config, deps Deps) (*status.SyncStatus
 		prevRepos = prev.Repos
 	}
 
-	st := &status.SyncStatus{StartedAt: time.Now(), Repos: make(map[string]status.RepoStatus)}
+	if deps.OnlyIfDue && !status.Due(prev, cfg.Sync.Interval(), cfg.Sync.RetryInterval(), now()) {
+		return prev, ErrNotDue
+	}
+
+	st := &status.SyncStatus{StartedAt: now(), Repos: make(map[string]status.RepoStatus)}
+	if prev != nil {
+		// Carry the success clock and failure count forward: a run that
+		// fails must not make the index look fresh, and a mid-run reader
+		// must still see the real staleness while FinishedAt is zero.
+		st.LastSuccessAt = prev.LastSuccessAt
+		st.ConsecutiveFailures = prev.ConsecutiveFailures
+	}
 
 	// ctags is a hard prerequisite: fail the whole run loudly rather than
-	// silently building shards without symbols.
+	// silently building shards without symbols. This goes through abortRun
+	// like any other total failure — a ctags path baked into the config at
+	// install time can break every scheduled run, and a run that fails
+	// without recording anything is indistinguishable from one that never
+	// fired.
 	ctagsPath, err := resolveCtags(cfg.Ctags.Path)
 	if err != nil {
-		return nil, fmt.Errorf("validating ctags: %w", err)
+		return abortRun(deps.StatusPath, st, prevRepos, now(), fmt.Errorf("validating ctags: %w", err))
 	}
 	ix := deps.NewIndexer(ctagsPath)
 
 	repos, err := deps.Discoverer.Discover(ctx, cfg, deps.Token)
 	if err != nil {
 		// Without the full desired list reconciliation cannot GC safely.
-		return abortRun(deps.StatusPath, st, prevRepos, fmt.Errorf("discovering repos: %w", err))
+		return abortRun(deps.StatusPath, st, prevRepos, now(), fmt.Errorf("discovering repos: %w", err))
 	}
 
 	desired := make(map[string]bool, len(repos))
@@ -129,13 +190,13 @@ func Run(ctx context.Context, cfg *config.Config, deps Deps) (*status.SyncStatus
 	}
 
 	if err := reconcile(deps.Mirror, ix, desired, prevRepos, st); err != nil {
-		return abortRun(deps.StatusPath, st, prevRepos, err)
+		return abortRun(deps.StatusPath, st, prevRepos, now(), err)
 	}
 	if err := ix.CleanTmp(); err != nil {
-		return abortRun(deps.StatusPath, st, prevRepos, fmt.Errorf("cleaning stale tmp shards: %w", err))
+		return abortRun(deps.StatusPath, st, prevRepos, now(), fmt.Errorf("cleaning stale tmp shards: %w", err))
 	}
 	if err := deps.Mirror.CleanTmp(); err != nil {
-		return abortRun(deps.StatusPath, st, prevRepos, fmt.Errorf("cleaning orphaned temp clones: %w", err))
+		return abortRun(deps.StatusPath, st, prevRepos, now(), fmt.Errorf("cleaning orphaned temp clones: %w", err))
 	}
 
 	fetchSem := make(chan struct{}, fetchN)
@@ -166,13 +227,23 @@ func Run(ctx context.Context, cfg *config.Config, deps Deps) (*status.SyncStatus
 		fmt.Fprintf(os.Stderr, "muninn: incremental status write failed: %v\n", incWriteErr)
 	}
 
-	st.FinishedAt = time.Now()
-	st.Success = true
+	st.FinishedAt = now()
+	failed := 0
 	for _, rs := range st.Repos {
 		if rs.Error != "" {
-			st.Success = false
-			break
+			failed++
 		}
+	}
+	if failed == 0 {
+		// Only a fully successful run advances the freshness clock.
+		st.Success = true
+		st.LastSuccessAt = st.FinishedAt
+		st.ConsecutiveFailures = 0
+		st.Error = ""
+	} else {
+		st.Success = false
+		st.Error = fmt.Sprintf("%d of %d repos failed", failed, len(st.Repos))
+		st.ConsecutiveFailures++
 	}
 	if err := status.Write(deps.StatusPath, st); err != nil {
 		return st, fmt.Errorf("writing final status: %w", err)
@@ -183,14 +254,18 @@ func Run(ctx context.Context, cfg *config.Config, deps Deps) (*status.SyncStatus
 // abortRun writes a failed status before returning err, retaining the
 // previous per-repo entries for any repo not already recorded, so an
 // aborted run is never silent (the spec requires every run to end with a
-// status write).
-func abortRun(path string, st *status.SyncStatus, prevRepos map[string]status.RepoStatus, err error) (*status.SyncStatus, error) {
+// status write). LastSuccessAt is left as seeded: a total failure moves the
+// attempt clock but never the freshness clock.
+func abortRun(path string, st *status.SyncStatus, prevRepos map[string]status.RepoStatus, now time.Time, err error) (*status.SyncStatus, error) {
 	for name, rs := range prevRepos {
 		if _, ok := st.Repos[name]; !ok {
 			st.Repos[name] = rs
 		}
 	}
-	st.FinishedAt = time.Now()
+	st.FinishedAt = now
+	st.Success = false
+	st.Error = err.Error()
+	st.ConsecutiveFailures++
 	if werr := status.Write(path, st); werr != nil {
 		return st, fmt.Errorf("%w (also failed writing status: %v)", err, werr)
 	}

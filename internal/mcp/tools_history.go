@@ -304,8 +304,5 @@ func (s *Server) stalenessWarning() string {
 	if err != nil {
 		return noStatusWarning
 	}
-	if age := status.Age(st); age > staleAfter {
-		return fmt.Sprintf(staleWarningFormat, formatAge(age))
-	}
-	return ""
+	return formatWarnings(st)
 }

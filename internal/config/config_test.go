@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadSourcebotConfig(t *testing.T) {
@@ -251,5 +252,36 @@ func TestSaveRoundtrip(t *testing.T) {
 	}
 	if got.Sync.IntervalMinutes != 30 {
 		t.Errorf("roundtrip IntervalMinutes = %d, want 30", got.Sync.IntervalMinutes)
+	}
+}
+
+func TestLoadSyncRetryDefaults(t *testing.T) {
+	c, err := Load(writeConfigFile(t, `{"connections": {"c": {"type": "github", "orgs": ["x"]}}}`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.Sync.RetryIntervalMinutes != 10 {
+		t.Errorf("Sync.RetryIntervalMinutes = %d, want default 10", c.Sync.RetryIntervalMinutes)
+	}
+	if got := c.Sync.TickMinutes(); got != 10 {
+		t.Errorf("TickMinutes = %d, want 10 (the faster of the two cadences)", got)
+	}
+}
+
+// A retry slower than the normal interval would back failures off instead
+// of reattempting them, so it is clamped rather than honored.
+func TestLoadClampsRetryToInterval(t *testing.T) {
+	c, err := Load(writeConfigFile(t, `{"connections": {"c": {"type": "github", "orgs": ["x"]}}, "sync": {"intervalMinutes": 15, "retryIntervalMinutes": 120}}`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.Sync.RetryIntervalMinutes != 15 {
+		t.Errorf("Sync.RetryIntervalMinutes = %d, want clamped to 15", c.Sync.RetryIntervalMinutes)
+	}
+	if c.Sync.RetryInterval() != 15*time.Minute {
+		t.Errorf("RetryInterval = %v, want 15m", c.Sync.RetryInterval())
+	}
+	if c.Sync.Interval() != 15*time.Minute {
+		t.Errorf("Interval = %v, want 15m", c.Sync.Interval())
 	}
 }

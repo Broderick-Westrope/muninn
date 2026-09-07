@@ -34,7 +34,8 @@ go install github.com/broderick-westrope/muninn@latest
       "token": { "env": "GITHUB_TOKEN" },
       "exclude": { "archived": true, "repos": ["your-org/skip-me"] }
     }
-  }
+  },
+  "sync": { "intervalMinutes": 60, "retryIntervalMinutes": 10 }
 }
 ```
 
@@ -44,12 +45,34 @@ Token resolution: `auth.githubToken` in config → the `token.env` env var → `
 
 ```bash
 muninn sync              # reconcile repos: fetch mirrors, build index, GC removed
+muninn sync --if-due     # sync only if the index is stale (what the agent runs)
 muninn sync --install    # schedule syncs via launchd (bakes token + ctags path into config)
-muninn status            # last sync result, per-repo failures, agent status
+muninn status            # last run, last success, per-repo failures, agent status
 muninn search "sym:NewServer case:yes repo:muninn"   # terminal search (zoekt syntax)
 muninn mcp               # MCP server over stdio
 muninn web               # local web UI at 127.0.0.1:7576 (Ctrl-C to stop)
 ```
+
+### Scheduling
+
+The launchd agent wakes every `sync.retryIntervalMinutes` and runs `sync
+--if-due`, which decides whether there is work to do:
+
+- Fresh (a success within `sync.intervalMinutes`, default 60): exit immediately.
+- Stale: sync.
+- Stale *and* the last run failed: reattempt every `sync.retryIntervalMinutes`
+  (default 10) instead of waiting out the full interval, so an expired token or
+  a wake with no network costs minutes rather than an hour.
+
+Because the cadence lives in the config rather than the plist, changing it does
+not need a reinstall. Runs are serialized by an advisory lock on
+`~/.local/state/muninn/sync.lock`; a run that finds it held exits without doing
+anything, so a scheduled tick can never collide with a manual `muninn sync`.
+
+Staleness is always measured from the last *successful* sync. A failed run
+records its cause and bumps a failure count, and every MCP tool warns while the
+index is stale or its sync is failing — a broken sync cannot masquerade as a
+fresh index.
 
 ### MCP
 

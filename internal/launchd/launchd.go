@@ -68,6 +68,7 @@ var plistTemplate = template.Must(template.New("plist").Parse(`<?xml version="1.
 	<array>
 		<string>{{.BinaryPath}}</string>
 		<string>sync</string>
+		<string>--if-due</string>
 		<string>--config</string>
 		<string>{{.ConfigPath}}</string>
 	</array>
@@ -93,17 +94,24 @@ type plistData struct {
 
 // Render produces the plist for the sync agent. binaryPath and configPath
 // must be absolute (launchd provides no working directory or shell env).
-// intervalMinutes <= 0 falls back to hourly.
-func Render(binaryPath, configPath, logPath string, intervalMinutes int) ([]byte, error) {
-	if intervalMinutes <= 0 {
-		intervalMinutes = defaultIntervalMinutes
+// tickMinutes <= 0 falls back to hourly.
+//
+// The job runs `sync --if-due`, so tickMinutes is only how often muninn
+// wakes to check: the cadence itself lives in the config and can change
+// without reinstalling the agent. A tick that finds the index fresh reads
+// one small JSON file and exits, which is why ticking well below the sync
+// interval is cheap — and what makes faster reattempts after a failure
+// possible at all, since StartInterval cannot vary at runtime.
+func Render(binaryPath, configPath, logPath string, tickMinutes int) ([]byte, error) {
+	if tickMinutes <= 0 {
+		tickMinutes = defaultIntervalMinutes
 	}
 	var buf bytes.Buffer
 	err := plistTemplate.Execute(&buf, plistData{
 		Label:         Label,
 		BinaryPath:    binaryPath,
 		ConfigPath:    configPath,
-		StartInterval: intervalMinutes * 60,
+		StartInterval: tickMinutes * 60,
 		LogPath:       logPath,
 	})
 	if err != nil {

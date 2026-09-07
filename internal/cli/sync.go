@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -15,12 +16,13 @@ import (
 	"github.com/broderick-westrope/muninn/internal/index"
 	"github.com/broderick-westrope/muninn/internal/launchd"
 	"github.com/broderick-westrope/muninn/internal/mirror"
+	"github.com/broderick-westrope/muninn/internal/status"
 	muninnsync "github.com/broderick-westrope/muninn/internal/sync"
 	"github.com/broderick-westrope/muninn/internal/xdg"
 )
 
 func newSyncCmd() *cobra.Command {
-	var install, uninstall bool
+	var install, uninstall, ifDue bool
 	cmd := &cobra.Command{
 		Use:   "sync",
 		Short: "Reconcile repos: clone/fetch mirrors, build index, GC removed repos",
@@ -33,11 +35,12 @@ func newSyncCmd() *cobra.Command {
 			case uninstall:
 				return runUninstall(cmd)
 			}
-			return runSync(cmd)
+			return runSync(cmd, ifDue)
 		},
 	}
 	cmd.Flags().BoolVar(&install, "install", false, "install the scheduled launchd sync agent")
 	cmd.Flags().BoolVar(&uninstall, "uninstall", false, "remove the scheduled launchd sync agent")
+	cmd.Flags().BoolVar(&ifDue, "if-due", false, "only sync when the index is stale (used by the scheduled agent)")
 	return cmd
 }
 
@@ -51,8 +54,10 @@ func resolveConfigPath() string {
 
 // runSync executes the sync pipeline. Per-repo failures are reported in the
 // summary but exit zero; only total failure returns an error, so launchd
-// does not mark the job crashed for one bad repo.
-func runSync(cmd *cobra.Command) error {
+// does not mark the job crashed for one bad repo. A run skipped because
+// another is in flight or because the index is fresh also exits zero: with
+// --if-due most scheduled ticks end that way by design.
+func runSync(cmd *cobra.Command, ifDue bool) error {
 	// Git is a hard prerequisite, validated up front like ctags: fail the
 	// run loudly rather than failing every repo individually.
 	if err := gitcmd.Validate(); err != nil {
@@ -70,6 +75,7 @@ func runSync(cmd *cobra.Command) error {
 		return err
 	}
 
+	out := cmd.OutOrStdout()
 	st, err := muninnsync.Run(cmd.Context(), cfg, muninnsync.Deps{
 		Discoverer: &discover.Client{},
 		Mirror:     &mirror.Manager{BaseDir: xdg.MirrorsDir()},
@@ -78,8 +84,17 @@ func runSync(cmd *cobra.Command) error {
 		},
 		Token:      token,
 		StatusPath: xdg.StatusPath(),
+		LockPath:   xdg.LockPath(),
+		OnlyIfDue:  ifDue,
 	})
-	if err != nil {
+	switch {
+	case errors.Is(err, muninnsync.ErrLocked):
+		fmt.Fprintln(out, "another sync is already running — skipped")
+		return nil
+	case errors.Is(err, muninnsync.ErrNotDue):
+		fmt.Fprintf(out, "index is fresh (%s) — skipped\n", freshness(st))
+		return nil
+	case err != nil:
 		return err
 	}
 
@@ -91,8 +106,18 @@ func runSync(cmd *cobra.Command) error {
 			synced++
 		}
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "synced %d repos, %d failed — see muninn status\n", synced, failed)
+	fmt.Fprintf(out, "synced %d repos, %d failed — see muninn status\n", synced, failed)
 	return nil
+}
+
+// freshness describes how long ago the last successful sync finished, for
+// the skipped-run message.
+func freshness(st *status.SyncStatus) string {
+	age, ok := status.SuccessAge(st)
+	if !ok {
+		return "never synced"
+	}
+	return "last success " + age.Truncate(time.Second).String() + " ago"
 }
 
 // runInstall bakes everything into place for scheduled runs: launchd jobs
@@ -134,7 +159,7 @@ func runInstall(cmd *cobra.Command) error {
 		return fmt.Errorf("resolving executable symlinks: %w", err)
 	}
 
-	plist, err := launchd.Render(bin, cfgPath, xdg.LogPath(), cfg.Sync.IntervalMinutes)
+	plist, err := launchd.Render(bin, cfgPath, xdg.LogPath(), cfg.Sync.TickMinutes())
 	if err != nil {
 		return err
 	}
@@ -145,8 +170,8 @@ func runInstall(cmd *cobra.Command) error {
 	if err := launchd.Install(launchd.ExecLaunchctl{}, plistPath, plist); err != nil {
 		return err
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "installed launchd agent %s (%s); syncs every %d minutes, first run in %d minutes\n",
-		launchd.Label, plistPath, cfg.Sync.IntervalMinutes, cfg.Sync.IntervalMinutes)
+	fmt.Fprintf(cmd.OutOrStdout(), "installed launchd agent %s (%s); checks every %d minutes, syncs when the index is older than %d minutes, reattempts every %d minutes while failing\n",
+		launchd.Label, plistPath, cfg.Sync.TickMinutes(), cfg.Sync.IntervalMinutes, cfg.Sync.RetryIntervalMinutes)
 	return nil
 }
 

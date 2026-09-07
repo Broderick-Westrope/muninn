@@ -7,11 +7,14 @@ package mcp
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/broderick-westrope/muninn/internal/search"
+	"github.com/broderick-westrope/muninn/internal/status"
 )
 
 // staleAfter is how old the last successful sync may be before tools warn
@@ -19,10 +22,14 @@ import (
 const staleAfter = 24 * time.Hour
 
 // Staleness warning fragments shared by ListRepos and stalenessWarning so
-// every tool renders the identical wording.
+// every tool renders the identical wording. Staleness is always measured
+// from the last *successful* sync: a failing job still updates FinishedAt,
+// so warning on that would mean a broken index never looks stale.
 const (
-	noStatusWarning    = "WARNING: no sync status found; the index may be empty or stale — run `muninn sync`\n"
-	staleWarningFormat = "WARNING: index is stale: last sync finished %s ago — run `muninn sync`\n"
+	noStatusWarning       = "WARNING: no sync status found; the index may be empty or stale — run `muninn sync`\n"
+	neverSucceededWarning = "WARNING: no sync has ever succeeded; the index may be empty — run `muninn sync` to see why\n"
+	staleWarningFormat    = "WARNING: index is stale: last successful sync finished %s ago — run `muninn sync`\n"
+	degradedWarningFormat = "WARNING: the last %d sync attempt(s) failed (%s); the index is no longer being updated — run `muninn status`\n"
 )
 
 // instructions is sent to clients at initialization so agents know how to
@@ -79,6 +86,30 @@ func (s *Server) mcpServer() *sdk.Server {
 	sdk.AddTool(srv, &sdk.Tool{Name: "get_diff", Description: getDiffDescription}, textHandler(s.GetDiff))
 	sdk.AddTool(srv, &sdk.Tool{Name: "blame", Description: blameDescription}, textHandler(s.Blame))
 	return srv
+}
+
+// formatWarnings renders the staleness and degradation warnings for st, or
+// "" when the index is fresh and the last run succeeded. Degradation is
+// reported alongside staleness rather than instead of it: an index that is
+// still fresh but whose sync keeps failing is the early warning that
+// matters, since it is the state that silently becomes a stale one.
+func formatWarnings(st *status.SyncStatus) string {
+	var b strings.Builder
+	age, ok := status.SuccessAge(st)
+	switch {
+	case !ok:
+		b.WriteString(neverSucceededWarning)
+	case age > staleAfter:
+		fmt.Fprintf(&b, staleWarningFormat, formatAge(age))
+	}
+	if status.Degraded(st) {
+		reason := st.Error
+		if reason == "" {
+			reason = "cause not recorded"
+		}
+		fmt.Fprintf(&b, degradedWarningFormat, max(st.ConsecutiveFailures, 1), reason)
+	}
+	return b.String()
 }
 
 // textHandler adapts a text-returning tool method to the SDK's typed

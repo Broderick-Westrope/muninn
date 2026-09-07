@@ -15,6 +15,7 @@ import (
 	"github.com/broderick-westrope/muninn/internal/config"
 	"github.com/broderick-westrope/muninn/internal/discover"
 	"github.com/broderick-westrope/muninn/internal/index"
+	"github.com/broderick-westrope/muninn/internal/lock"
 	"github.com/broderick-westrope/muninn/internal/mirror"
 	"github.com/broderick-westrope/muninn/internal/status"
 )
@@ -85,6 +86,7 @@ func newEnv(t *testing.T) *env {
 func (e *env) indexDir() string   { return filepath.Join(e.base, "index") }
 func (e *env) mirrorsDir() string { return filepath.Join(e.base, "mirrors") }
 func (e *env) statusPath() string { return filepath.Join(e.base, "status.json") }
+func (e *env) lockPath() string   { return filepath.Join(e.base, "sync.lock") }
 
 func (e *env) indexer() *index.Indexer {
 	return &index.Indexer{IndexDir: e.indexDir()}
@@ -104,6 +106,7 @@ func (e *env) deps(d Discoverer, newIx func(string) Indexer) Deps {
 		NewIndexer:   newIx,
 		ResolveCtags: func(string) (string, error) { return "", nil },
 		StatusPath:   e.statusPath(),
+		LockPath:     e.lockPath(),
 	}
 }
 
@@ -423,6 +426,12 @@ func TestRunIndexConcurrencyBounded(t *testing.T) {
 	}
 }
 
+// TestRunInvalidCtagsFailsRun covers the total-failure recording contract:
+// a ctags path that no longer resolves (it is baked into the config at
+// install time, so this breaks every scheduled run at once) must fail the
+// run *and* record it. Returning without writing status would leave the
+// last good run's timestamps in place, making a permanently broken sync
+// indistinguishable from a healthy one.
 func TestRunInvalidCtagsFailsRun(t *testing.T) {
 	e := newEnv(t)
 	deps := e.deps(&stubDiscoverer{}, nil)
@@ -431,8 +440,21 @@ func TestRunInvalidCtagsFailsRun(t *testing.T) {
 	if _, err := Run(context.Background(), &config.Config{}, deps); err == nil {
 		t.Fatal("Run with invalid ctags: want error, got nil")
 	}
-	if _, err := os.Stat(e.statusPath()); !errors.Is(err, fs.ErrNotExist) {
-		t.Errorf("status file written despite ctags hard failure (err = %v)", err)
+	onDisk, err := status.Read(e.statusPath())
+	if err != nil {
+		t.Fatalf("ctags hard failure was not recorded: %v", err)
+	}
+	if onDisk.Success {
+		t.Error("Success = true, want false")
+	}
+	if !onDisk.LastSuccessAt.IsZero() {
+		t.Errorf("LastSuccessAt = %v, want zero: a failed run must not advance the success clock", onDisk.LastSuccessAt)
+	}
+	if !strings.Contains(onDisk.Error, "ctags") {
+		t.Errorf("Error = %q, want the ctags cause", onDisk.Error)
+	}
+	if onDisk.ConsecutiveFailures != 1 {
+		t.Errorf("ConsecutiveFailures = %d, want 1", onDisk.ConsecutiveFailures)
 	}
 }
 
@@ -528,4 +550,213 @@ func TestRunMaybeGCFailureKeepsRepoSynced(t *testing.T) {
 	if !strings.Contains(rs.Error, "gc boom") {
 		t.Errorf("Error = %q, want the gc failure recorded", rs.Error)
 	}
+}
+
+func TestRunSuccessAdvancesSuccessClock(t *testing.T) {
+	src, _ := fixtureRepo(t)
+	e := newEnv(t)
+	deps := e.deps(&stubDiscoverer{repos: []discover.Repo{fileRepo("acme/a", src)}}, nil)
+
+	st, err := Run(context.Background(), &config.Config{}, deps)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !st.LastSuccessAt.Equal(st.FinishedAt) {
+		t.Errorf("LastSuccessAt = %v, want FinishedAt %v", st.LastSuccessAt, st.FinishedAt)
+	}
+	if st.ConsecutiveFailures != 0 || st.Error != "" {
+		t.Errorf("failure state = %d/%q, want cleared on success", st.ConsecutiveFailures, st.Error)
+	}
+	if status.Degraded(st) {
+		t.Error("Degraded = true after a fully successful run")
+	}
+}
+
+// TestRunFailureDoesNotAdvanceSuccessClock is the regression test for the
+// bug that made repeated failures invisible: every run set FinishedAt, and
+// staleness was measured from it, so an index that had not updated in days
+// still reported as minutes old.
+func TestRunFailureDoesNotAdvanceSuccessClock(t *testing.T) {
+	src, _ := fixtureRepo(t)
+	e := newEnv(t)
+	repo := fileRepo("acme/a", src)
+
+	good, err := Run(context.Background(), &config.Config{}, e.deps(&stubDiscoverer{repos: []discover.Repo{repo}}, nil))
+	if err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	firstSuccess := good.LastSuccessAt
+
+	// Two failing runs in a row: per-repo failure, then total failure.
+	failIx := func(string) Indexer { return failingIndexer{e.indexer()} }
+	bad, err := Run(context.Background(), &config.Config{}, e.deps(&stubDiscoverer{repos: []discover.Repo{repo}}, failIx))
+	if err != nil {
+		t.Fatalf("second Run: %v", err)
+	}
+	aborted, err := Run(context.Background(), &config.Config{}, e.deps(&stubDiscoverer{err: errors.New("discovery boom")}, nil))
+	if err == nil {
+		t.Fatal("third Run: want discovery error, got nil")
+	}
+
+	for name, st := range map[string]*status.SyncStatus{"per-repo failure": bad, "total failure": aborted} {
+		if !st.LastSuccessAt.Equal(firstSuccess) {
+			t.Errorf("%s: LastSuccessAt = %v, want the first success %v", name, st.LastSuccessAt, firstSuccess)
+		}
+		if !st.FinishedAt.After(st.LastSuccessAt) {
+			t.Errorf("%s: FinishedAt %v not after LastSuccessAt %v", name, st.FinishedAt, st.LastSuccessAt)
+		}
+		if !status.Degraded(st) {
+			t.Errorf("%s: Degraded = false, want true", name)
+		}
+		if st.Error == "" {
+			t.Errorf("%s: Error is empty, want a recorded cause", name)
+		}
+	}
+	if bad.ConsecutiveFailures != 1 {
+		t.Errorf("ConsecutiveFailures after one failure = %d, want 1", bad.ConsecutiveFailures)
+	}
+	if aborted.ConsecutiveFailures != 2 {
+		t.Errorf("ConsecutiveFailures after two failures = %d, want 2", aborted.ConsecutiveFailures)
+	}
+
+	// Recovery clears the counter and moves the clock forward.
+	recovered, err := Run(context.Background(), &config.Config{}, e.deps(&stubDiscoverer{repos: []discover.Repo{repo}}, nil))
+	if err != nil {
+		t.Fatalf("recovery Run: %v", err)
+	}
+	if !recovered.LastSuccessAt.After(firstSuccess) {
+		t.Errorf("LastSuccessAt = %v, want later than %v after recovery", recovered.LastSuccessAt, firstSuccess)
+	}
+	if recovered.ConsecutiveFailures != 0 {
+		t.Errorf("ConsecutiveFailures = %d, want 0 after recovery", recovered.ConsecutiveFailures)
+	}
+}
+
+func TestRunSkipsWhenLockHeld(t *testing.T) {
+	src, _ := fixtureRepo(t)
+	e := newEnv(t)
+	deps := e.deps(&stubDiscoverer{repos: []discover.Repo{fileRepo("acme/a", src)}}, nil)
+
+	held, err := lock.TryAcquire(e.lockPath())
+	if err != nil {
+		t.Fatalf("TryAcquire: %v", err)
+	}
+	defer held.Release()
+
+	if _, err := Run(context.Background(), &config.Config{}, deps); !errors.Is(err, ErrLocked) {
+		t.Errorf("Run with the lock held: err = %v, want ErrLocked", err)
+	}
+	// A skipped run must not touch anything, including the status file.
+	if _, err := os.Stat(e.statusPath()); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("skipped run wrote status (err = %v)", err)
+	}
+
+	if err := held.Release(); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	if _, err := Run(context.Background(), &config.Config{}, deps); err != nil {
+		t.Errorf("Run after the lock was released: %v", err)
+	}
+}
+
+func TestRunRequiresLockPath(t *testing.T) {
+	e := newEnv(t)
+	deps := e.deps(&stubDiscoverer{}, nil)
+	deps.LockPath = ""
+
+	_, err := Run(context.Background(), &config.Config{}, deps)
+	if err == nil || !strings.Contains(err.Error(), "LockPath") {
+		t.Errorf("err = %v, want a Deps validation error naming LockPath", err)
+	}
+}
+
+func TestRunOnlyIfDue(t *testing.T) {
+	src, _ := fixtureRepo(t)
+	cfg := &config.Config{Sync: config.SyncConfig{IntervalMinutes: 60, RetryIntervalMinutes: 10}}
+
+	// A fresh success: the scheduled tick must do nothing.
+	t.Run("fresh", func(t *testing.T) {
+		e := newEnv(t)
+		deps := e.deps(&stubDiscoverer{repos: []discover.Repo{fileRepo("acme/a", src)}}, nil)
+		if _, err := Run(context.Background(), cfg, deps); err != nil {
+			t.Fatalf("seed Run: %v", err)
+		}
+		before, err := status.Read(e.statusPath())
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		deps.OnlyIfDue = true
+		if _, err := Run(context.Background(), cfg, deps); !errors.Is(err, ErrNotDue) {
+			t.Errorf("err = %v, want ErrNotDue", err)
+		}
+		after, err := status.Read(e.statusPath())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !after.FinishedAt.Equal(before.FinishedAt) {
+			t.Error("a not-due run rewrote the status file")
+		}
+	})
+
+	// Stale beyond the interval: the tick syncs.
+	t.Run("stale", func(t *testing.T) {
+		e := newEnv(t)
+		deps := e.deps(&stubDiscoverer{repos: []discover.Repo{fileRepo("acme/a", src)}}, nil)
+		if _, err := Run(context.Background(), cfg, deps); err != nil {
+			t.Fatalf("seed Run: %v", err)
+		}
+
+		// Two hours after the recorded success, the index is past the
+		// hourly interval and the tick must run.
+		deps.OnlyIfDue = true
+		deps.Now = func() time.Time { return time.Now().Add(2 * time.Hour) }
+		st, err := Run(context.Background(), cfg, deps)
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if !st.Success {
+			t.Errorf("Success = false, want true: %+v", st.Repos)
+		}
+	})
+
+	// Degraded and stale: reattempts follow the retry cadence, which is
+	// why a tick minutes after a failure runs instead of waiting out the
+	// full interval.
+	t.Run("degraded", func(t *testing.T) {
+		e := newEnv(t)
+		repo := fileRepo("acme/a", src)
+		failIx := func(string) Indexer { return failingIndexer{e.indexer()} }
+		failed := e.deps(&stubDiscoverer{repos: []discover.Repo{repo}}, failIx)
+		if _, err := Run(context.Background(), cfg, failed); err != nil {
+			t.Fatalf("seed Run: %v", err)
+		}
+		prev, err := status.Read(e.statusPath())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !status.Degraded(prev) {
+			t.Fatal("seed run is not degraded")
+		}
+
+		deps := e.deps(&stubDiscoverer{repos: []discover.Repo{repo}}, nil)
+		deps.OnlyIfDue = true
+
+		// Five minutes on: stale but inside the retry cooldown.
+		deps.Now = func() time.Time { return prev.FinishedAt.Add(5 * time.Minute) }
+		if _, err := Run(context.Background(), cfg, deps); !errors.Is(err, ErrNotDue) {
+			t.Errorf("5m after a failure: err = %v, want ErrNotDue", err)
+		}
+
+		// Eleven minutes on: the retry interval has elapsed, so the
+		// reattempt happens well before the hourly interval would.
+		deps.Now = func() time.Time { return prev.FinishedAt.Add(11 * time.Minute) }
+		st, err := Run(context.Background(), cfg, deps)
+		if err != nil {
+			t.Fatalf("11m after a failure: %v", err)
+		}
+		if !st.Success {
+			t.Errorf("Success = false, want true: %+v", st.Repos)
+		}
+	})
 }

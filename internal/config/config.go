@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 type Config struct {
@@ -50,6 +51,29 @@ type CtagsConfig struct {
 
 type SyncConfig struct {
 	IntervalMinutes int `json:"intervalMinutes,omitempty"`
+	// RetryIntervalMinutes is the cadence used while the index is stale and
+	// the last run failed, so a transient failure is reattempted in minutes
+	// instead of costing a full interval. Clamped to IntervalMinutes.
+	RetryIntervalMinutes int `json:"retryIntervalMinutes,omitempty"`
+}
+
+// Interval is how old a successful sync may be before another is due.
+func (s SyncConfig) Interval() time.Duration {
+	return time.Duration(s.IntervalMinutes) * time.Minute
+}
+
+// RetryInterval is the reattempt cadence while the index is stale and the
+// last run failed.
+func (s SyncConfig) RetryInterval() time.Duration {
+	return time.Duration(s.RetryIntervalMinutes) * time.Minute
+}
+
+// TickMinutes is how often the scheduler must wake to be able to honor both
+// cadences. The scheduled job runs with --if-due, so most ticks are a
+// status read and an immediate exit; the due check, not the tick, decides
+// whether work happens.
+func (s SyncConfig) TickMinutes() int {
+	return min(s.IntervalMinutes, s.RetryIntervalMinutes)
 }
 
 type EditorConfig struct {
@@ -61,7 +85,10 @@ type EditorConfig struct {
 	Roots []string `json:"roots,omitempty"`
 }
 
-const defaultSyncIntervalMinutes = 60
+const (
+	defaultSyncIntervalMinutes   = 60
+	defaultSyncRetryIntervalMins = 10
+)
 
 // Load reads, parses, validates, and applies defaults to the config at path.
 // Unknown top-level fields (e.g. Sourcebot's "models") are ignored.
@@ -106,6 +133,14 @@ func validate(c *Config) error {
 func applyDefaults(c *Config) {
 	if c.Sync.IntervalMinutes <= 0 {
 		c.Sync.IntervalMinutes = defaultSyncIntervalMinutes
+	}
+	if c.Sync.RetryIntervalMinutes <= 0 {
+		c.Sync.RetryIntervalMinutes = defaultSyncRetryIntervalMins
+	}
+	// A retry slower than the normal cadence would make failures back off
+	// rather than reattempt, inverting the point of the setting.
+	if c.Sync.RetryIntervalMinutes > c.Sync.IntervalMinutes {
+		c.Sync.RetryIntervalMinutes = c.Sync.IntervalMinutes
 	}
 	if c.Editor.Scheme == "" {
 		c.Editor.Scheme = "cursor"

@@ -8,6 +8,7 @@
 	<array>
 		<string>/usr/local/bin/muninn</string>
 		<string>sync</string>
+		<string>--if-due</string>
 		<string>--config</string>
 		<string>/Users/test/.config/muninn/config.json</string>
 	</array>

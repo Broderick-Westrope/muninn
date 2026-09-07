@@ -54,7 +54,7 @@ brews:
     caveats: |
       Create ~/.config/muninn/config.json (see the README for the schema), then:
         muninn sync             # first sync: clone mirrors + build the index
-        muninn sync --install   # schedule hourly syncs via launchd
+        muninn sync --install   # schedule syncs via launchd (hourly by default)
 
       Add to your agent's MCP config:
         { "command": "muninn", "args": ["mcp"] }

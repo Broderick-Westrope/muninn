@@ -51,6 +51,11 @@ func LogPath() string {
 	return filepath.Join(StateDir(), "sync.log")
 }
 
+// LockPath returns the path to the lock file that serializes sync runs.
+func LockPath() string {
+	return filepath.Join(StateDir(), "sync.lock")
+}
+
 // EnsureDirs creates the config, mirrors, index, and state directories
 // with 0700 permissions if they do not already exist.
 func EnsureDirs() error {

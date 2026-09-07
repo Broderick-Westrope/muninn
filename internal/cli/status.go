@@ -41,9 +41,17 @@ func newStatusCmd() *cobra.Command {
 
 func printStatus(out io.Writer, st *status.SyncStatus) error {
 	if st.FinishedAt.IsZero() {
-		fmt.Fprintf(out, "last sync: started %s, not finished (in progress or interrupted)\n", st.StartedAt.Format(time.RFC1123))
+		fmt.Fprintf(out, "last run: started %s, not finished (in progress or interrupted)\n", st.StartedAt.Format(time.RFC1123))
 	} else {
-		fmt.Fprintf(out, "last sync: %s (%s ago)\n", st.FinishedAt.Format(time.RFC1123), status.Age(st).Truncate(time.Second))
+		fmt.Fprintf(out, "last run: %s (%s ago)\n", st.FinishedAt.Format(time.RFC1123), status.Age(st).Truncate(time.Second))
+	}
+	// The success clock is reported separately from the attempt clock: a
+	// job that fails every hour keeps "last run" recent while the index
+	// silently rots, and only this line reveals it.
+	if age, ok := status.SuccessAge(st); ok {
+		fmt.Fprintf(out, "last success: %s (%s ago)\n", st.LastSuccessAt.Format(time.RFC1123), age.Truncate(time.Second))
+	} else {
+		fmt.Fprintln(out, "last success: never")
 	}
 
 	failed := failedRepos(st)
@@ -54,6 +62,12 @@ func printStatus(out io.Writer, st *status.SyncStatus) error {
 		fmt.Fprintf(out, "result: failed (run aborted; %d repos retained from previous run)\n", len(st.Repos))
 	default:
 		fmt.Fprintf(out, "result: failed (%d of %d repos)\n", len(failed), len(st.Repos))
+	}
+	if st.Error != "" {
+		fmt.Fprintf(out, "error: %s\n", st.Error)
+	}
+	if st.ConsecutiveFailures > 0 {
+		fmt.Fprintf(out, "consecutive failures: %d\n", st.ConsecutiveFailures)
 	}
 
 	if len(failed) > 0 {

@@ -157,17 +157,19 @@ func (s *Server) ListRepos(ctx context.Context, args ListReposArgs) (string, err
 		return "", err
 	}
 
-	// One status read feeds both the staleness warning and the sync-age
-	// line so they can never disagree.
+	// One status read feeds the warnings and the sync-age lines so they
+	// can never disagree.
 	var b strings.Builder
 	if st, err := status.Read(s.statusPath); err != nil {
 		b.WriteString(noStatusWarning)
 	} else {
-		age := status.Age(st)
-		if age > staleAfter {
-			fmt.Fprintf(&b, staleWarningFormat, formatAge(age))
+		b.WriteString(formatWarnings(st))
+		fmt.Fprintf(&b, "last sync: %s (%s ago)\n", st.FinishedAt.Format(time.RFC3339), formatAge(status.Age(st)))
+		// Only shown when the two clocks disagree; when they match the
+		// line above already says it.
+		if age, ok := status.SuccessAge(st); ok && status.Degraded(st) {
+			fmt.Fprintf(&b, "last success: %s (%s ago)\n", st.LastSuccessAt.Format(time.RFC3339), formatAge(age))
 		}
-		fmt.Fprintf(&b, "last sync: %s (%s ago)\n", st.FinishedAt.Format(time.RFC3339), formatAge(age))
 	}
 
 	shown := 0
