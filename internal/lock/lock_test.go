@@ -2,10 +2,12 @@ package lock
 
 import (
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestTryAcquireExcludesSecondHolder(t *testing.T) {
@@ -70,12 +72,8 @@ func TestLockFileSurvivesRelease(t *testing.T) {
 // TestLockReleasedOnProcessDeath is the property a PID file could not give
 // us: a holder killed without cleanup must not wedge the lock forever.
 func TestLockReleasedOnProcessDeath(t *testing.T) {
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skip("sh not available")
-	}
 	path := filepath.Join(t.TempDir(), "sync.lock")
 
-	held := make(chan struct{})
 	cmd := exec.Command(os.Args[0], "-test.run=TestLockHolderHelper")
 	cmd.Env = append(os.Environ(), "MUNINN_LOCK_HELPER_PATH="+path)
 	stdout, err := cmd.StdoutPipe()
@@ -85,12 +83,35 @@ func TestLockReleasedOnProcessDeath(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
+	// The helper blocks forever by design, so it is killed unconditionally
+	// rather than only on the success path: a t.Fatal below would
+	// otherwise leak it for the lifetime of the test binary.
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+
+	type ready struct {
+		n   int
+		err error
+	}
+	held := make(chan ready, 1)
 	go func() {
-		buf := make([]byte, 8)
-		stdout.Read(buf)
-		close(held)
+		buf := make([]byte, len("locked\n"))
+		n, err := io.ReadFull(stdout, buf)
+		held <- ready{n, err}
 	}()
-	<-held
+	select {
+	case r := <-held:
+		// Without checking the read, a helper that dies before writing
+		// would fall through and fail on the ErrLocked assertion instead,
+		// reporting the wrong cause.
+		if r.err != nil {
+			t.Fatalf("helper did not announce the lock: %v", r.err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("timed out waiting for the helper to take the lock")
+	}
 
 	if _, err := TryAcquire(path); !errors.Is(err, ErrLocked) {
 		t.Errorf("TryAcquire while helper holds the lock: err = %v, want ErrLocked", err)

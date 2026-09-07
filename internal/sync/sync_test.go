@@ -739,14 +739,22 @@ func TestRunOnlyIfDue(t *testing.T) {
 
 	// Degraded and stale: reattempts follow the retry cadence, which is
 	// why a tick minutes after a failure runs instead of waiting out the
-	// full interval.
+	// full interval. The seed establishes a real prior success first, so
+	// this exercises degraded-after-success rather than never-succeeded.
 	t.Run("degraded", func(t *testing.T) {
 		e := newEnv(t)
 		repo := fileRepo("acme/a", src)
+		if _, err := Run(context.Background(), cfg, e.deps(&stubDiscoverer{repos: []discover.Repo{repo}}, nil)); err != nil {
+			t.Fatalf("seed success: %v", err)
+		}
+
+		// Fail a run two hours later, putting the last success outside the
+		// interval while the last attempt is recent.
 		failIx := func(string) Indexer { return failingIndexer{e.indexer()} }
 		failed := e.deps(&stubDiscoverer{repos: []discover.Repo{repo}}, failIx)
+		failed.Now = func() time.Time { return time.Now().Add(2 * time.Hour) }
 		if _, err := Run(context.Background(), cfg, failed); err != nil {
-			t.Fatalf("seed Run: %v", err)
+			t.Fatalf("seed failure: %v", err)
 		}
 		prev, err := status.Read(e.statusPath())
 		if err != nil {
@@ -754,6 +762,9 @@ func TestRunOnlyIfDue(t *testing.T) {
 		}
 		if !status.Degraded(prev) {
 			t.Fatal("seed run is not degraded")
+		}
+		if prev.LastSuccessAt.IsZero() {
+			t.Fatal("seed has no prior success, so this would test the never-succeeded branch")
 		}
 
 		deps := e.deps(&stubDiscoverer{repos: []discover.Repo{repo}}, nil)
@@ -774,6 +785,36 @@ func TestRunOnlyIfDue(t *testing.T) {
 		}
 		if !st.Success {
 			t.Errorf("Success = false, want true: %+v", st.Repos)
+		}
+	})
+
+	// Never succeeded: the retry cadence applies from the failed attempt,
+	// covering the branch the degraded subtest used to hit by accident.
+	t.Run("never succeeded", func(t *testing.T) {
+		e := newEnv(t)
+		repo := fileRepo("acme/a", src)
+		failIx := func(string) Indexer { return failingIndexer{e.indexer()} }
+		if _, err := Run(context.Background(), cfg, e.deps(&stubDiscoverer{repos: []discover.Repo{repo}}, failIx)); err != nil {
+			t.Fatalf("seed Run: %v", err)
+		}
+		prev, err := status.Read(e.statusPath())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !prev.LastSuccessAt.IsZero() {
+			t.Fatal("seed unexpectedly succeeded")
+		}
+
+		deps := e.deps(&stubDiscoverer{repos: []discover.Repo{repo}}, nil)
+		deps.OnlyIfDue = true
+
+		deps.Now = func() time.Time { return prev.FinishedAt.Add(5 * time.Minute) }
+		if _, err := Run(context.Background(), cfg, deps); !errors.Is(err, ErrNotDue) {
+			t.Errorf("5m after a failure: err = %v, want ErrNotDue", err)
+		}
+		deps.Now = func() time.Time { return prev.FinishedAt.Add(11 * time.Minute) }
+		if _, err := Run(context.Background(), cfg, deps); err != nil {
+			t.Fatalf("11m after a failure: %v", err)
 		}
 	})
 }

@@ -35,7 +35,7 @@ Results are capped at 'limit' line matches (default 50, max 200); a truncation n
 
 const globDescription = `Find files by path glob across all indexed repos. Supports *, ?, ** and {a,b} alternation; matching is case-insensitive against the full path within each repo (e.g. '**/*.go', 'src/**/*.{ts,tsx}'). Results are capped at 'limit' files (default 100, max 500) and grouped by repo.`
 
-const listReposDescription = `List indexed repositories: name, branch, and indexed commit, plus the age of the last sync. Optional 'query' regex filters by repo name. Output starts with a staleness warning when the index is older than 24h or has never been synced.`
+const listReposDescription = `List indexed repositories: name, branch, and indexed commit, plus the age of the last sync. Optional 'query' regex filters by repo name. Output starts with a warning when the last successful sync is over 24h old, has never happened, or when syncs are currently failing.`
 
 // GrepArgs are the parameters of the grep tool.
 type GrepArgs struct {

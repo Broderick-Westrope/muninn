@@ -43,9 +43,13 @@ Token resolution, per run: `auth.githubToken` in config → the `token.env` env 
 → `gh auth token`. `gh` is preferred for scheduled syncs because it re-resolves
 every run and so survives token rotation and expiry. muninn never writes a
 token to the config itself; `--install` records the *path* to `gh` (and to
-`ctags`) because launchd's PATH excludes Homebrew. A token reachable only
-through your shell environment cannot be seen by a launchd job, and
-`--install` warns when that is all it found.
+`ctags`) because launchd's PATH excludes Homebrew.
+
+`--install` warns about the two sources a scheduled run cannot rely on: a token
+reachable only through your shell environment (invisible to a launchd job), and
+one stored in `auth.githubToken` (it takes precedence over `gh` and does not
+rotate, so every sync fails once it expires). If an older muninn baked a token
+into your config, delete that field to get per-run resolution back.
 
 ## Usage
 
@@ -62,29 +66,37 @@ muninn web               # local web UI at 127.0.0.1:7576 (Ctrl-C to stop)
 ### Scheduling
 
 The launchd agent wakes every `sync.retryIntervalMinutes` and runs `sync
---if-due`, which decides whether there is work to do:
+--if-due --no-repair`, which decides whether there is work to do:
 
 - Fresh (a success within `sync.intervalMinutes`, default 60): exit immediately.
 - Stale: sync.
-- Stale *and* the last run failed: reattempt every `sync.retryIntervalMinutes`
-  (default 10) instead of waiting out the full interval, so an expired token or
-  a wake with no network costs minutes rather than an hour.
+- Stale *and* the last run failed or was interrupted: reattempt every
+  `sync.retryIntervalMinutes` (default 10) instead of waiting out the full
+  interval, so an expired token or a wake with no network costs minutes rather
+  than an hour.
 
 Because the cadence lives in the config rather than the plist, changing it does
 not need a reinstall. Runs are serialized by an advisory lock on
-`~/.local/state/muninn/sync.lock`; a run that finds it held exits without doing
-anything, so a scheduled tick can never collide with a manual `muninn sync`.
+`~/.local/state/muninn/sync.lock`: a run that finds it held exits without doing
+anything, so two syncs never touch the mirrors or the index at once. (On a
+filesystem that does not support `flock` the run proceeds with a warning
+instead of aborting.)
 
 The plist records the binary path as installed (e.g. `/opt/homebrew/bin/muninn`)
 rather than resolving it through symlinks, so a package upgrade that repoints
 that symlink does not leave launchd spawning a deleted versioned path. If the
-agent does drift out of sync with the binary or config, an interactive `muninn
-sync` repairs it, and `muninn status` reports it either way.
+binary the plist names goes missing anyway, an interactive `muninn sync`
+reinstalls the agent — only in that case, so that a `go run` or scratch build
+cannot capture the schedule. `muninn status` reports the agent's real state,
+asking launchd whether the job is loaded rather than trusting the plist on
+disk.
 
-Staleness is always measured from the last *successful* sync. A failed run
-records its cause and bumps a failure count, and every MCP tool warns while the
-index is stale or its sync is failing — a broken sync cannot masquerade as a
-fresh index.
+Staleness is always measured from the last *successful* sync, and a failed run
+records its cause and bumps a failure count. `list_repos` and the history tools
+warn while the index is stale or its sync is failing; `muninn status` is the
+full picture. A broken sync cannot masquerade as a fresh index: a discovery
+that returns nothing, a clock that has moved backwards, and a run that died
+mid-flight are all reported rather than recorded as success.
 
 ### MCP
 
