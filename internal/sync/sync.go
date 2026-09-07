@@ -122,12 +122,20 @@ func Run(ctx context.Context, cfg *config.Config, deps Deps) (*status.SyncStatus
 	// state no other run can be mutating: without it two schedulers firing
 	// together would both read "due" and both proceed.
 	lk, err := lock.TryAcquire(deps.LockPath)
-	if err != nil {
-		if errors.Is(err, lock.ErrLocked) {
-			prev, _ := status.Read(deps.StatusPath)
-			return prev, fmt.Errorf("%w: %w", ErrLocked, err)
-		}
-		return nil, err
+	switch {
+	case errors.Is(err, lock.ErrLocked):
+		prev, _ := status.Read(deps.StatusPath)
+		return prev, fmt.Errorf("%w: %w", ErrLocked, err)
+	case errors.Is(err, lock.ErrUnsupported):
+		// Losing the concurrency guarantee is not a reason to stop
+		// indexing; the caller warns and the run proceeds unprotected.
+		fmt.Fprintf(os.Stderr, "muninn: %v; concurrent syncs are not prevented\n", err)
+	case err != nil:
+		// Every run must end with a status write, or a scheduled job that
+		// dies here is indistinguishable from one that never fired.
+		st := &status.SyncStatus{StartedAt: now(), Repos: make(map[string]status.RepoStatus)}
+		prev, _ := status.Read(deps.StatusPath)
+		return abortFromPrev(deps.StatusPath, st, prev, now(), err)
 	}
 	defer func() {
 		if err := lk.Release(); err != nil {
@@ -139,7 +147,10 @@ func Run(ctx context.Context, cfg *config.Config, deps Deps) (*status.SyncStatus
 	// repo (or the whole run) fails before indexing a new tip.
 	prev, err := status.Read(deps.StatusPath)
 	if err != nil && !errors.Is(err, status.ErrNotExist) {
-		return nil, fmt.Errorf("reading previous status: %w", err)
+		// A corrupt status file must still be recorded as a failed run:
+		// abortRun overwrites it, which also repairs the corruption.
+		st := &status.SyncStatus{StartedAt: now(), Repos: make(map[string]status.RepoStatus)}
+		return abortRun(deps.StatusPath, st, nil, preReconcile, now(), fmt.Errorf("reading previous status: %w", err))
 	}
 	prevRepos := map[string]status.RepoStatus{}
 	if prev != nil && prev.Repos != nil {
@@ -157,6 +168,16 @@ func Run(ctx context.Context, cfg *config.Config, deps Deps) (*status.SyncStatus
 		// must still see the real staleness while FinishedAt is zero.
 		st.LastSuccessAt = prev.LastSuccessAt
 		st.ConsecutiveFailures = prev.ConsecutiveFailures
+		st.Error = prev.Error
+		// A previous run that started but never finished died before it
+		// could record anything. Holding the lock proves it is not still
+		// running, so count it now: otherwise a sync killed every time
+		// (OOM, sleep) leaves the failure count frozen and the cause
+		// blank, which reads as healthy until the index goes stale.
+		if status.Interrupted(prev) {
+			st.ConsecutiveFailures++
+			st.Error = "previous run was interrupted before it finished"
+		}
 	}
 
 	// ctags is a hard prerequisite: fail the whole run loudly rather than
@@ -167,14 +188,25 @@ func Run(ctx context.Context, cfg *config.Config, deps Deps) (*status.SyncStatus
 	// fired.
 	ctagsPath, err := resolveCtags(cfg.Ctags.Path)
 	if err != nil {
-		return abortRun(deps.StatusPath, st, prevRepos, now(), fmt.Errorf("validating ctags: %w", err))
+		return abortRun(deps.StatusPath, st, prevRepos, preReconcile, now(), fmt.Errorf("validating ctags: %w", err))
 	}
 	ix := deps.NewIndexer(ctagsPath)
 
 	repos, err := deps.Discoverer.Discover(ctx, cfg, deps.Token)
 	if err != nil {
 		// Without the full desired list reconciliation cannot GC safely.
-		return abortRun(deps.StatusPath, st, prevRepos, now(), fmt.Errorf("discovering repos: %w", err))
+		return abortRun(deps.StatusPath, st, prevRepos, preReconcile, now(), fmt.Errorf("discovering repos: %w", err))
+	}
+	// An empty result is treated as a failed discovery rather than an
+	// instruction to delete everything. The config is validated to name at
+	// least one org or repo, so "nothing desired" means discovery lied:
+	// most plausibly a token that lost org visibility, which the GitHub
+	// API reports as an empty list rather than an error. Obeying it would
+	// GC every mirror and shard and then record a fully successful,
+	// perfectly fresh sync over an empty index.
+	if len(repos) == 0 {
+		return abortRun(deps.StatusPath, st, prevRepos, preReconcile, now(),
+			errors.New("discovery returned no repositories; refusing to GC the whole index (check the token's org visibility)"))
 	}
 
 	desired := make(map[string]bool, len(repos))
@@ -190,13 +222,15 @@ func Run(ctx context.Context, cfg *config.Config, deps Deps) (*status.SyncStatus
 	}
 
 	if err := reconcile(deps.Mirror, ix, desired, prevRepos, st); err != nil {
-		return abortRun(deps.StatusPath, st, prevRepos, now(), err)
+		// reconcile may have deleted some repos before failing, so the
+		// backfill is filtered from here on.
+		return abortRun(deps.StatusPath, st, prevRepos, desired, now(), err)
 	}
 	if err := ix.CleanTmp(); err != nil {
-		return abortRun(deps.StatusPath, st, prevRepos, now(), fmt.Errorf("cleaning stale tmp shards: %w", err))
+		return abortRun(deps.StatusPath, st, prevRepos, desired, now(), fmt.Errorf("cleaning stale tmp shards: %w", err))
 	}
 	if err := deps.Mirror.CleanTmp(); err != nil {
-		return abortRun(deps.StatusPath, st, prevRepos, now(), fmt.Errorf("cleaning orphaned temp clones: %w", err))
+		return abortRun(deps.StatusPath, st, prevRepos, desired, now(), fmt.Errorf("cleaning orphaned temp clones: %w", err))
 	}
 
 	fetchSem := make(chan struct{}, fetchN)
@@ -235,7 +269,9 @@ func Run(ctx context.Context, cfg *config.Config, deps Deps) (*status.SyncStatus
 		}
 	}
 	if failed == 0 {
-		// Only a fully successful run advances the freshness clock.
+		// Only a fully successful run advances the freshness clock. A
+		// recorded GCError does not count: the repo is fetched, indexed,
+		// and pinned, so the index is genuinely fresh.
 		st.Success = true
 		st.LastSuccessAt = st.FinishedAt
 		st.ConsecutiveFailures = 0
@@ -251,20 +287,47 @@ func Run(ctx context.Context, cfg *config.Config, deps Deps) (*status.SyncStatus
 	return st, nil
 }
 
+// abortFromPrev records a failure that happened before the previous status
+// could be seeded into st, carrying the success clock and failure count
+// forward from prev so the freshness clock survives.
+func abortFromPrev(path string, st *status.SyncStatus, prev *status.SyncStatus, now time.Time, err error) (*status.SyncStatus, error) {
+	var prevRepos map[string]status.RepoStatus
+	if prev != nil {
+		st.LastSuccessAt = prev.LastSuccessAt
+		st.ConsecutiveFailures = prev.ConsecutiveFailures
+		prevRepos = prev.Repos
+	}
+	return abortRun(path, st, prevRepos, preReconcile, now, err)
+}
+
+// preReconcile is passed as abortRun's desired set for failures that occur
+// before reconcile runs, where nothing has been deleted yet and every
+// previous entry should be retained.
+var preReconcile map[string]bool
+
 // abortRun writes a failed status before returning err, retaining the
 // previous per-repo entries for any repo not already recorded, so an
 // aborted run is never silent (the spec requires every run to end with a
 // status write). LastSuccessAt is left as seeded: a total failure moves the
 // attempt clock but never the freshness clock.
-func abortRun(path string, st *status.SyncStatus, prevRepos map[string]status.RepoStatus, now time.Time, err error) (*status.SyncStatus, error) {
+//
+// desired filters what is retained. Once reconcile has run it has already
+// deleted the mirrors and shards of undesired repos, so backfilling them
+// would resurrect entries claiming a repo is indexed at a commit whose
+// shard no longer exists. Pass preReconcile when nothing can have been
+// deleted yet.
+func abortRun(path string, st *status.SyncStatus, prevRepos map[string]status.RepoStatus, desired map[string]bool, now time.Time, err error) (*status.SyncStatus, error) {
 	for name, rs := range prevRepos {
+		if desired != nil && !desired[name] {
+			continue
+		}
 		if _, ok := st.Repos[name]; !ok {
 			st.Repos[name] = rs
 		}
 	}
 	st.FinishedAt = now
 	st.Success = false
-	st.Error = err.Error()
+	st.Error = status.TruncateError(err.Error())
 	st.ConsecutiveFailures++
 	if werr := status.Write(path, st); werr != nil {
 		return st, fmt.Errorf("%w (also failed writing status: %v)", err, werr)
@@ -310,7 +373,7 @@ func reconcile(m Mirror, ix Indexer, desired map[string]bool, prevRepos map[stri
 		}
 		if len(errs) > 0 {
 			rs := prevRepos[name]
-			rs.Error = strings.Join(errs, "; ")
+			rs.Error = status.TruncateError(strings.Join(errs, "; "))
 			st.Repos[name] = rs
 		}
 	}
@@ -327,7 +390,7 @@ func syncRepo(ctx context.Context, deps Deps, ix Indexer, repo discover.Repo, pr
 	_, err := deps.Mirror.Ensure(ctx, repo, deps.Token)
 	<-fetchSem
 	if err != nil {
-		rs.Error = err.Error()
+		rs.Error = status.TruncateError(err.Error())
 		return rs
 	}
 	rs.Fetched = true
@@ -335,7 +398,7 @@ func syncRepo(ctx context.Context, deps Deps, ix Indexer, repo discover.Repo, pr
 	dir := deps.Mirror.Dir(repo.FullName)
 	head, err := deps.Mirror.HeadCommit(ctx, dir, repo.DefaultBranch)
 	if err != nil {
-		rs.Error = err.Error()
+		rs.Error = status.TruncateError(err.Error())
 		return rs
 	}
 
@@ -346,28 +409,21 @@ func syncRepo(ctx context.Context, deps Deps, ix Indexer, repo discover.Repo, pr
 	err = ix.IndexRepo(ctx, dir, repo.FullName, repo.DefaultBranch, head)
 	<-indexSem
 	if err != nil {
-		rs.Error = err.Error()
+		rs.Error = status.TruncateError(err.Error())
 		return rs
 	}
 	if err := deps.Mirror.MarkIndexed(ctx, dir, head); err != nil {
-		rs.Error = err.Error()
+		rs.Error = status.TruncateError(err.Error())
 		return rs
 	}
 	rs.Indexed = true
 	rs.IndexedCommit = head
-	// Housekeeping after a successful pin: a gc failure is recorded but
-	// must not flip Fetched/Indexed — the repo is fully synced either way.
+	// Housekeeping after a successful pin. A gc failure is recorded
+	// separately from Error: the repo is fully synced either way, so it must
+	// not fail the run, freeze the freshness clock, or trip the degraded
+	// warning.
 	if _, err := deps.Mirror.MaybeGC(ctx, dir); err != nil {
-		rs.Error = appendError(rs.Error, err.Error())
+		rs.GCError = status.TruncateError(err.Error())
 	}
 	return rs
-}
-
-// appendError joins error strings with the "; " separator used for
-// multi-error status entries.
-func appendError(existing, msg string) string {
-	if existing == "" {
-		return msg
-	}
-	return existing + "; " + msg
 }

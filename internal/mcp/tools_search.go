@@ -164,7 +164,14 @@ func (s *Server) ListRepos(ctx context.Context, args ListReposArgs) (string, err
 		b.WriteString(noStatusWarning)
 	} else {
 		b.WriteString(formatWarnings(st))
-		fmt.Fprintf(&b, "last sync: %s (%s ago)\n", st.FinishedAt.Format(time.RFC3339), formatAge(status.Age(st)))
+		// FinishedAt is zero while a run is in flight and after one was
+		// killed, so it is never formatted unguarded: doing so renders the
+		// zero time as an age of ~292 years.
+		if st.FinishedAt.IsZero() {
+			b.WriteString("last sync: in progress or interrupted\n")
+		} else {
+			fmt.Fprintf(&b, "last sync: %s (%s ago)\n", st.FinishedAt.Format(time.RFC3339), formatAge(status.Age(st)))
+		}
 		// Only shown when the two clocks disagree; when they match the
 		// line above already says it.
 		if age, ok := status.SuccessAge(st); ok && status.Degraded(st) {

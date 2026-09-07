@@ -42,6 +42,12 @@ type RepoStatus struct {
 	Indexed       bool   `json:"indexed"`
 	IndexedCommit string `json:"indexedCommit,omitempty"` // full SHA
 	Error         string `json:"error,omitempty"`
+	// GCError records a failure of post-index housekeeping (git gc). It is
+	// kept apart from Error because the repo is fully fetched, indexed, and
+	// pinned either way: counting it as a run failure would freeze the
+	// freshness clock and flip the whole index to "stale" over a bloated
+	// pack file.
+	GCError string `json:"gcError,omitempty"`
 }
 
 // Write atomically writes the status to path via a temp file and rename.
@@ -109,6 +115,21 @@ func Read(path string) (*SyncStatus, error) {
 	return &s, nil
 }
 
+// maxErrorLen caps the recorded error text. The value is remote-derived
+// (GitHub API bodies, git stderr) and is interpolated into MCP tool
+// output, so an unbounded string could flood or steer an agent's context.
+const maxErrorLen = 200
+
+// TruncateError shortens a recorded error to maxErrorLen runes, marking
+// that it was cut so a truncated cause is never mistaken for the whole one.
+func TruncateError(msg string) string {
+	runes := []rune(msg)
+	if len(runes) <= maxErrorLen {
+		return msg
+	}
+	return string(runes[:maxErrorLen]) + "… (truncated)"
+}
+
 // Age returns how long ago the last run finished, successful or not. Use
 // SuccessAge or Stale to judge whether the index is usable; a failed run
 // also sets FinishedAt.
@@ -118,6 +139,13 @@ func Age(s *SyncStatus) time.Duration {
 
 // SuccessAge returns how long ago the last fully successful sync finished
 // and whether there has ever been one.
+//
+// A LastSuccessAt in the future yields a negative age rather than being
+// clamped, so callers can distinguish "impossibly fresh" from genuinely
+// fresh; Stale and Due both treat it as unusable. Timestamps ahead of now
+// mean the clock moved backwards (a VM snapshot restore, a dead RTC, an
+// NTP correction after a bad boot clock), and trusting them would suppress
+// both syncing and every staleness warning until real time caught up.
 func SuccessAge(s *SyncStatus) (age time.Duration, ok bool) {
 	if s == nil || s.LastSuccessAt.IsZero() {
 		return 0, false
@@ -126,17 +154,34 @@ func SuccessAge(s *SyncStatus) (age time.Duration, ok bool) {
 }
 
 // Stale reports whether the index has gone without a successful sync for
-// longer than after. A status with no successful run is always stale.
+// longer than after. A status with no successful run, or one whose success
+// is dated in the future, is always stale.
 func Stale(s *SyncStatus, after time.Duration) bool {
 	age, ok := SuccessAge(s)
-	return !ok || age > after
+	return !ok || age < 0 || age > after
 }
 
-// Degraded reports whether the last completed run failed to fully succeed,
-// meaning the index is no longer being updated even though runs are still
-// firing. A run in flight (FinishedAt zero) is not degraded.
+// Interrupted reports whether the recorded run started but never finished.
+// Under the sync lock no live run can be observed this way from another
+// process, so outside a run in progress it means the previous one died
+// before writing its outcome (killed, OOM, or the machine slept).
+func Interrupted(s *SyncStatus) bool {
+	return s != nil && !s.StartedAt.IsZero() && s.FinishedAt.IsZero()
+}
+
+// Degraded reports whether the index has stopped being updated even though
+// runs are still firing: either the last completed run failed, or it never
+// completed at all. An interrupted run counts, because a sync that dies
+// every time records no error and no failure count, and silence is exactly
+// what this reports on.
 func Degraded(s *SyncStatus) bool {
-	if s == nil || s.FinishedAt.IsZero() {
+	if s == nil {
+		return false
+	}
+	if Interrupted(s) {
+		return true
+	}
+	if s.FinishedAt.IsZero() {
 		return false
 	}
 	return s.FinishedAt.After(s.LastSuccessAt)
@@ -148,19 +193,34 @@ func Degraded(s *SyncStatus) bool {
 // it is older than that an attempt is warranted, and how soon it may be
 // reattempted depends on Degraded: after a failed run the cadence drops to
 // retry so a transient cause (expired token, no network on wake) costs
-// minutes of staleness instead of a full interval. Runs still in flight,
-// and statuses with no run at all, are always due — overlap is prevented by
-// the sync lock, not by this check.
+// minutes of staleness instead of a full interval.
+//
+// The cooldown applies to interrupted runs too, measured from when they
+// started. Exempting them would make a sync that crashes every time retry
+// at the scheduler's tick rate rather than at retry, hammering the remote
+// for as long as the crash persists. Overlap itself is prevented by the
+// sync lock, not by this check.
 func Due(s *SyncStatus, interval, retry time.Duration, now time.Time) bool {
 	if s == nil {
 		return true // never synced
 	}
-	if !s.LastSuccessAt.IsZero() && now.Sub(s.LastSuccessAt) < interval {
+	if !s.LastSuccessAt.IsZero() && !now.Before(s.LastSuccessAt) && now.Sub(s.LastSuccessAt) < interval {
 		return false
 	}
 	cooldown := interval
 	if Degraded(s) {
 		cooldown = retry
 	}
-	return s.FinishedAt.IsZero() || now.Sub(s.FinishedAt) >= cooldown
+	// An interrupted run has no FinishedAt, so its cooldown runs from
+	// StartedAt; a status with neither is a fresh install and always due.
+	last := s.FinishedAt
+	if last.IsZero() {
+		last = s.StartedAt
+	}
+	if last.IsZero() {
+		return true
+	}
+	// A last-run timestamp in the future is treated as elapsed rather than
+	// blocking the sync until the clock catches up.
+	return now.Before(last) || now.Sub(last) >= cooldown
 }

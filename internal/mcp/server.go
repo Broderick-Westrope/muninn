@@ -28,6 +28,8 @@ const staleAfter = 24 * time.Hour
 const (
 	noStatusWarning       = "WARNING: no sync status found; the index may be empty or stale — run `muninn sync`\n"
 	neverSucceededWarning = "WARNING: no sync has ever succeeded; the index may be empty — run `muninn sync` to see why\n"
+	futureClockWarning    = "WARNING: the last sync is dated in the future; the system clock has moved backwards, so the index age is unknown — run `muninn sync`\n"
+	interruptedWarning    = "WARNING: a sync is in progress or the last one was interrupted; the index may be mid-update — run `muninn status`\n"
 	staleWarningFormat    = "WARNING: index is stale: last successful sync finished %s ago — run `muninn sync`\n"
 	degradedWarningFormat = "WARNING: the last %d sync attempt(s) failed (%s); the index is no longer being updated — run `muninn status`\n"
 )
@@ -99,10 +101,16 @@ func formatWarnings(st *status.SyncStatus) string {
 	switch {
 	case !ok:
 		b.WriteString(neverSucceededWarning)
+	case age < 0:
+		b.WriteString(futureClockWarning)
 	case age > staleAfter:
 		fmt.Fprintf(&b, staleWarningFormat, formatAge(age))
 	}
-	if status.Degraded(st) {
+	if status.Interrupted(st) {
+		// An interrupted run records no cause, so the degraded wording
+		// ("attempts failed") would be both unsupported and misleading.
+		b.WriteString(interruptedWarning)
+	} else if status.Degraded(st) {
 		reason := st.Error
 		if reason == "" {
 			reason = "cause not recorded"

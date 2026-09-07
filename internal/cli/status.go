@@ -49,10 +49,12 @@ func printStatus(out io.Writer, st *status.SyncStatus) error {
 	// The success clock is reported separately from the attempt clock: a
 	// job that fails every hour keeps "last run" recent while the index
 	// silently rots, and only this line reveals it.
-	if age, ok := status.SuccessAge(st); ok {
-		fmt.Fprintf(out, "last success: %s (%s ago)\n", st.LastSuccessAt.Format(time.RFC1123), age.Truncate(time.Second))
-	} else {
+	if age, ok := status.SuccessAge(st); !ok {
 		fmt.Fprintln(out, "last success: never")
+	} else if age < 0 {
+		fmt.Fprintf(out, "last success: %s (dated in the future — the system clock has moved backwards)\n", st.LastSuccessAt.Format(time.RFC1123))
+	} else {
+		fmt.Fprintf(out, "last success: %s (%s ago)\n", st.LastSuccessAt.Format(time.RFC1123), age.Truncate(time.Second))
 	}
 
 	failed := failedRepos(st)
@@ -79,6 +81,18 @@ func printStatus(out io.Writer, st *status.SyncStatus) error {
 		}
 		if err := w.Flush(); err != nil {
 			return fmt.Errorf("writing status table: %w", err)
+		}
+	}
+	// Housekeeping failures are listed apart from real ones: these repos
+	// are fully indexed, so they do not make the run a failure.
+	if gcFailed := gcFailedRepos(st); len(gcFailed) > 0 {
+		w := tabwriter.NewWriter(out, 2, 8, 2, ' ', 0)
+		fmt.Fprintln(w, "REPO\tGC WARNING (indexed anyway)")
+		for _, name := range gcFailed {
+			fmt.Fprintf(w, "%s\t%s\n", name, st.Repos[name].GCError)
+		}
+		if err := w.Flush(); err != nil {
+			return fmt.Errorf("writing gc table: %w", err)
 		}
 	}
 	return nil
@@ -126,6 +140,19 @@ func failedRepos(st *status.SyncStatus) []string {
 	var failed []string
 	for name, rs := range st.Repos {
 		if rs.Error != "" {
+			failed = append(failed, name)
+		}
+	}
+	sort.Strings(failed)
+	return failed
+}
+
+// gcFailedRepos returns the names of repos whose housekeeping failed but
+// which are otherwise fully synced, sorted.
+func gcFailedRepos(st *status.SyncStatus) []string {
+	var failed []string
+	for name, rs := range st.Repos {
+		if rs.GCError != "" && rs.Error == "" {
 			failed = append(failed, name)
 		}
 	}

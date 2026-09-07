@@ -526,6 +526,11 @@ func TestRunMaybeGCSkippedOnIndexFailure(t *testing.T) {
 	}
 }
 
+// TestRunMaybeGCFailureKeepsRepoSynced pins that housekeeping is not
+// correctness: the repo is fetched, indexed, and pinned, so a gc failure is
+// recorded separately and the run still counts as a success. Treating it as
+// a failure would freeze the freshness clock and, after staleAfter, make
+// every MCP tool declare the whole index stale over a bloated pack file.
 func TestRunMaybeGCFailureKeepsRepoSynced(t *testing.T) {
 	src, commit := fixtureRepo(t)
 	e := newEnv(t)
@@ -537,8 +542,17 @@ func TestRunMaybeGCFailureKeepsRepoSynced(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v (a gc failure must not abort the run)", err)
 	}
-	if st.Success {
-		t.Error("Success = true, want false with a recorded gc error")
+	if !st.Success {
+		t.Errorf("Success = false, want true: a gc failure does not make the index stale (%+v)", st.Repos)
+	}
+	if st.LastSuccessAt.IsZero() {
+		t.Error("LastSuccessAt is zero, want the freshness clock advanced")
+	}
+	if st.ConsecutiveFailures != 0 {
+		t.Errorf("ConsecutiveFailures = %d, want 0", st.ConsecutiveFailures)
+	}
+	if status.Degraded(st) {
+		t.Error("Degraded = true, want false for a gc-only failure")
 	}
 	rs := st.Repos["acme/a"]
 	if !rs.Fetched || !rs.Indexed {
@@ -547,8 +561,11 @@ func TestRunMaybeGCFailureKeepsRepoSynced(t *testing.T) {
 	if rs.IndexedCommit != commit {
 		t.Errorf("IndexedCommit = %q, want %q", rs.IndexedCommit, commit)
 	}
-	if !strings.Contains(rs.Error, "gc boom") {
-		t.Errorf("Error = %q, want the gc failure recorded", rs.Error)
+	if !strings.Contains(rs.GCError, "gc boom") {
+		t.Errorf("GCError = %q, want the gc failure recorded", rs.GCError)
+	}
+	if rs.Error != "" {
+		t.Errorf("Error = %q, want gc failures kept out of the run-failure field", rs.Error)
 	}
 }
 
@@ -760,3 +777,146 @@ func TestRunOnlyIfDue(t *testing.T) {
 		}
 	})
 }
+
+// TestRunEmptyDiscoveryRefusesToGC is the regression test for a masquerade
+// worse than the bug that motivated the success clock: a token that loses
+// org visibility makes the GitHub API return an empty list rather than an
+// error, which was obeyed as "delete everything" and then recorded as a
+// fully successful, perfectly fresh sync over an empty index.
+func TestRunEmptyDiscoveryRefusesToGC(t *testing.T) {
+	src, commit := fixtureRepo(t)
+	e := newEnv(t)
+	repo := fileRepo("acme/a", src)
+
+	good, err := Run(context.Background(), &config.Config{}, e.deps(&stubDiscoverer{repos: []discover.Repo{repo}}, nil))
+	if err != nil {
+		t.Fatalf("seed Run: %v", err)
+	}
+
+	st, err := Run(context.Background(), &config.Config{}, e.deps(&stubDiscoverer{repos: nil}, nil))
+	if err == nil {
+		t.Fatal("Run with empty discovery: want error, got nil")
+	}
+	if st.Success {
+		t.Error("Success = true, want false")
+	}
+	if !st.LastSuccessAt.Equal(good.LastSuccessAt) {
+		t.Errorf("LastSuccessAt = %v, want the previous success %v", st.LastSuccessAt, good.LastSuccessAt)
+	}
+	if !strings.Contains(st.Error, "no repositories") {
+		t.Errorf("Error = %q, want the empty-discovery cause", st.Error)
+	}
+
+	// The index must be intact, not GC'd.
+	if _, err := os.Stat(filepath.Join(e.mirrorsDir(), "acme", "a.git")); err != nil {
+		t.Errorf("mirror was deleted on empty discovery: %v", err)
+	}
+	indexed, err := e.indexer().ListIndexed()
+	if err != nil {
+		t.Fatalf("ListIndexed: %v", err)
+	}
+	if indexed["acme/a"] != commit {
+		t.Errorf("shards = %v, want acme/a still indexed at %s", indexed, commit)
+	}
+	if rs := st.Repos["acme/a"]; rs.IndexedCommit != commit {
+		t.Errorf("status lost the repo entry: %+v", rs)
+	}
+}
+
+// TestRunCountsInterruptedPreviousRun covers the crash loop: a run killed
+// before its final write records no cause and no failure count, so without
+// this the failure count freezes and the status reads as healthy until the
+// index eventually goes stale.
+func TestRunCountsInterruptedPreviousRun(t *testing.T) {
+	src, _ := fixtureRepo(t)
+	e := newEnv(t)
+	repo := fileRepo("acme/a", src)
+
+	interrupted := &status.SyncStatus{
+		StartedAt:           time.Now().Add(-5 * time.Minute),
+		LastSuccessAt:       time.Now().Add(-3 * time.Hour),
+		ConsecutiveFailures: 2,
+		Repos:               map[string]status.RepoStatus{"acme/a": {Fetched: true, Indexed: true}},
+	}
+	if err := status.Write(e.statusPath(), interrupted); err != nil {
+		t.Fatal(err)
+	}
+	if !status.Degraded(interrupted) {
+		t.Fatal("an interrupted run should read as degraded")
+	}
+
+	// A failing run so the counter is observable in the final status.
+	failIx := func(string) Indexer { return failingIndexer{e.indexer()} }
+	st, err := Run(context.Background(), &config.Config{}, e.deps(&stubDiscoverer{repos: []discover.Repo{repo}}, failIx))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// 2 carried forward + 1 for the interrupted run + 1 for this one.
+	if st.ConsecutiveFailures != 4 {
+		t.Errorf("ConsecutiveFailures = %d, want 4 (2 prior + interrupted + this run)", st.ConsecutiveFailures)
+	}
+}
+
+// TestRunCorruptStatusIsRecorded pins the "every run ends with a status
+// write" invariant for a path that used to return early: a corrupt status
+// file left the last good status in place, so a scheduled job failing here
+// was indistinguishable from one that never fired.
+func TestRunCorruptStatusIsRecorded(t *testing.T) {
+	e := newEnv(t)
+	if err := os.WriteFile(e.statusPath(), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := Run(context.Background(), &config.Config{}, e.deps(&stubDiscoverer{}, nil))
+	if err == nil {
+		t.Fatal("Run with a corrupt status file: want error, got nil")
+	}
+	if st == nil {
+		t.Fatal("Run returned a nil status; the failure was not recorded")
+	}
+	onDisk, err := status.Read(e.statusPath())
+	if err != nil {
+		t.Fatalf("status not rewritten over the corrupt file: %v", err)
+	}
+	if onDisk.Success || onDisk.Error == "" {
+		t.Errorf("on-disk status = %+v, want a recorded failure", onDisk)
+	}
+}
+
+// TestRunAbortAfterReconcileDropsRemovedRepos guards against resurrecting
+// repos that reconcile already deleted: backfilling them unfiltered would
+// leave status claiming a repo is indexed at a commit whose shard and
+// mirror are gone from disk.
+func TestRunAbortAfterReconcileDropsRemovedRepos(t *testing.T) {
+	srcA, _ := fixtureRepo(t)
+	srcB, _ := fixtureRepo(t)
+	e := newEnv(t)
+	repoA, repoB := fileRepo("acme/a", srcA), fileRepo("acme/b", srcB)
+
+	if _, err := Run(context.Background(), &config.Config{}, e.deps(&stubDiscoverer{repos: []discover.Repo{repoA, repoB}}, nil)); err != nil {
+		t.Fatalf("seed Run: %v", err)
+	}
+
+	// acme/b is no longer desired, and the run aborts after reconcile has
+	// already removed it.
+	deps := e.deps(&stubDiscoverer{repos: []discover.Repo{repoA}}, nil)
+	deps.Mirror = failingCleanTmpMirror{deps.Mirror}
+	st, err := Run(context.Background(), &config.Config{}, deps)
+	if err == nil {
+		t.Fatal("Run: want the CleanTmp error, got nil")
+	}
+	if _, ok := st.Repos["acme/b"]; ok {
+		t.Error("status resurrected acme/b, which reconcile had already deleted")
+	}
+	if _, ok := st.Repos["acme/a"]; !ok {
+		t.Error("status dropped acme/a, which is still desired")
+	}
+}
+
+// failingCleanTmpMirror fails CleanTmp, which runs after reconcile, to
+// exercise an abort once GC has already taken effect.
+type failingCleanTmpMirror struct {
+	Mirror
+}
+
+func (failingCleanTmpMirror) CleanTmp() error { return errors.New("cleantmp boom") }

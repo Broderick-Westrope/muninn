@@ -6,9 +6,11 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestWriteReadRoundtrip(t *testing.T) {
@@ -160,12 +162,53 @@ func TestDegraded(t *testing.T) {
 		{"healthy", &SyncStatus{FinishedAt: now, LastSuccessAt: now}, false},
 		{"last run failed", &SyncStatus{FinishedAt: now, LastSuccessAt: now.Add(-time.Hour)}, true},
 		{"never succeeded", &SyncStatus{FinishedAt: now}, true},
-		{"in flight", &SyncStatus{StartedAt: now, LastSuccessAt: now.Add(-time.Hour)}, false},
+		// An interrupted run is degraded: it records no error and no
+		// failure count, so treating it as healthy is what let a
+		// crash-looping sync stay invisible until the index went stale.
+		{"interrupted", &SyncStatus{StartedAt: now, LastSuccessAt: now.Add(-time.Hour)}, true},
+		{"empty", &SyncStatus{}, false},
 	}
 	for _, tt := range tests {
 		if got := Degraded(tt.st); got != tt.want {
 			t.Errorf("%s: Degraded = %v, want %v", tt.name, got, tt.want)
 		}
+	}
+}
+
+func TestInterrupted(t *testing.T) {
+	now := time.Now()
+	tests := []struct {
+		name string
+		st   *SyncStatus
+		want bool
+	}{
+		{"nil", nil, false},
+		{"started, not finished", &SyncStatus{StartedAt: now}, true},
+		{"finished", &SyncStatus{StartedAt: now.Add(-time.Minute), FinishedAt: now}, false},
+		{"never ran", &SyncStatus{}, false},
+	}
+	for _, tt := range tests {
+		if got := Interrupted(tt.st); got != tt.want {
+			t.Errorf("%s: Interrupted = %v, want %v", tt.name, got, tt.want)
+		}
+	}
+}
+
+func TestTruncateError(t *testing.T) {
+	if got := TruncateError("short"); got != "short" {
+		t.Errorf("TruncateError(short) = %q, want it unchanged", got)
+	}
+	long := strings.Repeat("x", 500)
+	got := TruncateError(long)
+	if len([]rune(got)) >= len([]rune(long)) {
+		t.Errorf("len(TruncateError) = %d, want it shortened", len([]rune(got)))
+	}
+	if !strings.HasSuffix(got, "(truncated)") {
+		t.Errorf("TruncateError = %q, want a truncation marker", got)
+	}
+	// Multi-byte input must not be cut mid-rune.
+	if got := TruncateError(strings.Repeat("é", 500)); !utf8.ValidString(got) {
+		t.Error("TruncateError produced invalid UTF-8")
 	}
 }
 
@@ -225,9 +268,28 @@ func TestDue(t *testing.T) {
 			false,
 		},
 		{
-			// Overlap is the lock's job, not the due check's.
-			"run in flight",
-			&SyncStatus{StartedAt: ago(time.Minute), LastSuccessAt: ago(3 * time.Hour)},
+			// An interrupted run gets the retry cooldown measured from
+			// StartedAt. Exempting it would make a sync that crashes every
+			// time retry at the scheduler's tick rate instead of at retry.
+			"interrupted, cooldown not elapsed",
+			&SyncStatus{StartedAt: ago(2 * time.Minute), LastSuccessAt: ago(3 * time.Hour)},
+			false,
+		},
+		{
+			"interrupted, cooldown elapsed",
+			&SyncStatus{StartedAt: ago(11 * time.Minute), LastSuccessAt: ago(3 * time.Hour)},
+			true,
+		},
+		{
+			// A clock that moved backwards must not make the index look
+			// permanently fresh; that silence is the bug this all fixes.
+			"success dated in the future",
+			&SyncStatus{FinishedAt: now.Add(24 * time.Hour), LastSuccessAt: now.Add(24 * time.Hour)},
+			true,
+		},
+		{
+			"no run recorded at all",
+			&SyncStatus{},
 			true,
 		},
 	}

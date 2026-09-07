@@ -22,14 +22,25 @@ import (
 // failure: callers are expected to skip their work and exit successfully.
 var ErrLocked = errors.New("lock is held by another process")
 
+// ErrUnsupported reports that the filesystem or platform provides no
+// locking, so the caller proceeded unprotected. Callers should warn rather
+// than abort: an unlockable state directory is a reason to lose the
+// concurrency guarantee, not a reason to stop syncing.
+var ErrUnsupported = errors.New("advisory locking is not supported here")
+
 // Lock is an acquired advisory lock. It is not safe for concurrent use.
 type Lock struct {
 	f *os.File
 }
 
 // TryAcquire takes an exclusive lock on path without blocking, creating the
-// file and its parent directory if needed. It returns an error wrapping
-// ErrLocked when the lock is already held.
+// file and its parent directory if needed.
+//
+// It returns an error wrapping ErrLocked when the lock is already held, and
+// one wrapping ErrUnsupported when the platform or filesystem provides no
+// locking. In the unsupported case the returned *Lock is still usable (and
+// must still be released) so the caller can carry on unprotected after
+// warning; every other error yields a nil Lock.
 func TryAcquire(path string) (*Lock, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("creating lock directory: %w", err)
@@ -39,6 +50,9 @@ func TryAcquire(path string) (*Lock, error) {
 		return nil, fmt.Errorf("opening lock file %s: %w", path, err)
 	}
 	if err := tryLock(f); err != nil {
+		if errors.Is(err, ErrUnsupported) {
+			return &Lock{f: f}, fmt.Errorf("locking %s: %w", path, err)
+		}
 		f.Close()
 		if errors.Is(err, ErrLocked) {
 			return nil, fmt.Errorf("acquiring lock %s: %w", path, err)
