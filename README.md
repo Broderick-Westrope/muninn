@@ -39,14 +39,20 @@ go install github.com/broderick-westrope/muninn@latest
 }
 ```
 
-Token resolution: `auth.githubToken` in config → the `token.env` env var → `gh auth token`.
+Token resolution, per run: `auth.githubToken` in config → the `token.env` env var
+→ `gh auth token`. `gh` is preferred for scheduled syncs because it re-resolves
+every run and so survives token rotation and expiry. muninn never writes a
+token to the config itself; `--install` records the *path* to `gh` (and to
+`ctags`) because launchd's PATH excludes Homebrew. A token reachable only
+through your shell environment cannot be seen by a launchd job, and
+`--install` warns when that is all it found.
 
 ## Usage
 
 ```bash
 muninn sync              # reconcile repos: fetch mirrors, build index, GC removed
 muninn sync --if-due     # sync only if the index is stale (what the agent runs)
-muninn sync --install    # schedule syncs via launchd (bakes token + ctags path into config)
+muninn sync --install    # schedule syncs via launchd (records ctags + gh paths)
 muninn status            # last run, last success, per-repo failures, agent status
 muninn search "sym:NewServer case:yes repo:muninn"   # terminal search (zoekt syntax)
 muninn mcp               # MCP server over stdio
@@ -68,6 +74,12 @@ Because the cadence lives in the config rather than the plist, changing it does
 not need a reinstall. Runs are serialized by an advisory lock on
 `~/.local/state/muninn/sync.lock`; a run that finds it held exits without doing
 anything, so a scheduled tick can never collide with a manual `muninn sync`.
+
+The plist records the binary path as installed (e.g. `/opt/homebrew/bin/muninn`)
+rather than resolving it through symlinks, so a package upgrade that repoints
+that symlink does not leave launchd spawning a deleted versioned path. If the
+agent does drift out of sync with the binary or config, an interactive `muninn
+sync` repairs it, and `muninn status` reports it either way.
 
 Staleness is always measured from the last *successful* sync. A failed run
 records its cause and bumps a failure count, and every MCP tool warns while the

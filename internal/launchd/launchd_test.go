@@ -1,6 +1,7 @@
 package launchd
 
 import (
+	"bytes"
 	"errors"
 	"io/fs"
 	"os"
@@ -119,5 +120,128 @@ func TestUninstall(t *testing.T) {
 	lc.bootoutErr = errors.New("not loaded")
 	if err := Uninstall(lc, plistPath); err != nil {
 		t.Fatalf("second Uninstall: %v", err)
+	}
+}
+
+func TestInstalledNotInstalled(t *testing.T) {
+	_, err := Installed(filepath.Join(t.TempDir(), "missing.plist"))
+	if !errors.Is(err, ErrNotInstalled) {
+		t.Errorf("err = %v, want ErrNotInstalled", err)
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("err = %v, want to wrap fs.ErrNotExist", err)
+	}
+}
+
+func TestInstalledRoundTrip(t *testing.T) {
+	// Render is deterministic, so byte equality against the installed
+	// plist is what lets callers detect an agent that has drifted from
+	// the current binary and config.
+	plistPath := filepath.Join(t.TempDir(), "agents", Label+".plist")
+	want, err := Render("/usr/local/bin/muninn", "/cfg.json", "/log", 10)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if err := Install(&stubLaunchctl{}, plistPath, want); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	got, err := Installed(plistPath)
+	if err != nil {
+		t.Fatalf("Installed: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Error("installed plist does not match the rendered bytes")
+	}
+
+	stale, err := Render("/opt/homebrew/Cellar/muninn/1.2.3/bin/muninn", "/cfg.json", "/log", 10)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if bytes.Equal(got, stale) {
+		t.Error("a plist rendered from a different binary path compared equal")
+	}
+}
+
+func TestProgramPath(t *testing.T) {
+	plist, err := Render("/opt/homebrew/bin/muninn", "/cfg.json", "/log", 10)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	got, err := ProgramPath(plist)
+	if err != nil {
+		t.Fatalf("ProgramPath: %v", err)
+	}
+	if got != "/opt/homebrew/bin/muninn" {
+		t.Errorf("ProgramPath = %q, want the binary path, not a later argument", got)
+	}
+}
+
+func TestProgramPathRejectsMalformed(t *testing.T) {
+	tests := map[string]string{
+		"no key":       `<plist><dict></dict></plist>`,
+		"no entries":   `<key>ProgramArguments</key><array></array>`,
+		"unterminated": `<key>ProgramArguments</key><array><string>/bin/muninn`,
+	}
+	for name, plist := range tests {
+		if _, err := ProgramPath([]byte(plist)); err == nil {
+			t.Errorf("%s: err = nil, want an error", name)
+		}
+	}
+}
+
+func TestNeedsRepair(t *testing.T) {
+	want, err := Render("/opt/homebrew/bin/muninn", "/cfg.json", "/log", 10)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	plistPath := filepath.Join(t.TempDir(), "agent.plist")
+
+	if _, err := NeedsRepair(plistPath, want); !errors.Is(err, ErrNotInstalled) {
+		t.Errorf("err = %v, want ErrNotInstalled when no agent exists", err)
+	}
+
+	if err := os.WriteFile(plistPath, want, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stale, err := NeedsRepair(plistPath, want)
+	if err != nil {
+		t.Fatalf("NeedsRepair: %v", err)
+	}
+	if stale {
+		t.Error("stale = true for an agent matching the rendered plist")
+	}
+
+	// The upgrade case: the installed plist still names the old versioned
+	// path while the running binary renders the stable symlink.
+	old, err := Render("/opt/homebrew/Cellar/muninn/1.2.3/bin/muninn", "/cfg.json", "/log", 10)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if err := os.WriteFile(plistPath, old, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stale, err = NeedsRepair(plistPath, want)
+	if err != nil {
+		t.Fatalf("NeedsRepair: %v", err)
+	}
+	if !stale {
+		t.Error("stale = false for an agent pointing at a moved binary")
+	}
+
+	// A schedule change must also be detected, so editing the config and
+	// re-running sync repairs the agent without an explicit reinstall.
+	if err := os.WriteFile(plistPath, want, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	retimed, err := Render("/opt/homebrew/bin/muninn", "/cfg.json", "/log", 30)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	stale, err = NeedsRepair(plistPath, retimed)
+	if err != nil {
+		t.Fatalf("NeedsRepair: %v", err)
+	}
+	if !stale {
+		t.Error("stale = false after the tick interval changed")
 	}
 }

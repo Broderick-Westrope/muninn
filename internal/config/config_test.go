@@ -285,3 +285,101 @@ func TestLoadClampsRetryToInterval(t *testing.T) {
 		t.Errorf("Interval = %v, want 15m", c.Sync.Interval())
 	}
 }
+
+func TestResolveTokenSourceReportsProvenance(t *testing.T) {
+	base := func() *Config {
+		return &Config{
+			Connections: map[string]Connection{
+				"c": {Type: "github", Orgs: []string{"x"}, Token: &TokenRef{Env: "MUNINN_TEST_GITHUB_TOKEN"}},
+			},
+		}
+	}
+
+	t.Run("config", func(t *testing.T) {
+		c := base()
+		c.Auth.GitHubToken = "from-auth"
+		tok, err := ResolveTokenSource(c)
+		if err != nil {
+			t.Fatalf("ResolveTokenSource: %v", err)
+		}
+		if tok.Source != TokenSourceConfig {
+			t.Errorf("Source = %q, want %q", tok.Source, TokenSourceConfig)
+		}
+	})
+
+	// The env source is what install must warn about: a launchd job has
+	// no shell environment, so a token only reachable this way makes
+	// every scheduled run fail.
+	t.Run("env", func(t *testing.T) {
+		t.Setenv("MUNINN_TEST_GITHUB_TOKEN", "from-env")
+		tok, err := ResolveTokenSource(base())
+		if err != nil {
+			t.Fatalf("ResolveTokenSource: %v", err)
+		}
+		if tok.Source != TokenSourceEnv {
+			t.Errorf("Source = %q, want %q", tok.Source, TokenSourceEnv)
+		}
+		if tok.EnvName != "MUNINN_TEST_GITHUB_TOKEN" {
+			t.Errorf("EnvName = %q, want the consulted variable", tok.EnvName)
+		}
+	})
+
+	// The gh source reports the resolved binary path, which install
+	// persists so scheduled runs can fetch a *fresh* token each time
+	// rather than replaying a frozen one.
+	t.Run("gh", func(t *testing.T) {
+		t.Setenv("MUNINN_TEST_GITHUB_TOKEN", "")
+		dir := fakeGH(t, "gh-token", 0)
+		t.Setenv("PATH", dir)
+		tok, err := ResolveTokenSource(base())
+		if err != nil {
+			t.Fatalf("ResolveTokenSource: %v", err)
+		}
+		if tok.Source != TokenSourceGH {
+			t.Errorf("Source = %q, want %q", tok.Source, TokenSourceGH)
+		}
+		if tok.GHPath != filepath.Join(dir, "gh") {
+			t.Errorf("GHPath = %q, want the resolved gh binary", tok.GHPath)
+		}
+	})
+}
+
+// A configured gh path must be used even when gh is absent from PATH:
+// that is the whole point of recording it for launchd, whose PATH
+// excludes Homebrew.
+func TestResolveTokenUsesConfiguredGHPath(t *testing.T) {
+	t.Setenv("MUNINN_TEST_GITHUB_TOKEN", "")
+	dir := fakeGH(t, "gh-token", 0)
+	t.Setenv("PATH", t.TempDir()) // gh is not here
+
+	c := &Config{
+		Connections: map[string]Connection{
+			"c": {Type: "github", Orgs: []string{"x"}, Token: &TokenRef{Env: "MUNINN_TEST_GITHUB_TOKEN"}},
+		},
+	}
+	c.Auth.GHPath = filepath.Join(dir, "gh")
+
+	got, err := ResolveToken(c)
+	if err != nil {
+		t.Fatalf("ResolveToken: %v", err)
+	}
+	if got != "gh-token" {
+		t.Errorf("token = %q, want gh-token from the configured gh path", got)
+	}
+}
+
+func TestResolveTokenRejectsBadGHPath(t *testing.T) {
+	t.Setenv("MUNINN_TEST_GITHUB_TOKEN", "")
+	t.Setenv("PATH", t.TempDir())
+
+	c := &Config{
+		Connections: map[string]Connection{
+			"c": {Type: "github", Orgs: []string{"x"}, Token: &TokenRef{Env: "MUNINN_TEST_GITHUB_TOKEN"}},
+		},
+	}
+	c.Auth.GHPath = filepath.Join(t.TempDir(), "nonexistent-gh")
+
+	if _, err := ResolveToken(c); err == nil {
+		t.Fatal("ResolveToken succeeded, want error for an invalid gh path")
+	}
+}

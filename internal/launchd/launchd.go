@@ -20,6 +20,9 @@ const Label = "dev.broderick-westrope.muninn"
 
 const defaultIntervalMinutes = 60
 
+// ErrNotInstalled reports that no plist is present at the expected path.
+var ErrNotInstalled = errors.New("launchd agent is not installed")
+
 // PlistPath returns the agent's plist path in ~/Library/LaunchAgents.
 func PlistPath() (string, error) {
 	home, err := os.UserHomeDir()
@@ -27,6 +30,54 @@ func PlistPath() (string, error) {
 		return "", fmt.Errorf("resolving home directory: %w", err)
 	}
 	return filepath.Join(home, "Library", "LaunchAgents", Label+".plist"), nil
+}
+
+// Installed returns the plist bytes currently on disk, or an error wrapping
+// ErrNotInstalled. Because Render is deterministic, comparing its output
+// against these bytes detects an agent that has drifted from what the
+// current binary and config imply — most importantly one still pointing at
+// a binary path that a package upgrade has moved out from under it.
+func Installed(plistPath string) ([]byte, error) {
+	data, err := os.ReadFile(plistPath)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("%w: %w", ErrNotInstalled, err)
+		}
+		return nil, fmt.Errorf("reading plist %s: %w", plistPath, err)
+	}
+	return data, nil
+}
+
+// ProgramPath extracts the executable path from a plist produced by
+// Render: the first ProgramArguments entry. It exists so a stale agent can
+// be described concretely ("points at a binary that no longer exists")
+// rather than just reported as different.
+func ProgramPath(plist []byte) (string, error) {
+	_, rest, ok := bytes.Cut(plist, []byte("<key>ProgramArguments</key>"))
+	if !ok {
+		return "", errors.New("plist has no ProgramArguments key")
+	}
+	_, rest, ok = bytes.Cut(rest, []byte("<string>"))
+	if !ok {
+		return "", errors.New("plist ProgramArguments has no entries")
+	}
+	path, _, ok := bytes.Cut(rest, []byte("</string>"))
+	if !ok {
+		return "", errors.New("plist ProgramArguments entry is unterminated")
+	}
+	return string(bytes.TrimSpace(path)), nil
+}
+
+// NeedsRepair reports whether the plist installed at plistPath differs
+// from want, meaning the agent no longer reflects the running binary or
+// the current config. It returns an error wrapping ErrNotInstalled when
+// there is no agent to repair.
+func NeedsRepair(plistPath string, want []byte) (bool, error) {
+	got, err := Installed(plistPath)
+	if err != nil {
+		return false, err
+	}
+	return !bytes.Equal(got, want), nil
 }
 
 // Launchctl abstracts launchctl invocations so tests can stub them.

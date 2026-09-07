@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"text/tabwriter"
 	"time"
@@ -83,16 +84,41 @@ func printStatus(out io.Writer, st *status.SyncStatus) error {
 	return nil
 }
 
-// agentState reports whether the launchd agent's plist is installed.
+// agentState describes the launchd agent: not installed, healthy, or
+// installed but no longer usable. The last case is the one worth detail —
+// a plist pointing at a binary a package upgrade has moved is spawned by
+// launchd forever without ever running, and nothing else surfaces it.
 func agentState() string {
 	plistPath, err := launchd.PlistPath()
 	if err != nil {
 		return "unknown (" + err.Error() + ")"
 	}
-	if _, err := os.Stat(plistPath); err == nil {
-		return "installed (" + plistPath + ")"
+	return describeAgent(plistPath)
+}
+
+// describeAgent is agentState with the plist path injected so it can be
+// tested without depending on the real home directory.
+func describeAgent(plistPath string) string {
+	plist, err := launchd.Installed(plistPath)
+	if errors.Is(err, launchd.ErrNotInstalled) {
+		return "not installed — run `muninn sync --install`"
 	}
-	return "not installed — run `muninn sync --install`"
+	if err != nil {
+		return "unknown (" + err.Error() + ")"
+	}
+
+	bin, err := launchd.ProgramPath(plist)
+	if err != nil {
+		return fmt.Sprintf("installed (%s) — unrecognized contents: %v; run `muninn sync --install`", plistPath, err)
+	}
+	if _, err := os.Stat(bin); err != nil {
+		return fmt.Sprintf("installed (%s) — BROKEN: points at %s, which no longer exists (moved by an upgrade?); run `muninn sync --install`", plistPath, bin)
+	}
+	self, err := os.Executable()
+	if err == nil && filepath.Clean(bin) != filepath.Clean(self) {
+		return fmt.Sprintf("installed (%s) — points at %s, not this binary (%s); run `muninn sync --install` if that is wrong", plistPath, bin, self)
+	}
+	return "installed (" + plistPath + ")"
 }
 
 // failedRepos returns the names of repos with errors, sorted.

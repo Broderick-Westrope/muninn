@@ -42,7 +42,15 @@ type Exclude struct {
 }
 
 type AuthConfig struct {
+	// GitHubToken is a token supplied by the user. It is never written
+	// here by muninn: a frozen token expires and takes every scheduled
+	// run down with it, so scheduled runs resolve a token per run.
 	GitHubToken string `json:"githubToken,omitempty"`
+	// GHPath is the absolute path to the GitHub CLI, recorded at install
+	// time for the same reason as Ctags.Path: launchd's PATH excludes
+	// Homebrew. Storing the path rather than the token is what keeps
+	// scheduled runs working across token rotation and expiry.
+	GHPath string `json:"ghPath,omitempty"`
 }
 
 type CtagsConfig struct {
@@ -167,12 +175,51 @@ func expandTilde(path string) string {
 	return filepath.Join(home, path[2:])
 }
 
+// Token source names reported by ResolveTokenSource.
+const (
+	TokenSourceConfig = "config"
+	TokenSourceEnv    = "env"
+	TokenSourceGH     = "gh"
+)
+
+// Token is a resolved GitHub token and its provenance. The source matters
+// at install time: only a token resolved per run via the GitHub CLI keeps
+// working after rotation, whereas one read from the shell environment is
+// invisible to a launchd job.
+type Token struct {
+	Value string
+	// Source is one of TokenSourceConfig, TokenSourceEnv, TokenSourceGH.
+	Source string
+	// EnvName is the environment variable consulted, set when Source is
+	// TokenSourceEnv or when no token was found but a connection named
+	// one.
+	EnvName string
+	// GHPath is the resolved GitHub CLI path, set when Source is
+	// TokenSourceGH.
+	GHPath string
+}
+
+// ghProbeCandidates are tried in order when auth.ghPath is not configured.
+// Absolute Homebrew paths are included because launchd's default PATH
+// excludes them, mirroring the ctags probe.
+var ghProbeCandidates = []string{
+	"gh",
+	"/opt/homebrew/bin/gh",
+	"/usr/local/bin/gh",
+}
+
 // ResolveToken returns the GitHub token using the following precedence:
 // auth.githubToken from the config, env vars named by connections' token.env
 // (in sorted connection-name order for determinism), then `gh auth token`.
 func ResolveToken(c *Config) (string, error) {
+	tok, err := ResolveTokenSource(c)
+	return tok.Value, err
+}
+
+// ResolveTokenSource resolves a token and reports where it came from.
+func ResolveTokenSource(c *Config) (Token, error) {
 	if c.Auth.GitHubToken != "" {
-		return c.Auth.GitHubToken, nil
+		return Token{Value: c.Auth.GitHubToken, Source: TokenSourceConfig}, nil
 	}
 
 	names := make([]string, 0, len(c.Connections))
@@ -187,15 +234,19 @@ func ResolveToken(c *Config) (string, error) {
 		if conn.Token != nil && conn.Token.Env != "" {
 			envName = conn.Token.Env
 			if v := os.Getenv(envName); v != "" {
-				return v, nil
+				return Token{Value: v, Source: TokenSourceEnv, EnvName: envName}, nil
 			}
 		}
 	}
 
-	out, err := exec.Command("gh", "auth", "token").Output()
+	ghPath, err := resolveGH(c.Auth.GHPath)
 	if err == nil {
-		if token := strings.TrimSpace(string(out)); token != "" {
-			return token, nil
+		var out []byte
+		out, err = exec.Command(ghPath, "auth", "token").Output()
+		if err == nil {
+			if token := strings.TrimSpace(string(out)); token != "" {
+				return Token{Value: token, Source: TokenSourceGH, GHPath: ghPath}, nil
+			}
 		}
 	}
 
@@ -211,7 +262,25 @@ func ResolveToken(c *Config) (string, error) {
 	if envName != "" {
 		hint = fmt.Sprintf("set the %s environment variable, or install the GitHub CLI (gh) and run `gh auth login`", envName)
 	}
-	return "", fmt.Errorf("no GitHub token found: %s%s", hint, ghDetail)
+	return Token{EnvName: envName}, fmt.Errorf("no GitHub token found: %s%s", hint, ghDetail)
+}
+
+// resolveGH returns a path to the GitHub CLI, validating a configured path
+// directly or probing well-known names and Homebrew locations.
+func resolveGH(configured string) (string, error) {
+	if configured != "" {
+		path, err := exec.LookPath(configured)
+		if err != nil {
+			return "", fmt.Errorf("gh path %q from config is invalid: %w", configured, err)
+		}
+		return path, nil
+	}
+	for _, candidate := range ghProbeCandidates {
+		if path, err := exec.LookPath(candidate); err == nil {
+			return path, nil
+		}
+	}
+	return "", errors.New("no gh binary found in PATH or the usual Homebrew locations")
 }
 
 // Save writes the config to path atomically with 0600 permissions.
