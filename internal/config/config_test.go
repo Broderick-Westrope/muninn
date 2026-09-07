@@ -383,3 +383,29 @@ func TestResolveTokenRejectsBadGHPath(t *testing.T) {
 		t.Fatal("ResolveToken succeeded, want error for an invalid gh path")
 	}
 }
+
+// A stored token wins the resolution, but GHPath must still be recorded:
+// that is what lets a user recover from an expired stored token by
+// deleting one field instead of reinstalling the agent.
+func TestResolveTokenSourceRecordsGHPathWithStoredToken(t *testing.T) {
+	dir := fakeGH(t, "gh-token", 0)
+	t.Setenv("PATH", dir)
+
+	c := &Config{
+		Connections: map[string]Connection{
+			"c": {Type: "github", Orgs: []string{"x"}},
+		},
+	}
+	c.Auth.GitHubToken = "stored"
+
+	tok, err := ResolveTokenSource(c)
+	if err != nil {
+		t.Fatalf("ResolveTokenSource: %v", err)
+	}
+	if tok.Value != "stored" || tok.Source != TokenSourceConfig {
+		t.Errorf("token = %+v, want the stored value to win", tok)
+	}
+	if tok.GHPath != filepath.Join(dir, "gh") {
+		t.Errorf("GHPath = %q, want it recorded even though the config token won", tok.GHPath)
+	}
+}

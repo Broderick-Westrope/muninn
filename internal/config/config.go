@@ -217,9 +217,16 @@ func ResolveToken(c *Config) (string, error) {
 }
 
 // ResolveTokenSource resolves a token and reports where it came from.
+//
+// GHPath is filled in whenever the GitHub CLI can be located, even when a
+// higher-precedence source won the token. Install persists it, so a stored
+// token that later expires can be recovered from by deleting that one
+// field rather than reinstalling the agent.
 func ResolveTokenSource(c *Config) (Token, error) {
+	ghPath, ghErr := resolveGH(c.Auth.GHPath)
+
 	if c.Auth.GitHubToken != "" {
-		return Token{Value: c.Auth.GitHubToken, Source: TokenSourceConfig}, nil
+		return Token{Value: c.Auth.GitHubToken, Source: TokenSourceConfig, GHPath: ghPath}, nil
 	}
 
 	names := make([]string, 0, len(c.Connections))
@@ -234,12 +241,12 @@ func ResolveTokenSource(c *Config) (Token, error) {
 		if conn.Token != nil && conn.Token.Env != "" {
 			envName = conn.Token.Env
 			if v := os.Getenv(envName); v != "" {
-				return Token{Value: v, Source: TokenSourceEnv, EnvName: envName}, nil
+				return Token{Value: v, Source: TokenSourceEnv, EnvName: envName, GHPath: ghPath}, nil
 			}
 		}
 	}
 
-	ghPath, err := resolveGH(c.Auth.GHPath)
+	err := ghErr
 	if err == nil {
 		var out []byte
 		out, err = exec.Command(ghPath, "auth", "token").Output()
@@ -266,7 +273,9 @@ func ResolveTokenSource(c *Config) (Token, error) {
 }
 
 // resolveGH returns a path to the GitHub CLI, validating a configured path
-// directly or probing well-known names and Homebrew locations.
+// directly or probing well-known names and Homebrew locations. Failures are
+// collected per candidate, as ctags.Resolve does, so a wrong PATH is
+// diagnosable from the error alone.
 func resolveGH(configured string) (string, error) {
 	if configured != "" {
 		path, err := exec.LookPath(configured)
@@ -275,12 +284,16 @@ func resolveGH(configured string) (string, error) {
 		}
 		return path, nil
 	}
+	var failures []string
 	for _, candidate := range ghProbeCandidates {
-		if path, err := exec.LookPath(candidate); err == nil {
-			return path, nil
+		path, err := exec.LookPath(candidate)
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("%s: not found", candidate))
+			continue
 		}
+		return path, nil
 	}
-	return "", errors.New("no gh binary found in PATH or the usual Homebrew locations")
+	return "", fmt.Errorf("no gh binary found (tried: %s)", strings.Join(failures, "; "))
 }
 
 // Save writes the config to path atomically with 0600 permissions.

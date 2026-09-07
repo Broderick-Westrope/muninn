@@ -168,13 +168,22 @@ func runInstall(cmd *cobra.Command) error {
 	}
 
 	out := cmd.OutOrStdout()
-	if tok.Source == config.TokenSourceEnv {
+	switch tok.Source {
+	case config.TokenSourceEnv:
 		// The env var resolved for this shell, but a launchd job has no
 		// shell environment, so scheduled runs would fail on discovery.
 		// Say so rather than silently copying the secret into the config.
 		fmt.Fprintf(out, "warning: the token came from %s, which a scheduled run cannot see.\n", tok.EnvName)
 		fmt.Fprintln(out, "         install the GitHub CLI and run `gh auth login` (preferred, survives rotation),")
 		fmt.Fprintln(out, "         or set auth.githubToken in the config yourself.")
+	case config.TokenSourceConfig:
+		// A stored token is used ahead of everything else, so once it
+		// expires every run fails until it is removed. muninn cannot tell
+		// a token the user set from one an older --install baked in, so it
+		// leaves it alone and makes the consequence visible instead.
+		fmt.Fprintf(out, "warning: using the token stored in auth.githubToken (%s).\n", cfgPath)
+		fmt.Fprintln(out, "         stored tokens do not rotate: when it expires every sync will fail with a")
+		fmt.Fprintln(out, "         credentials error. Delete that field to resolve a fresh token per run via gh.")
 	}
 
 	plistPath, plist, err := renderAgent(cfg, cfgPath)
