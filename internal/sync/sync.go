@@ -16,6 +16,7 @@ import (
 	"github.com/broderick-westrope/muninn/internal/config"
 	"github.com/broderick-westrope/muninn/internal/ctags"
 	"github.com/broderick-westrope/muninn/internal/discover"
+	"github.com/broderick-westrope/muninn/internal/gitcmd"
 	"github.com/broderick-westrope/muninn/internal/lock"
 	"github.com/broderick-westrope/muninn/internal/status"
 )
@@ -24,6 +25,25 @@ const (
 	defaultFetchConcurrency = 8
 	defaultIndexConcurrency = 2
 )
+
+// Network git operations against github.com fail sporadically at a low
+// rate — observed as `SSL_connect: SSL_ERROR_SYSCALL`, a peer vanishing
+// mid-handshake with no TLS alert — and succeed immediately on a second
+// attempt. Without a retry a single dropped handshake fails that repo for
+// the whole run, and one failed repo is enough to mark the run degraded.
+//
+// maxFetchRetryRepos bounds how many repos in one run may retry, because
+// the interesting case is the one this does not help: if the token died or
+// GitHub is down then every repo fails, and retrying all of them would
+// double the load against an already failing endpoint while turning a
+// clear total failure into a slow partial one. A handful of flakes stays
+// under the budget; a fleet-wide outage blows through it and the run fails
+// fast, as it should.
+const maxFetchRetryRepos = 16
+
+// fetchRetryDelay is the backoff before a retried fetch. It is a var so
+// tests can zero it rather than sleeping through it.
+var fetchRetryDelay = 2 * time.Second
 
 // ErrLocked reports that another sync process holds the lock, so this run
 // did nothing. It is a normal outcome, not a failure: callers should report
@@ -235,6 +255,7 @@ func Run(ctx context.Context, cfg *config.Config, deps Deps) (*status.SyncStatus
 
 	fetchSem := make(chan struct{}, fetchN)
 	indexSem := make(chan struct{}, indexN)
+	budget := &retryBudget{left: maxFetchRetryRepos}
 	var (
 		wg          stdsync.WaitGroup
 		mu          stdsync.Mutex // guards st.Repos, incWriteErr, and status file writes
@@ -244,7 +265,7 @@ func Run(ctx context.Context, cfg *config.Config, deps Deps) (*status.SyncStatus
 		wg.Add(1)
 		go func(repo discover.Repo) {
 			defer wg.Done()
-			rs := syncRepo(ctx, deps, ix, repo, prevRepos[repo.FullName], now, fetchSem, indexSem)
+			rs := syncRepo(ctx, deps, ix, repo, prevRepos[repo.FullName], now, fetchSem, indexSem, budget)
 			mu.Lock()
 			st.Repos[repo.FullName] = rs
 			// Incremental write (best effort): keeps a live MCP session's
@@ -397,21 +418,82 @@ func reconcile(m Mirror, ix Indexer, desired map[string]bool, prevRepos map[stri
 	return nil
 }
 
+// retryBudget is a fleet-wide allowance for fetch retries within one run,
+// shared by every repo goroutine.
+type retryBudget struct {
+	mu   stdsync.Mutex
+	left int
+}
+
+// take consumes one retry, reporting whether the budget allowed it.
+func (b *retryBudget) take() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.left <= 0 {
+		return false
+	}
+	b.left--
+	return true
+}
+
+// ensureMirror fetches or clones one repo, retrying once on a transient
+// failure. It reports how many retries were spent so a rising flake rate
+// stays visible instead of being silently absorbed.
+//
+// The fetch semaphore is released around the backoff: holding a slot while
+// sleeping would shrink the pool exactly when it is contended, and during
+// a wide outage every worker would sleep while holding one, stalling the
+// run without doing any work.
+//
+// A timeout is never retried. It has already consumed the full fetch
+// deadline, so a second attempt risks doubling the run's wall time for a
+// repo that is far more likely unreachable than briefly flaky. That check
+// is structural (gitcmd wraps ErrTimeout) rather than a match on stderr
+// text, which gitcmd's own documentation warns is not an API. No other
+// classification is attempted: the errors worth distinguishing here fail
+// in under a second, so retrying a 404 or a bad token costs nothing, while
+// an stderr allowlist would silently stop retrying the moment a git or
+// LibreSSL upgrade rephrased the message.
+func ensureMirror(ctx context.Context, deps Deps, repo discover.Repo, fetchSem chan struct{}, budget *retryBudget) (retries int, err error) {
+	for {
+		fetchSem <- struct{}{}
+		_, err = deps.Mirror.Ensure(ctx, repo, deps.Token)
+		<-fetchSem
+		if err == nil || errors.Is(err, gitcmd.ErrTimeout) {
+			return retries, err
+		}
+		if retries > 0 || ctx.Err() != nil || !budget.take() {
+			return retries, err
+		}
+		// The backoff is cancellable, and the counter is only incremented
+		// once the retry is actually about to be attempted: a run canceled
+		// mid-sleep never made a second attempt, so recording one would
+		// overstate the flake activity the counter exists to measure.
+		select {
+		case <-ctx.Done():
+			return retries, err
+		case <-time.After(fetchRetryDelay):
+		}
+		retries++
+	}
+}
+
 // syncRepo fetches and indexes one repo, returning its status. Any error is
 // captured into RepoStatus.Error and the previously indexed commit retained,
 // so a failure never loses the read_file pinning guarantee.
 //
 // now is passed in rather than read from deps because Run resolves the nil
 // default into a local, so deps.Now is not safe to call here.
-func syncRepo(ctx context.Context, deps Deps, ix Indexer, repo discover.Repo, prev status.RepoStatus, now func() time.Time, fetchSem, indexSem chan struct{}) status.RepoStatus {
+func syncRepo(ctx context.Context, deps Deps, ix Indexer, repo discover.Repo, prev status.RepoStatus, now func() time.Time, fetchSem, indexSem chan struct{}, budget *retryBudget) status.RepoStatus {
 	// The per-repo freshness clock is carried forward with IndexedCommit:
 	// a failed repo keeps serving its last good data, so it keeps the age
 	// of that data rather than appearing never-synced.
 	rs := status.RepoStatus{IndexedCommit: prev.IndexedCommit, LastSuccessAt: prev.LastSuccessAt}
 
-	fetchSem <- struct{}{}
-	_, err := deps.Mirror.Ensure(ctx, repo, deps.Token)
-	<-fetchSem
+	retries, err := ensureMirror(ctx, deps, repo, fetchSem, budget)
+	// Recorded even when the retry ultimately succeeded: a repo that
+	// needed one is the only evidence that the flake rate is climbing.
+	rs.FetchRetries = retries
 	if err != nil {
 		rs.Error = status.TruncateError(err.Error())
 		return rs

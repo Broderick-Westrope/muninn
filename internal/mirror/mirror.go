@@ -71,7 +71,7 @@ func (m *Manager) Ensure(ctx context.Context, repo discover.Repo, token string) 
 			return false, err
 		}
 		if _, err := fetcher.Run(ctx, "-C", dir, "fetch", "--prune", "origin"); err != nil {
-			return false, fmt.Errorf("fetching %s: %w", repo.FullName, err)
+			return false, netOpErrorf("fetch", err)
 		}
 		return false, nil
 	} else if !errors.Is(statErr, fs.ErrNotExist) {
@@ -95,8 +95,12 @@ func (m *Manager) Ensure(ctx context.Context, repo discover.Repo, token string) 
 	if err := os.RemoveAll(tmp); err != nil {
 		return false, fmt.Errorf("removing stale temp clone for %s: %w", repo.FullName, err)
 	}
-	if _, err := fetcher.Run(ctx, "clone", "--bare", "--config", "gc.auto=0", repo.CloneURL, tmp); err != nil {
-		return false, fmt.Errorf("cloning %s: %w", repo.FullName, err)
+	// --quiet suppresses clone's unconditional "Cloning into bare
+	// repository '<dest>'..." banner, which would otherwise be the first
+	// stderr line on failure and would put the absolute temp path into the
+	// recorded error ahead of git's actual diagnosis.
+	if _, err := fetcher.Run(ctx, "clone", "--quiet", "--bare", "--config", "gc.auto=0", repo.CloneURL, tmp); err != nil {
+		return false, netOpErrorf("clone", err)
 	}
 	if _, err := runGit(ctx, "-C", tmp, "config", "remote.origin.fetch", "+refs/heads/*:refs/heads/*"); err != nil {
 		return false, fmt.Errorf("configuring fetch refspec for %s: %w", repo.FullName, err)
@@ -324,4 +328,80 @@ func authConfig(token string) []string {
 // returning its trimmed stdout.
 func runGit(ctx context.Context, args ...string) (string, error) {
 	return gitcmd.Runner{}.Run(ctx, args...)
+}
+
+// netOpError is a concise error for a failed network git operation.
+//
+// The default rendering of gitcmd.Error prefixes the cause with the full
+// argv, which for a mirror operation embeds the absolute mirror path, and
+// callers add the repo name on top. That framing is entirely derivable
+// (the status file already keys per-repo entries by name) yet consumes
+// most of status.maxErrorLen before git's own diagnosis appears, so the
+// recorded error reliably truncated away the only part that mattered.
+//
+// The wrapped error is retained for errors.Is, so classification against
+// gitcmd.ErrTimeout keeps working.
+type netOpError struct {
+	op     string
+	detail string
+	err    error
+}
+
+func (e *netOpError) Error() string { return e.op + ": " + e.detail }
+
+func (e *netOpError) Unwrap() error { return e.err }
+
+// netOpErrorf builds a netOpError from a failed git invocation, preferring
+// git's own diagnosis as the detail.
+func netOpErrorf(op string, err error) error {
+	var gitErr *gitcmd.Error
+	if !errors.As(err, &gitErr) {
+		return fmt.Errorf("%s: %w", op, err)
+	}
+	detail := diagnosticLine(gitErr.Stderr)
+	if detail == "" {
+		// A killed git (timeout) often writes nothing to stderr, so fall
+		// back to the process-level cause rather than recording just an
+		// exit code.
+		detail = fmt.Sprintf("exit %d: %v", gitErr.ExitCode, gitErr.Err)
+	}
+	return &netOpError{op: op, detail: detail, err: err}
+}
+
+// diagnosticPrefixes are the line prefixes git uses for actual diagnoses,
+// as opposed to progress and advisory chatter.
+var diagnosticPrefixes = []string{"fatal:", "error:", "remote:", "warning:"}
+
+// diagnosticLine picks the one line of git stderr that states the cause.
+//
+// It cannot simply take the first line: `git clone` opens with an
+// unconditional "Cloning into bare repository '<dest>'..." — which for a
+// mirror is the absolute temp path, exactly the noise this whole error
+// format exists to drop — and the real `fatal:` follows it. Clone is also
+// passed --quiet to suppress that line at the source; this is the backstop
+// for anything else git decides to narrate first.
+//
+// Preference order is the first diagnostic-prefixed line, then the last
+// non-blank line. The fallback favours the end because git's informational
+// output leads and its errors trail, so the last line is the better guess
+// when no prefix matched.
+func diagnosticLine(s string) string {
+	var lines []string
+	for line := range strings.SplitSeq(s, "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			lines = append(lines, trimmed)
+		}
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	for _, line := range lines {
+		lower := strings.ToLower(line)
+		for _, prefix := range diagnosticPrefixes {
+			if strings.HasPrefix(lower, prefix) {
+				return line
+			}
+		}
+	}
+	return lines[len(lines)-1]
 }

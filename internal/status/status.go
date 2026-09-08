@@ -74,6 +74,14 @@ type RepoStatus struct {
 	// basis for staleness: freshness is a property of a repo's data, not of
 	// the fleet, so one broken repo must not age the other forty-nine.
 	LastSuccessAt time.Time `json:"lastSuccessAt,omitzero"`
+	// FetchRetries counts retries spent fetching this repo in the most
+	// recent run. A retried repo that then succeeded is a full success and
+	// deliberately does not fail the run — otherwise an hourly sync would
+	// sit permanently degraded over a transient network flake — so this
+	// counter is the only thing keeping that flake visible. A value that
+	// used to be 0 or 1 and is now routinely nonzero means the network or
+	// the fetch concurrency needs attention, not a bigger retry budget.
+	FetchRetries int `json:"fetchRetries,omitempty"`
 }
 
 // Write atomically writes the status to path via a temp file and rename.
@@ -166,9 +174,23 @@ func migrate(s *SyncStatus) {
 	}
 }
 
-// maxErrorLen caps the recorded error text. The value is remote-derived
-// (GitHub API bodies, git stderr) and is interpolated into MCP tool
-// output, so an unbounded string could flood or steer an agent's context.
+// maxErrorLen caps the recorded error text.
+//
+// SyncStatus.Error is the string that needs the cap: on the TotalFailure
+// path it carries remote-derived text (a GitHub API response body) and it
+// is the one error interpolated into MCP tool output, via the degraded
+// warning, where an unbounded value could flood or steer an agent's
+// context. Truncation keeps the head because that is where muninn's own
+// framing of the failure sits; the remote payload trails it and is the
+// part that should be cut.
+//
+// RepoStatus.Error only reaches the `muninn status` table, so the cap is
+// a length backstop rather than a safety boundary there. It is not a
+// licence to record sprawling errors: Write marshals the whole file after
+// every repo completes, so per-entry size is multiplied by the repo count
+// on every run and again on every MCP tool call that reads the file.
+// Callers should record a concise cause (see mirror's netOpError) instead
+// of relying on this to trim a verbose one.
 const maxErrorLen = 200
 
 // TruncateError shortens a recorded error to maxErrorLen runes, marking

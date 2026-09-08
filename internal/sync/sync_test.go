@@ -3,6 +3,7 @@ package sync
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/broderick-westrope/muninn/internal/config"
 	"github.com/broderick-westrope/muninn/internal/discover"
+	"github.com/broderick-westrope/muninn/internal/gitcmd"
 	"github.com/broderick-westrope/muninn/internal/index"
 	"github.com/broderick-westrope/muninn/internal/lock"
 	"github.com/broderick-westrope/muninn/internal/mirror"
@@ -998,3 +1000,248 @@ type failingCleanTmpMirror struct {
 }
 
 func (failingCleanTmpMirror) CleanTmp() error { return errors.New("cleantmp boom") }
+
+// flakyMirror fails the first failures calls to Ensure with err, then
+// delegates to the embedded Mirror. It models the transient TLS handshake
+// failures observed against github.com, which succeed on a second attempt.
+type flakyMirror struct {
+	Mirror
+	mu       stdsync.Mutex
+	failures int
+	err      error
+	calls    int
+}
+
+func (f *flakyMirror) Ensure(ctx context.Context, repo discover.Repo, token string) (bool, error) {
+	f.mu.Lock()
+	f.calls++
+	remaining := f.failures
+	if remaining > 0 {
+		f.failures--
+	}
+	f.mu.Unlock()
+	if remaining > 0 {
+		return false, f.err
+	}
+	return f.Mirror.Ensure(ctx, repo, token)
+}
+
+func (f *flakyMirror) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
+// zeroRetryDelay removes the real backoff for tests that only care about
+// retry accounting, not the wait itself.
+func zeroRetryDelay(t *testing.T) {
+	t.Helper()
+	prev := fetchRetryDelay
+	fetchRetryDelay = 0
+	t.Cleanup(func() { fetchRetryDelay = prev })
+}
+
+// TestRunRetriesTransientFetchFailure is the core regression: a single
+// dropped connection used to fail the repo for the whole run, and one
+// failed repo marks the run degraded.
+func TestRunRetriesTransientFetchFailure(t *testing.T) {
+	zeroRetryDelay(t)
+	src, commit := fixtureRepo(t)
+	e := newEnv(t)
+	deps := e.deps(&stubDiscoverer{repos: []discover.Repo{fileRepo("acme/a", src)}}, nil)
+	fm := &flakyMirror{Mirror: deps.Mirror, failures: 1, err: errors.New("SSL_connect: SSL_ERROR_SYSCALL")}
+	deps.Mirror = fm
+
+	st, err := Run(context.Background(), &config.Config{}, deps)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// A repo that recovered on retry is a full success: an hourly sync must
+	// not sit permanently degraded over a transient network flake.
+	if !st.Success {
+		t.Errorf("Success = false, want true after a recovered retry: %+v", st.Repos)
+	}
+	rs := st.Repos["acme/a"]
+	if rs.Error != "" || !rs.Fetched || !rs.Indexed {
+		t.Errorf("acme/a = %+v, want fetched+indexed without error", rs)
+	}
+	if rs.IndexedCommit != commit {
+		t.Errorf("IndexedCommit = %q, want %q", rs.IndexedCommit, commit)
+	}
+	// The flake must stay visible, otherwise a degrading network is
+	// absorbed silently until it stops being recoverable.
+	if rs.FetchRetries != 1 {
+		t.Errorf("FetchRetries = %d, want 1", rs.FetchRetries)
+	}
+	if got := fm.callCount(); got != 2 {
+		t.Errorf("Ensure calls = %d, want 2", got)
+	}
+	if st.ConsecutiveFailures != 0 {
+		t.Errorf("ConsecutiveFailures = %d, want 0", st.ConsecutiveFailures)
+	}
+}
+
+// TestRunRetriesFetchOnlyOnce pins the retry at one attempt so a
+// permanently broken repo cannot multiply the run's network work.
+func TestRunRetriesFetchOnlyOnce(t *testing.T) {
+	zeroRetryDelay(t)
+	src, _ := fixtureRepo(t)
+	e := newEnv(t)
+	deps := e.deps(&stubDiscoverer{repos: []discover.Repo{fileRepo("acme/a", src)}}, nil)
+	fm := &flakyMirror{Mirror: deps.Mirror, failures: 99, err: errors.New("connection reset")}
+	deps.Mirror = fm
+
+	st, err := Run(context.Background(), &config.Config{}, deps)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if st.Success {
+		t.Error("Success = true, want false when the repo never fetched")
+	}
+	rs := st.Repos["acme/a"]
+	if rs.Error == "" {
+		t.Error("Error = empty, want the fetch failure recorded")
+	}
+	if rs.FetchRetries != 1 {
+		t.Errorf("FetchRetries = %d, want 1", rs.FetchRetries)
+	}
+	if got := fm.callCount(); got != 2 {
+		t.Errorf("Ensure calls = %d, want 2 (one attempt, one retry)", got)
+	}
+}
+
+// TestRunDoesNotRetryFetchTimeout guards the one error class where a retry
+// is genuinely expensive: a timeout already consumed the full fetch
+// deadline, so retrying would double a slow run's wall time.
+func TestRunDoesNotRetryFetchTimeout(t *testing.T) {
+	src, _ := fixtureRepo(t)
+	e := newEnv(t)
+	deps := e.deps(&stubDiscoverer{repos: []discover.Repo{fileRepo("acme/a", src)}}, nil)
+	// Wrapped the way gitcmd reports a deadline, so the classification
+	// under test is errors.Is and not a match on the message text.
+	timeoutErr := fmt.Errorf("fetch: %w: signal: killed", gitcmd.ErrTimeout)
+	fm := &flakyMirror{Mirror: deps.Mirror, failures: 99, err: timeoutErr}
+	deps.Mirror = fm
+
+	st, err := Run(context.Background(), &config.Config{}, deps)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	rs := st.Repos["acme/a"]
+	if rs.FetchRetries != 0 {
+		t.Errorf("FetchRetries = %d, want 0 for a timeout", rs.FetchRetries)
+	}
+	if got := fm.callCount(); got != 1 {
+		t.Errorf("Ensure calls = %d, want 1 (no retry after a timeout)", got)
+	}
+}
+
+// TestRunRetryBudgetIsFleetWide checks that a total outage does not turn
+// into every repo retrying: past the budget the run fails fast instead of
+// doubling the load against an already failing endpoint.
+func TestRunRetryBudgetIsFleetWide(t *testing.T) {
+	zeroRetryDelay(t)
+	repos := make([]discover.Repo, 0, maxFetchRetryRepos+4)
+	for i := range maxFetchRetryRepos + 4 {
+		src, _ := fixtureRepo(t)
+		repos = append(repos, fileRepo(fmt.Sprintf("acme/r%d", i), src))
+	}
+	e := newEnv(t)
+	deps := e.deps(&stubDiscoverer{repos: repos}, nil)
+	fm := &flakyMirror{Mirror: deps.Mirror, failures: 10_000, err: errors.New("could not resolve host")}
+	deps.Mirror = fm
+
+	st, err := Run(context.Background(), &config.Config{}, deps)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	retried := 0
+	for _, rs := range st.Repos {
+		retried += rs.FetchRetries
+	}
+	if retried != maxFetchRetryRepos {
+		t.Errorf("total retries = %d, want the budget %d", retried, maxFetchRetryRepos)
+	}
+	// One attempt each, plus the capped retries: without the budget this
+	// would be two attempts for every repo.
+	if got, want := fm.callCount(), len(repos)+maxFetchRetryRepos; got != want {
+		t.Errorf("Ensure calls = %d, want %d", got, want)
+	}
+}
+
+// waitFor polls cond until it holds, failing the test on timeout. Used
+// instead of a fixed sleep so the retry tests do not depend on goroutine
+// scheduling.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// TestEnsureMirrorReleasesSemaphoreDuringBackoff pins the reason the retry
+// lives here rather than inside mirror.Ensure: sleeping while holding a
+// fetch slot would shrink the pool exactly when it is contended, and in a
+// wide outage every worker would sleep holding one, stalling the run.
+func TestEnsureMirrorReleasesSemaphoreDuringBackoff(t *testing.T) {
+	prev := fetchRetryDelay
+	fetchRetryDelay = time.Hour // long enough that the test never outlasts it
+	t.Cleanup(func() { fetchRetryDelay = prev })
+
+	fm := &flakyMirror{failures: 99, err: errors.New("connection reset")}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Capacity 1 makes the contention unambiguous: if the backoff held the
+	// slot, the acquire below could never succeed.
+	sem := make(chan struct{}, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ensureMirror(ctx, Deps{Mirror: fm}, discover.Repo{FullName: "acme/a"}, sem, &retryBudget{left: 1})
+	}()
+
+	waitFor(t, "the first fetch attempt to fail", func() bool { return fm.callCount() >= 1 })
+	select {
+	case sem <- struct{}{}:
+		<-sem
+	case <-time.After(2 * time.Second):
+		t.Fatal("fetch slot still held during backoff")
+	}
+	cancel()
+	<-done
+}
+
+// TestEnsureMirrorCancelMidBackoffCountsNoRetry keeps FetchRetries honest:
+// a run canceled during the backoff never made a second attempt, so
+// counting one would overstate the flake rate the field exists to measure.
+func TestEnsureMirrorCancelMidBackoffCountsNoRetry(t *testing.T) {
+	prev := fetchRetryDelay
+	fetchRetryDelay = time.Hour
+	t.Cleanup(func() { fetchRetryDelay = prev })
+
+	fm := &flakyMirror{failures: 99, err: errors.New("connection reset")}
+	ctx, cancel := context.WithCancel(context.Background())
+	sem := make(chan struct{}, 1)
+	go func() {
+		waitFor(t, "the first fetch attempt to fail", func() bool { return fm.callCount() >= 1 })
+		cancel()
+	}()
+
+	retries, err := ensureMirror(ctx, Deps{Mirror: fm}, discover.Repo{FullName: "acme/a"}, sem, &retryBudget{left: 1})
+	if err == nil {
+		t.Fatal("err = nil, want the fetch failure")
+	}
+	if retries != 0 {
+		t.Errorf("retries = %d, want 0 when canceled before the retry ran", retries)
+	}
+	if got := fm.callCount(); got != 1 {
+		t.Errorf("Ensure calls = %d, want 1", got)
+	}
+	if len(sem) != 0 {
+		t.Errorf("semaphore holds %d slots, want 0 (leaked)", len(sem))
+	}
+}

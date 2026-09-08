@@ -74,6 +74,12 @@ func printStatus(out io.Writer, st *status.SyncStatus) error {
 	if st.ConsecutiveFailures > 0 {
 		fmt.Fprintf(out, "consecutive failures: %d\n", st.ConsecutiveFailures)
 	}
+	// Retries are reported even though the run succeeded: absorbing a
+	// transient fetch failure is the point, but silently absorbing a
+	// growing number of them is how a degrading network stays invisible.
+	if repos, retries := fetchRetryTotals(st); retries > 0 {
+		fmt.Fprintf(out, "fetch retries: %d across %d repos (transient network failures, recovered)\n", retries, repos)
+	}
 
 	if len(failed) > 0 {
 		w := tabwriter.NewWriter(out, 2, 8, 2, ' ', 0)
@@ -181,6 +187,18 @@ func failedRepos(st *status.SyncStatus) []string {
 	}
 	sort.Strings(failed)
 	return failed
+}
+
+// fetchRetryTotals returns how many repos needed a fetch retry in the most
+// recent run and the total retries spent across them.
+func fetchRetryTotals(st *status.SyncStatus) (repos, retries int) {
+	for _, rs := range st.Repos {
+		if rs.FetchRetries > 0 {
+			repos++
+			retries += rs.FetchRetries
+		}
+	}
+	return repos, retries
 }
 
 // gcFailedRepos returns the names of repos whose housekeeping failed but

@@ -112,6 +112,11 @@ func runSync(cmd *cobra.Command, ifDue, noRepair bool) error {
 		}
 	}
 	fmt.Fprintf(out, "synced %d repos, %d failed — see muninn status\n", synced, failed)
+	// Surfaced here and not only in `muninn status`, because a run watched
+	// live is exactly when a climbing flake rate is worth noticing.
+	if repos, retries := fetchRetryTotals(st); retries > 0 {
+		fmt.Fprintf(out, "recovered %d transient fetch failures across %d repos\n", retries, repos)
+	}
 
 	// Repair last, and never from the scheduled job. Reinstalling boots the
 	// job out, which would kill a scheduled run mid-sync; doing it after

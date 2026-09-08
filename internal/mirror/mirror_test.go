@@ -592,3 +592,155 @@ func TestMaybeGCUnderThreshold(t *testing.T) {
 		t.Fatalf("loose objects = %d, want 3 (gc must not have run)", got)
 	}
 }
+
+// TestEnsureFetchErrorIsConciseAndUnwrappable pins both properties of the
+// recorded fetch error. It used to be rendered as the repo name, the
+// absolute mirror path, and the full argv followed by git's stderr, which
+// exceeded the status file's per-error budget before the cause appeared —
+// so every recorded fetch failure truncated away its own diagnosis.
+func TestEnsureFetchErrorIsConciseAndUnwrappable(t *testing.T) {
+	m := &Manager{BaseDir: t.TempDir()}
+	repo, upstream := fixtureRepo(t, "acme/widget")
+	if _, err := m.Ensure(context.Background(), repo, ""); err != nil {
+		t.Fatalf("Ensure (clone): %v", err)
+	}
+	// Deleting the upstream makes the next fetch fail the way an
+	// unreachable remote does.
+	if err := os.RemoveAll(upstream); err != nil {
+		t.Fatalf("removing upstream: %v", err)
+	}
+
+	_, err := m.Ensure(context.Background(), repo, "")
+	if err == nil {
+		t.Fatal("Ensure = nil error, want a fetch failure")
+	}
+	msg := err.Error()
+	if !strings.HasPrefix(msg, "fetch: ") {
+		t.Errorf("message = %q, want it to lead with the operation", msg)
+	}
+	// The absolute mirror path is the bulk of the old prefix and is fully
+	// derivable from the repo name the status file already keys by.
+	if strings.Contains(msg, m.Dir(repo.FullName)) {
+		t.Errorf("message = %q, want no absolute mirror path", msg)
+	}
+	if strings.Contains(msg, "--prune") {
+		t.Errorf("message = %q, want no argv", msg)
+	}
+	// The budget that matters: status.TruncateError cuts at 200 runes, and
+	// the cause has to survive it.
+	if len([]rune(msg)) > 200 {
+		t.Errorf("message is %d runes, want it within the 200-rune status budget: %q", len([]rune(msg)), msg)
+	}
+	// Retry classification in sync depends on errors.Is reaching through
+	// this error to gitcmd's sentinel, so the chain must stay intact.
+	var gitErr *gitcmd.Error
+	if !errors.As(err, &gitErr) {
+		t.Errorf("errors.As(*gitcmd.Error) = false, want the wrapped error reachable: %v", err)
+	}
+}
+
+func TestDiagnosticLine(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"single", "fatal: boom", "fatal: boom"},
+		{"prefers fatal over advisory tail", "fatal: boom\nhint: try harder\n", "fatal: boom"},
+		// The regression this function exists for: git clone leads with an
+		// unconditional banner naming the absolute destination, so taking
+		// the first line both leaked the mirror path and dropped the cause.
+		{
+			"skips clone banner",
+			"Cloning into bare repository '/abs/mirrors/acme/widget.git.tmp'...\nfatal: repository not found\n",
+			"fatal: repository not found",
+		},
+		{
+			"remote line counts as a diagnosis",
+			"Cloning into bare repository '/abs/path.tmp'...\nremote: Repository not found.\nfatal: repository not found\n",
+			"remote: Repository not found.",
+		},
+		{"error prefix", "Cloning into '/abs'...\nerror: bad thing\n", "error: bad thing"},
+		// No recognised prefix: git narrates before it fails, so the tail
+		// is a better guess than the banner.
+		{"falls back to last line", "Cloning into '/abs'...\nsomething odd happened\n", "something odd happened"},
+		{"leading blank", "\n\n  fatal: boom  \n", "fatal: boom"},
+		{"empty", "", ""},
+		{"blank only", "\n  \n", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := diagnosticLine(tt.in); got != tt.want {
+				t.Errorf("diagnosticLine(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestNetOpErrorfNonGitError covers the fallback path where the failure did
+// not come from a git invocation at all.
+func TestNetOpErrorfNonGitError(t *testing.T) {
+	sentinel := errors.New("boom")
+	err := netOpErrorf("fetch", sentinel)
+	if got, want := err.Error(), "fetch: boom"; got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
+	if !errors.Is(err, sentinel) {
+		t.Error("errors.Is(sentinel) = false, want the cause reachable")
+	}
+}
+
+// TestNetOpErrorfEmptyStderr covers a killed git, which often writes
+// nothing to stderr: recording just an exit code would lose the cause.
+func TestNetOpErrorfEmptyStderr(t *testing.T) {
+	gitErr := &gitcmd.Error{
+		Args:     []string{"fetch", "--prune", "origin"},
+		ExitCode: -1,
+		Stderr:   "",
+		Err:      fmt.Errorf("%w: signal: killed", gitcmd.ErrTimeout),
+	}
+	err := netOpErrorf("fetch", gitErr)
+	if !strings.Contains(err.Error(), "signal: killed") {
+		t.Errorf("Error() = %q, want the process-level cause", err.Error())
+	}
+	if !errors.Is(err, gitcmd.ErrTimeout) {
+		t.Error("errors.Is(ErrTimeout) = false, want timeout classification to survive")
+	}
+}
+
+// TestEnsureCloneErrorIsConcise covers the initial-clone path, which is
+// where the recorded error was worst: clone announces "Cloning into bare
+// repository '<abs tmp path>'..." before it fails, so an error built from
+// the first stderr line leaked the mirror path and dropped git's cause
+// entirely. This is the first-sync case for every new repo.
+func TestEnsureCloneErrorIsConcise(t *testing.T) {
+	m := &Manager{BaseDir: t.TempDir()}
+	repo := discover.Repo{
+		FullName:      "acme/missing",
+		CloneURL:      "file://" + filepath.Join(t.TempDir(), "does-not-exist"),
+		DefaultBranch: "main",
+	}
+
+	_, err := m.Ensure(context.Background(), repo, "")
+	if err == nil {
+		t.Fatal("Ensure = nil error, want a clone failure")
+	}
+	msg := err.Error()
+	if !strings.HasPrefix(msg, "clone: ") {
+		t.Errorf("message = %q, want it to lead with the operation", msg)
+	}
+	if !strings.Contains(msg, "fatal:") {
+		t.Errorf("message = %q, want git's own diagnosis", msg)
+	}
+	// The temp clone path is the absolute mirror path plus a suffix, and
+	// was previously the entire recorded message.
+	if strings.Contains(msg, m.Dir(repo.FullName)) {
+		t.Errorf("message = %q, want no absolute mirror path", msg)
+	}
+	if strings.Contains(msg, "Cloning into") {
+		t.Errorf("message = %q, want no clone banner", msg)
+	}
+	if len([]rune(msg)) > 200 {
+		t.Errorf("message is %d runes, want it within the 200-rune status budget: %q", len([]rune(msg)), msg)
+	}
+}

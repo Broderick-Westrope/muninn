@@ -213,3 +213,52 @@ func TestPrintStatusSeparatesGCFailures(t *testing.T) {
 		t.Errorf("output missing the gc section:\n%s", out)
 	}
 }
+
+// TestPrintStatusReportsRecoveredFetchRetries checks the run still reads as
+// a success while the absorbed flake stays visible. Reporting the retry is
+// the only thing standing between a transient network fault and a silently
+// degrading one.
+func TestPrintStatusReportsRecoveredFetchRetries(t *testing.T) {
+	var buf bytes.Buffer
+	err := printStatus(&buf, &status.SyncStatus{
+		StartedAt:     time.Now().Add(-time.Minute),
+		FinishedAt:    time.Now(),
+		LastSuccessAt: time.Now(),
+		Success:       true,
+		Repos: map[string]status.RepoStatus{
+			"acme/a": {Fetched: true, Indexed: true, LastSuccessAt: time.Now(), FetchRetries: 1},
+			"acme/b": {Fetched: true, Indexed: true, LastSuccessAt: time.Now(), FetchRetries: 2},
+			"acme/c": {Fetched: true, Indexed: true, LastSuccessAt: time.Now()},
+		},
+	})
+	if err != nil {
+		t.Fatalf("printStatus: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "result: success") {
+		t.Errorf("a recovered retry must not make the run a failure:\n%s", out)
+	}
+	if !strings.Contains(out, "fetch retries: 3 across 2 repos") {
+		t.Errorf("output missing the retry tally:\n%s", out)
+	}
+}
+
+// TestPrintStatusOmitsRetryLineWhenClean keeps the common case quiet.
+func TestPrintStatusOmitsRetryLineWhenClean(t *testing.T) {
+	var buf bytes.Buffer
+	err := printStatus(&buf, &status.SyncStatus{
+		StartedAt:     time.Now().Add(-time.Minute),
+		FinishedAt:    time.Now(),
+		LastSuccessAt: time.Now(),
+		Success:       true,
+		Repos: map[string]status.RepoStatus{
+			"acme/a": {Fetched: true, Indexed: true, LastSuccessAt: time.Now()},
+		},
+	})
+	if err != nil {
+		t.Fatalf("printStatus: %v", err)
+	}
+	if strings.Contains(buf.String(), "fetch retries") {
+		t.Errorf("clean run must not mention retries:\n%s", buf.String())
+	}
+}
