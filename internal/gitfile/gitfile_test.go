@@ -241,8 +241,11 @@ func TestListTreeDepth(t *testing.T) {
 		t.Fatalf("ListTree of a: %v", err)
 	}
 	got = entriesByPath(entries)
-	if len(got) != 3 {
-		t.Fatalf("entries under a = %+v, want a, a/b, a/d.txt", entries)
+	if len(got) != 2 {
+		t.Fatalf("entries under a = %+v, want a/b, a/d.txt", entries)
+	}
+	if _, ok := got["a"]; ok {
+		t.Error("a listed under itself, want only its children")
 	}
 	if _, ok := got["a/b/c.txt"]; ok {
 		t.Error("a/b/c.txt listed at depth 1 under a, want excluded")
@@ -271,6 +274,14 @@ func TestListTreeMissingPath(t *testing.T) {
 	_, _, err := ListTree(context.Background(), mirror, commit1, "nope", 1, 0)
 	if !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("err = %v, want fs.ErrNotExist", err)
+	}
+}
+
+func TestListTreeOfFile(t *testing.T) {
+	mirror, commit1, _ := fixtureMirror(t)
+	_, _, err := ListTree(context.Background(), mirror, commit1, "a/d.txt", 1, 0)
+	if !errors.Is(err, ErrNotDir) {
+		t.Fatalf("err = %v, want ErrNotDir", err)
 	}
 }
 

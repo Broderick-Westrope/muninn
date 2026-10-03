@@ -34,8 +34,8 @@ var ErrUnknownPath = errors.New("path not found at revision")
 // ErrFileTooLarge is returned by ReadFile for blobs larger than 10 MiB.
 var ErrFileTooLarge = errors.New("file too large to read (over 10 MiB)")
 
-// ErrNotDir is returned by ListDir when the path names a file rather than a
-// directory.
+// ErrNotDir is returned by ListTree and ListDir when the path names a file
+// rather than a directory.
 var ErrNotDir = errors.New("path is a file, not a directory")
 
 // TreeEntry is one entry of a directory listing.
@@ -133,7 +133,7 @@ func window(blob string, offset, limit int) (content string, totalLines int, err
 // so total > len(entries) means the listing was truncated. Entries past the
 // cap are counted but not parsed, bounding the work for huge trees. An
 // unreachable commit yields ErrIndexMismatch; a missing path yields an
-// error wrapping fs.ErrNotExist.
+// error wrapping fs.ErrNotExist; a path naming a file yields ErrNotDir.
 func ListTree(ctx context.Context, mirrorDir, commit, path string, depth, maxEntries int) (entries []TreeEntry, total int, err error) {
 	if depth < 1 {
 		depth = 1
@@ -159,9 +159,18 @@ func ListTree(ctx context.Context, mirrorDir, commit, path string, depth, maxEnt
 		if record == "" {
 			continue
 		}
-		_, name, ok := strings.Cut(record, "\t")
+		meta, name, ok := strings.Cut(record, "\t")
 		if !ok {
 			return nil, 0, fmt.Errorf("listing tree %q at commit %s: malformed ls-tree record %q", path, shortSHA(commit), record)
+		}
+		// A pathspec naming a directory matches the directory itself as
+		// well as its contents; it is the thing being listed, not an entry.
+		// A pathspec naming a file matches only that file.
+		if name == prefix {
+			if fields := strings.Fields(meta); len(fields) < 2 || fields[1] != "tree" {
+				return nil, 0, fmt.Errorf("path %q at commit %s: %w", path, shortSHA(commit), ErrNotDir)
+			}
+			continue
 		}
 		if relativeDepth(name, prefix) > depth {
 			continue
