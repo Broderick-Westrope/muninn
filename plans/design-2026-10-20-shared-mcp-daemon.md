@@ -64,8 +64,8 @@ runs every linked package's `init` before `main`, so an early branch in
 | Phase 2 (daemon, forwarder in `muninn`) | ~26 MB | ~61 MB | ~500 MB |
 | Phase 3 (forwarder in its own binary) | ~3 MB | ~61 MB | ~110 MB |
 
-The target is that muninn's total footprint stops depending on how many
-sessions are open, which only phase 3 delivers. Phases 1 and 2 are worth
+The target is that each extra session costs a few megabytes rather than
+a few dozen, which only phase 3 delivers. Phases 1 and 2 are worth
 shipping on their way there, and if the owner decides 500 MB is fine,
 the work stops after phase 2.
 
@@ -105,7 +105,8 @@ burst of representative tool calls, GC CPU, and latency) at 32, 48, and
 64 MiB. It applies only to `muninn mcp`, never to `muninn sync`, whose
 indexing legitimately needs more. The limit is soft: live data can still
 exceed it, and it says nothing about mmap'd shards, so it's a GC hint
-and not a ceiling. Phase 2's daemon reuses it.
+and not a ceiling. Phase 2's daemon gets its own value, benchmarked with
+concurrent sessions rather than copied from the single-session one.
 
 ## Phase 2: Shared Daemon
 
@@ -116,12 +117,12 @@ sequenceDiagram
     participant S as muninn mcp --daemon-start
     participant D as daemon
     C->>F: spawn, stdio pipes
-    F->>F: validate git and config, resolve identity
+    F->>F: validate git and config, resolve startup spec
     F->>D: dial socket, send admission request
     alt no daemon or draining
         F->>S: run and wait
         S->>D: start detached, then exit
-        F->>D: retry admission for up to 2 s
+        F->>D: retry admission until the 2 s budget runs out
     end
     alt admitted
         C-->>D: bytes copied both ways
@@ -130,11 +131,25 @@ sequenceDiagram
     end
 ```
 
+### Timing
+
+| Timer | Value | Owner | On expiry |
+| --- | --- | --- | --- |
+| Startup budget, first dial to admission, including running `--daemon-start` | 2 s | forwarder | serve in-process |
+| Admission exchange | 500 ms | both | not admitted; forwarder retries within its budget |
+| Wait to be reparented, then lock retry | 1 s each | daemon | exit; forwarders fall back |
+| Idle before exit | 5 min | daemon | drain and exit |
+| Each response write | 30 s | daemon | close that connection |
+
+The daemon's two 1 s waits can together outlast the forwarder's budget.
+That only happens when an old daemon is slow to exit, and the cost is
+one session served in-process.
+
 ### Forwarder
 
 `muninn mcp` does what it does today up to the searcher: it validates
 `git` and the config, so misconfiguration still fails fast in the client.
-Then it resolves the session's identity, asks a daemon to admit it, and
+Then it resolves the session's startup spec, asks a daemon to admit it, and
 on success copies stdin to the socket and the socket to stdout. The
 forwarding code lives in its own package that imports only the standard
 library, so phase 3 can lift it into a separate binary unchanged.
@@ -155,30 +170,43 @@ accepted, or still be queued in the listen backlog, just as an idle
 daemon decides to exit. So the first thing on every connection is a
 one-line exchange in muninn's own format, before any MCP bytes:
 
-- the forwarder sends its identity;
-- the daemon, holding the same mutex that guards its idle-to-draining
-  transition, replies `ok` and counts the session, or replies
-  `draining` (or closes) if it is shutting down or the identity doesn't
-  match its own.
+1. The forwarder sends `muninn-admit v1 <identity>\n`.
+2. The daemon reads at most 256 bytes up to the newline. Under the
+   mutex that guards its idle-to-draining transition it only checks its
+   state and the identity, and reserves a session or refuses. It writes
+   the reply after releasing the mutex, so a slow peer can't stall other
+   admissions or shutdown, and drops the reservation if the write fails.
+3. The reply is `ok <identity>\n` or `refused <reason>\n`. The forwarder
+   reads it byte by byte up to the newline, so nothing after it is
+   buffered away from the MCP stream, and accepts only an `ok` that
+   echoes its own identity.
 
-Anything other than `ok` within 500 ms counts as not admitted, and the
-forwarder retries or falls back. Admission, not dial, is the
-point of no return.
+Both sides put a 500 ms deadline on the exchange and clear it before MCP
+bytes flow; anything else (timeout, partial line, refusal, identity
+mismatch, a stranger on the socket) counts as not admitted. A forwarder
+never deletes or replaces a socket, even on mismatch: only a daemon
+holding the lock may. Admission, not dial, is the point of no return.
+There's no authentication beyond the socket directory's `0700`
+permissions; any process that can reach the socket is already the same
+user.
 
-### Identity
+### Startup spec and identity
 
 Today each `muninn mcp` resolves its own paths from its own environment.
 A shared daemon keeps the environment of whichever session started it,
-so only sessions that would have resolved the same things may share
-one. The identity is a hash of:
+so the forwarder resolves everything once into a startup spec and the
+daemon never re-resolves from its own environment or working directory.
+The spec holds absolute paths for the index, status file, mirrors,
+socket, lock, and log, plus the real path of the `muninn` binary and
+the identity. The XDG helpers accept relative overrides, so every path
+is made absolute against the forwarder's working directory.
+
+Only sessions that would have resolved the same things may share a
+daemon. The identity is a hash of:
 
 - the real path of the `muninn` binary (symlinks resolved once, in the
   forwarder), plus its size and mtime;
-- the absolute forms of `xdg.IndexDir()`, `xdg.StatusPath()`, and
-  `xdg.MirrorsDir()`. The XDG helpers accept relative overrides, so
-  they're made absolute against the forwarder's working directory before
-  hashing, and passed to the daemon as absolute paths rather than
-  re-resolved from its environment.
+- the spec's index, status, mirrors, and state directory paths.
 
 The path, size, and mtime are a heuristic: they change on `brew upgrade`
 (new Cellar path) and on normal rebuilds, but a metadata-preserving
@@ -193,23 +221,25 @@ it; the forwarder validates it so errors still surface per session.
 `git` is resolved from the daemon's `PATH`. That's accepted: muninn
 needs a working `git`, not a particular one.
 
-The socket and lock live at `xdg.StateDir()/mcp-<hash>.sock` and
-`.lock`, with a 16-character hash. If the socket path exceeds macOS's
+The socket and lock live at `<state dir>/mcp-<hash>.sock` and `.lock`,
+with a 16-character hash. If the socket path exceeds macOS's
 104-byte `sun_path` limit, the forwarder serves in-process.
 
 ### Daemon lifecycle
 
-1. Take `mcp-<hash>.lock` with `internal/lock`, retrying for up to 1 s
-   (an exiting daemon may still hold it). If it's held, exit 0: another
+1. Wait until reparented to launchd (see Detaching), so no client can
+   be admitted while the daemon is still in its process tree.
+2. Take the lock with `internal/lock`, retrying for up to 1 s (an
+   exiting daemon may still hold it). If it's held, exit 0: another
    daemon owns this identity. If locking is unsupported, exit non-zero;
    the forwarder's admission then fails and it serves in-process.
-2. Holding the lock, remove any stale socket file and listen.
-3. Register all tools, then accept connections. Tool-list changes are
+3. Holding the lock, remove any stale socket file and listen.
+4. Register all tools, then accept connections. Tool-list changes are
    broadcast to every session, so the tool set must be fixed before the
    first one connects.
-4. Serve each admitted connection as its own session on one shared
+5. Serve each admitted connection as its own session on one shared
    `sdk.Server`.
-5. After 5 minutes with no sessions, enter draining under the admission
+6. After 5 minutes with no sessions, enter draining under the admission
    mutex, close the listener, remove the socket file, and exit. The lock
    file is never removed; the kernel releases the lock with the process.
 
@@ -217,16 +247,18 @@ Holding the lock for the daemon's life is what makes the socket file
 trustworthy: lock free means no live daemon, so a leftover socket is
 stale and safe to delete. `internal/lock` opens the file close-on-exec,
 so `git` subprocesses don't inherit the lock. Forwarders never touch the
-lock; several racing forwarders each start a daemon, one wins, the rest
-exit within a second, and every forwarder's admission retry reaches the
-winner.
+lock; several racing forwarders each start a daemon, one wins, and the
+rest exit within a second. A forwarder usually reaches the winner within
+its budget; one that doesn't serves in-process, which costs memory but
+nothing else.
 
 **Detaching.** The forwarder runs `muninn mcp --daemon-start` and waits
 for it. That process starts the real daemon in a new session (`Setsid`),
-with stdin and stdout on `/dev/null`, stderr appended to
-`xdg.StateDir()/mcp.log`, and working directory `/`, then exits at once.
-The daemon is then reparented to launchd, so it isn't a descendant of
-any client: a client that kills its process group or walks its process
+with stdin and stdout on `/dev/null`, stderr appended to the spec's log
+path, and working directory `/`, passing it the startup spec, then exits
+at once. The daemon then polls `os.Getppid()` until it is 1 (giving up
+after 1 s) before it takes the lock and listens. From then on it isn't
+a descendant of any client: a client that kills its process group or walks its process
 tree on exit can't take down a daemon other sessions depend on, and a
 client waiting for EOF on the server's stdout can't hang on a pipe the
 daemon holds. App Sandbox and TCC behaviour for clients that run sandboxed
@@ -234,22 +266,27 @@ is unverified.
 
 ### Session end
 
-Today a client closing stdin doesn't abort the server: the SDK stops
-reading, finishes in-flight calls, writes their responses, and then
-`Run` returns. The daemon keeps that behaviour.
+Today, once the client closes stdin, the session is over: in go-sdk
+v1.6.1 a read error marks the connection as shutting down, and every
+later write, including responses to calls still running, is rejected
+(`internal/jsonrpc2/conn.go`, `shuttingDown` and `write`). The first
+rejected write then cancels the remaining calls. Responses in flight at
+EOF are lost today, so the daemon gives up nothing by treating EOF as
+the end of the session.
 
-- **Client closes stdin.** The forwarder half-closes the socket
-  (`CloseWrite`) and keeps copying responses to stdout until the daemon
-  closes the connection. The daemon's session sees EOF, finishes in-flight
-  calls as today, and then closes the connection.
-- **Client or forwarder dies.** The daemon sees the same EOF, and its
-  next write fails; the SDK cancels every in-flight call on a failed
-  write. Work that runs before that write is already bounded by the
-  per-operation `git` deadlines (`internal/githistory/githistory.go:17`).
-- **Client stops reading stdout.** Every write to a session's connection
-  has a 30 s deadline; when one expires the daemon closes that
-  connection, which fails later writes and cancels its calls. Without
-  this, one stuck client would pin its handler goroutines forever.
+- **EOF for any reason** (client closed stdin, client or forwarder
+  died). The forwarder half-closes the socket on stdin EOF and exits
+  when the daemon closes it. The daemon gives each connection its own
+  context, passes it to `Server.Connect` so every call's context derives
+  from it, and cancels it as soon as a read on the connection returns
+  EOF or an error. That stops abandoned `git` work at once instead of
+  when its first write fails, which is the one improvement on today.
+- **Client stops reading stdout.** Each write to a session's connection
+  gets a fresh 30 s deadline. It bounds the whole write, not progress,
+  which is fine because a response is a few kilobytes of text; a client
+  that can't take one in 30 s is stuck, and the daemon closes its
+  connection. A forwarder blocked writing to a stuck client's stdout
+  just stays blocked, which only affects that client.
 - **Malformed input.** A decode error ends the session in the SDK; the
   daemon closes the connection whenever a session ends for any reason.
 
@@ -264,8 +301,10 @@ reading, finishes in-flight calls, writes their responses, and then
   `GOMAXPROCS` and acquired with the call's context so a cancelled call
   stops waiting, stops 17 sessions starting 17 pickaxe scans at once.
   Zoekt's searcher is built for concurrent queries and needs no limit.
-- **Queues.** The SDK queues each session's incoming calls without a
-  bound. That's per session, as today, and isn't changed here.
+- **Unbounded work.** The SDK queues each session's calls without a
+  bound, searches have no wall-time limit, and `git` output isn't
+  capped. All of that is true today; the daemon concentrates it in one
+  process rather than adding to it, and this design doesn't change it.
 - **Logging.** The daemon logs admissions, session ends, panics, and
   Zoekt's shard-load errors to `mcp.log`. Zoekt's informational shard
   loading lines stay discarded.
@@ -277,12 +316,11 @@ built by goreleaser alongside `muninn` and installed next to it by the
 same Homebrew formula.
 
 `muninn mcp` still validates `git` and the config and resolves the
-identity, then `syscall.Exec`s the proxy found next to its own resolved
-executable. It passes everything explicitly: socket path, identity, the
-resolved `muninn` path (used to run `--daemon-start`), and the original
-arguments (so `--config` survives). The proxy resolves nothing itself. Exec keeps the pid and the inherited stdio,
-nothing has been read from stdin, and the 26 MB of init heap disappears
-with the old process image.
+startup spec, then `syscall.Exec`s the proxy found next to its own
+resolved executable, passing the spec and the original arguments (so
+`--config` survives). The proxy resolves nothing itself. Exec keeps the
+pid and the inherited stdio, nothing has been read from stdin, and the
+26 MB of init heap disappears with the old process image.
 
 When the proxy isn't admitted, it execs back into
 `<resolved muninn> mcp --in-process <original arguments>`. The
@@ -296,15 +334,15 @@ missing (a `go install` build, say), `muninn mcp` behaves as in phase 2.
 | One crash or out-of-memory kill drops every session at once | Accepted; panic recovery covers the common case |
 | A background process outlives the session that started it, for up to 5 idle minutes | Accepted; `README.md:120` ("Nothing stays resident between sessions") needs rewording |
 | A shard that fails to load during a sync is never retried: Zoekt records the new file identity before loading it (`search/watcher.go`, `scan`), so the searcher keeps the old shard until the file changes again | Pre-existing in every long-lived `muninn mcp`; a daemon serves every session from the one stale searcher. Logged to `mcp.log`; fixing it is out of scope |
-| During a sync, search results and `read_file` can briefly disagree, because the status file and the searcher's shard watcher update independently | Pre-existing and unchanged |
+| During a sync, search results and `read_file` can disagree, because the status file and the searcher's shard watcher update independently. Normally that lasts until the watcher catches up; after a failed shard load (row above) it lasts until the next sync rewrites that shard | Pre-existing and unchanged |
 | Exec handoff only works on Unix | Fine while scheduling is macOS-only |
 
 ## Testing
 
 - Daemon and forwarder in one test with a temp `XDG_STATE_HOME`: two
   sessions run tool calls concurrently and both get correct results.
-- A tool call in flight when the client closes stdin still gets its
-  response.
+- Closing stdin while a slow `git` call is in flight cancels that call
+  promptly, and other sessions are unaffected.
 - A stale socket with no lock holder is removed and replaced.
 - Two daemons started at once: exactly one serves, and every forwarder
   is admitted by it.
