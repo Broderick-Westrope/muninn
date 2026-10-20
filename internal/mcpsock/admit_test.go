@@ -344,3 +344,54 @@ func TestDialRetriesAStartWhoseDaemonNeverListened(t *testing.T) {
 		t.Errorf("start called %d times, want 2", starts)
 	}
 }
+
+func TestDialGivesUpOnAnUnexpectedReply(t *testing.T) {
+	socket := shortSocketPath(t)
+	ln, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			readLine(conn)
+			writeLine(conn, "muninn-admit v2 please upgrade")
+			conn.Close()
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	start := time.Now()
+	if _, err := Dial(ctx, socket, "abc", noStart); !errors.Is(err, ErrNotAdmitted) {
+		t.Errorf("Dial err = %v, want ErrNotAdmitted", err)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Errorf("Dial took %v, want it to give up at once on a reply it can't use", elapsed)
+	}
+}
+
+func TestDialStartsNoDaemonForASocketItCannotReach(t *testing.T) {
+	socket := shortSocketPath(t)
+	ln, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	if err := os.Chmod(socket, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	starts := 0
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	Dial(ctx, socket, "abc", func(context.Context) error { starts++; return nil })
+
+	if starts != 0 {
+		t.Errorf("start called %d times for a socket that exists but can't be reached, want 0", starts)
+	}
+}

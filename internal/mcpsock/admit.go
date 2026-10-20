@@ -15,6 +15,7 @@ import (
 	"net"
 	"os/exec"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -44,6 +45,11 @@ var (
 	// ErrIdentityMismatch reports a session whose identity differs from
 	// the daemon's: it resolved a different binary or different paths.
 	ErrIdentityMismatch = errors.New("identity mismatch")
+
+	// ErrRefused reports a reply Dial can't act on: a refusal other than
+	// draining or identity, or something that isn't an admission reply
+	// at all (another program, or a muninn speaking another version).
+	ErrRefused = errors.New("refused by whatever listens on the socket")
 
 	// ErrDraining reports that the daemon is shutting down and admits no
 	// new sessions.
@@ -114,13 +120,13 @@ func Dial(ctx context.Context, socket, identity string, start func(context.Conte
 			return conn, nil
 		}
 		last = err
-		if errors.Is(err, ErrIdentityMismatch) {
-			// Another binary or another index owns this socket; waiting
+		if errors.Is(err, ErrIdentityMismatch) || errors.Is(err, ErrRefused) {
+			// Another binary, index or program owns this socket; waiting
 			// won't change that.
 			return nil, fmt.Errorf("%w: %w", ErrNotAdmitted, err)
 		}
 		needDaemon := errors.Is(err, ErrDraining) || isNoListener(err)
-		if needDaemon && (lastStart.IsZero() || time.Since(lastStart) >= restartAfter) {
+		if needDaemon && ctx.Err() == nil && (lastStart.IsZero() || time.Since(lastStart) >= restartAfter) {
 			if err := start(ctx); err != nil {
 				return nil, fmt.Errorf("%w: starting it: %w", ErrNotAdmitted, err)
 			}
@@ -169,7 +175,7 @@ func admit(ctx context.Context, socket, identity string) (*net.UnixConn, error) 
 		return nil, ErrIdentityMismatch
 	default:
 		conn.Close()
-		return nil, fmt.Errorf("unexpected admission reply %q", reply)
+		return nil, fmt.Errorf("%w: reply %q", ErrRefused, reply)
 	}
 	if err := conn.SetDeadline(time.Time{}); err != nil {
 		conn.Close()
@@ -181,8 +187,7 @@ func admit(ctx context.Context, socket, identity string) (*net.UnixConn, error) 
 // isNoListener reports whether a dial failed because no daemon is
 // listening: the socket file is missing or left behind by a dead daemon.
 func isNoListener(err error) bool {
-	var opErr *net.OpError
-	return errors.As(err, &opErr) && opErr.Op == "dial"
+	return errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ECONNREFUSED)
 }
 
 // readLine reads one newline-terminated line a byte at a time, so nothing
