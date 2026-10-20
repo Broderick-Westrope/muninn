@@ -389,3 +389,23 @@ func TestServeEndsASessionWhoseClientStopsReading(t *testing.T) {
 		t.Fatal("a client that stopped reading held its session past the write timeout")
 	}
 }
+
+func TestGateIgnoresAnExpiryFromAnEarlierIdlePeriod(t *testing.T) {
+	idled := false
+	g := newGate(time.Hour, func() { idled = true })
+	stale := g.period
+
+	// A session comes and goes while the first period's timer callback is
+	// already waiting for the lock.
+	g.reserve()
+	g.release()
+	g.expire(stale)
+
+	if idled {
+		t.Error("an expiry from before the last session drained the daemon at once")
+	}
+	g.expire(g.period)
+	if !idled {
+		t.Error("the current period's expiry didn't drain an idle daemon")
+	}
+}

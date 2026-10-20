@@ -152,16 +152,31 @@ type gate struct {
 	active       int
 	drainStarted bool
 	idle         time.Duration
-	timer        *time.Timer
 	onIdle       func()
+
+	// period numbers the current idle period. A timer callback carries the
+	// period it was started for, so one that fires just as a session opens
+	// and is still waiting for the lock after that session has closed
+	// can't end the idle period that began after it.
+	period uint64
+	timer  *time.Timer
 }
 
 // newGate returns a gate whose idle clock is already running, so a daemon
 // nobody connects to exits too.
 func newGate(idle time.Duration, onIdle func()) *gate {
 	g := &gate{idle: idle, onIdle: onIdle}
-	g.timer = time.AfterFunc(idle, g.fire)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.startIdle()
 	return g
+}
+
+// startIdle begins a new idle period. The caller holds mu.
+func (g *gate) startIdle() {
+	g.period++
+	period := g.period
+	g.timer = time.AfterFunc(g.idle, func() { g.expire(period) })
 }
 
 // reserve admits a session unless the daemon is draining.
@@ -172,25 +187,25 @@ func (g *gate) reserve() bool {
 		return false
 	}
 	g.active++
+	g.period++ // no idle period while a session is open
 	g.timer.Stop()
 	return true
 }
 
-// release ends a session and restarts the idle clock if it was the last.
+// release ends a session and starts an idle period if it was the last.
 func (g *gate) release() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.active--
 	if g.active == 0 && !g.drainStarted {
-		g.timer.Reset(g.idle)
+		g.startIdle()
 	}
 }
 
-// fire starts draining if the daemon is still idle when the clock runs
-// out; a session admitted in the meantime cancels it.
-func (g *gate) fire() {
+// expire starts draining if idle period is still the current one.
+func (g *gate) expire(period uint64) {
 	g.mu.Lock()
-	if g.active > 0 || g.drainStarted {
+	if period != g.period || g.active > 0 || g.drainStarted {
 		g.mu.Unlock()
 		return
 	}
