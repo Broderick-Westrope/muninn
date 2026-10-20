@@ -25,16 +25,6 @@ import (
 // idle exit is cheap; this mostly saves churn between agent sessions.
 const defaultMCPIdle = 5 * time.Minute
 
-// mcpIdle returns the daemon's idle timeout. MUNINN_MCP_IDLE (a Go
-// duration) overrides it; it exists so the end-to-end tests don't wait
-// minutes, and isn't documented for users.
-func mcpIdle() time.Duration {
-	if d, err := time.ParseDuration(os.Getenv("MUNINN_MCP_IDLE")); err == nil && d > 0 {
-		return d
-	}
-	return defaultMCPIdle
-}
-
 // daemonFlag runs the shared MCP server itself; only --daemon-start uses it.
 const daemonFlag = "daemon"
 
@@ -94,7 +84,7 @@ func checkPrivateDir(dir string) error {
 
 // runMCPDaemon is the shared daemon: it owns the lock for its spec's
 // identity, listens on the spec's socket, and serves sessions until it
-// has been idle for mcpIdle. Its stderr is the daemon log.
+// has been idle for defaultMCPIdle. Its stderr is the daemon log.
 func runMCPDaemon(ctx context.Context, encoded string) error {
 	spec, err := mcpsock.DecodeSpec(encoded)
 	if err != nil {
@@ -105,9 +95,11 @@ func runMCPDaemon(ctx context.Context, encoded string) error {
 
 	// Wait until reparented so no session is admitted while the daemon is
 	// still inside the process tree of the client that started it.
-	if err := pollUntil(daemonSetupTimeout, func() bool { return os.Getppid() == 1 }); err != nil {
-		log.Printf("not reparented to launchd (parent %d); exiting", os.Getppid())
-		return fmt.Errorf("waiting to be reparented: %w", err)
+	for deadline := time.Now().Add(daemonSetupTimeout); os.Getppid() != 1; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			log.Printf("not reparented to launchd (parent %d); exiting", os.Getppid())
+			return fmt.Errorf("not reparented after %v", daemonSetupTimeout)
+		}
 	}
 
 	// An exiting daemon may still hold the lock for a moment.
@@ -154,23 +146,11 @@ func runMCPDaemon(ctx context.Context, encoded string) error {
 	defer stop()
 	log.Printf("serving %s", spec.Socket())
 	srv := muninnmcp.New(searcher, spec.StatusPath, spec.MirrorsDir)
-	if err := srv.Serve(ctx, ln, spec.Identity, mcpIdle()); err != nil {
+	if err := srv.Serve(ctx, ln, spec.Identity, defaultMCPIdle); err != nil {
 		log.Printf("exiting: %v", err)
 		return err
 	}
 	log.Printf("exiting")
-	return nil
-}
-
-// pollUntil polls cond until it holds or timeout passes.
-func pollUntil(timeout time.Duration, cond func() bool) error {
-	deadline := time.Now().Add(timeout)
-	for !cond() {
-		if time.Now().After(deadline) {
-			return fmt.Errorf("condition not met after %v", timeout)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
 	return nil
 }
 

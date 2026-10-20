@@ -77,9 +77,11 @@ func newE2E(t *testing.T, withProxy bool) *e2e {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
+		// Stop this test's daemon; it would otherwise idle for minutes.
 		// Daemons that lost the race to own the socket can still be
 		// starting, and would recreate the state directory to take the
-		// lock; wait for every process of this test's to exit first.
+		// lock, so wait for every process of this test's to exit first.
+		exec.Command("pkill", "-TERM", "-f", root).Run()
 		deadline := time.Now().Add(5 * time.Second)
 		for exec.Command("pgrep", "-f", root).Run() == nil && time.Now().Before(deadline) {
 			time.Sleep(50 * time.Millisecond)
@@ -101,7 +103,6 @@ func newE2E(t *testing.T, withProxy bool) *e2e {
 		"XDG_CONFIG_HOME="+filepath.Join(root, "config"),
 		"XDG_DATA_HOME="+filepath.Join(root, "data"),
 		"XDG_STATE_HOME="+filepath.Join(root, "state"),
-		"MUNINN_MCP_IDLE=500ms",
 	)
 	cfg := filepath.Join(root, "config", "muninn", "config.json")
 	if err := os.MkdirAll(filepath.Dir(cfg), 0o700); err != nil {
@@ -225,11 +226,14 @@ func TestMCPSessionsShareOneDaemon(t *testing.T) {
 				t.Errorf("socket files = %v, want exactly one", socks)
 			}
 
-			// With both sessions closed, the daemon idles out and removes
-			// its socket.
+			// A daemon told to stop removes its socket. (Idle exit is
+			// covered by the internal/mcp tests.)
 			a.Close()
 			b.Close()
-			waitFor(t, "the daemon to idle out", func() bool { return len(e.sockets()) == 0 })
+			if err := syscall.Kill(e.daemonPID(t), syscall.SIGTERM); err != nil {
+				t.Fatal(err)
+			}
+			waitFor(t, "the daemon to remove its socket", func() bool { return len(e.sockets()) == 0 })
 		})
 	}
 }
