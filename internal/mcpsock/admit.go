@@ -205,7 +205,12 @@ func writeLine(conn net.Conn, line string) error {
 
 // StartupBudget bounds how long Connect waits to be admitted, including
 // starting a daemon, before the session should serve in-process instead.
-const StartupBudget = 2 * time.Second
+// Starting muninn is slow when many sessions start at once on a busy
+// machine: with 15 sessions starting together, a daemon took up to 3 s
+// from launch to its first line of Go. A healthy daemon admits a session
+// as soon as it listens, so the budget only delays sessions whose daemon
+// can't start at all.
+const StartupBudget = 5 * time.Second
 
 // Connect asks the daemon for spec to admit a session, starting one with
 // `muninn mcp --daemon-start` if none answers, within StartupBudget. Its
