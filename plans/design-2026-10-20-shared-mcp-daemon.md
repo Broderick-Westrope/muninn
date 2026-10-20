@@ -411,11 +411,6 @@ The daemon uses the same value; with 17 concurrent sessions it stayed at
 - *The `git` semaphore.* `git` runs as subprocesses either way, and 17
   separate servers already run them concurrently today, so sharing adds
   no `git` concurrency.
-- *The 30 s write deadline.* Instead, a session ends as soon as the SDK
-  fails to read from it (EOF or undecodable input), and ending it closes
-  the connection, which unblocks a response write to a client that has
-  stopped reading. A client that stops reading but keeps its input open
-  still pins its own session, exactly as it pins its own process today.
 
 **Changed:**
 
@@ -423,13 +418,19 @@ The daemon uses the same value; with 17 concurrent sessions it stayed at
   `MUNINN_MCP_IN_PROCESS=1` (replacing any inherited value) rather than
   appending `--in-process`, which after a `--` would be a positional
   argument and loop forever.
-- Calls are cancelled when their session's input ends (including on
-  undecodable input) or the daemon shuts down, through receiving middleware that reads the session's
-  context from a value on the `Connect` context (the SDK strips
-  cancellation from that context but keeps its values).
-- `muninn mcp --daemon-start` refuses a state directory that isn't owned
-  by the user or is open to other users, since its permissions are the
-  socket's only access control. The forwarder then serves in-process and
-  says why on stderr.
+- A session ends when a read from its socket fails, a response write
+  takes over 30 s, or the daemon shuts down; ending it closes the socket.
+  The wrapper sits on the socket, not the SDK's `Connection`, whose
+  unexported hooks a wrapper would hide, so undecodable input ends the
+  session only once its calls finish within their own deadlines.
+- Calls are cancelled when their session ends, through receiving
+  middleware that reads the session's context from a value on the
+  `Connect` context (the SDK strips cancellation from that context but
+  keeps its values).
+- `muninn mcp` checks that the state directory is owned by the user and
+  closed to everyone else before it dials, and `--daemon-start` checks
+  again, since the directory's permissions are the socket's only access
+  control. Otherwise the session is served in-process and says why on
+  stderr.
 - `MUNINN_MCP_IDLE` (a Go duration) overrides the 5 minute idle timeout;
   the end-to-end tests use it.
