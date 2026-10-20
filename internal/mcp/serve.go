@@ -54,6 +54,9 @@ func serve(ctx context.Context, ln net.Listener, srv *sdk.Server, identity strin
 			// happen before the caller releases the lock, or it could
 			// remove a successor daemon's socket.
 			ln.Close()
+			// Refuse anything still mid-admission, so it isn't admitted
+			// and then dropped at once.
+			g.drain()
 			// End every session before waiting for them; otherwise an
 			// accept error with sessions open would wait forever.
 			cancel()

@@ -443,8 +443,12 @@ func TestServeLogsSessionsReadably(t *testing.T) {
 	cs := d.connect(t)
 	grepText(t, cs, "banana")
 	cs.Close()
-	<-d.done
-	d.done <- nil
+	select {
+	case err := <-d.done:
+		d.done <- err
+	case <-time.After(2 * time.Second):
+		t.Fatal("Serve still running after its idle timeout")
+	}
 
 	out := buf.String()
 	for _, want := range []string{"session 1 opened", "session 1 ended"} {
