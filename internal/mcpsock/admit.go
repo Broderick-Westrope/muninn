@@ -35,7 +35,7 @@ var (
 	// ErrNotAdmitted reports that Dial found no daemon willing to serve
 	// this session before its context expired. The caller should serve
 	// in-process.
-	ErrNotAdmitted = errors.New("not admitted by a shared MCP daemon")
+	ErrNotAdmitted = errors.New("not admitted by the shared MCP server")
 
 	// ErrBadRequest reports that a connection didn't open with a valid
 	// admission request.
@@ -47,7 +47,7 @@ var (
 
 	// ErrDraining reports that the daemon is shutting down and admits no
 	// new sessions.
-	ErrDraining = errors.New("daemon is draining")
+	ErrDraining = errors.New("the shared MCP server is shutting down")
 )
 
 // Admit runs the daemon's side of the admission exchange on a fresh
@@ -72,7 +72,7 @@ func Admit(conn net.Conn, identity string, reserve func() bool, release func()) 
 	}
 	if got != identity {
 		writeLine(conn, replyRefused+"identity")
-		return fmt.Errorf("%w: session %q, daemon %q", ErrIdentityMismatch, got, identity)
+		return fmt.Errorf("%w: session %q, server %q", ErrIdentityMismatch, got, identity)
 	}
 	if !reserve() {
 		writeLine(conn, replyRefused+"draining")
@@ -118,7 +118,7 @@ func Dial(ctx context.Context, socket, identity string, start func(context.Conte
 		}
 		if !started && (errors.Is(err, ErrDraining) || isNoListener(err)) {
 			if err := start(ctx); err != nil {
-				return nil, fmt.Errorf("%w: starting daemon: %w", ErrNotAdmitted, err)
+				return nil, fmt.Errorf("%w: starting it: %w", ErrNotAdmitted, err)
 			}
 			started = true
 		}

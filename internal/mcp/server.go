@@ -1,5 +1,6 @@
-// Package mcp implements muninn's MCP server: a stdio transport exposing
-// ten tools (grep, glob, list_repos, read_file, list_tree,
+// Package mcp implements muninn's MCP server, served either to one client
+// over stdio (Run) or to many sessions over a Unix listener (Serve). It
+// exposes ten tools (grep, glob, list_repos, read_file, list_tree,
 // find_symbol_definitions, find_symbol_references, search_commits,
 // get_diff, blame) over the search core, the status file, and the bare
 // git mirrors.

@@ -58,7 +58,7 @@ func startMCPDaemon(encoded string) error {
 	}
 	logFile, err := os.OpenFile(spec.Log(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
-		return fmt.Errorf("opening MCP daemon log: %w", err)
+		return fmt.Errorf("opening shared MCP server log: %w", err)
 	}
 	defer logFile.Close()
 	cmd := exec.Command(spec.Muninn, "mcp", "--daemon", "--spec", encoded)
@@ -66,7 +66,7 @@ func startMCPDaemon(encoded string) error {
 	cmd.Dir = "/"
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("starting MCP daemon: %w", err)
+		return fmt.Errorf("starting shared MCP server: %w", err)
 	}
 	return cmd.Process.Release()
 }

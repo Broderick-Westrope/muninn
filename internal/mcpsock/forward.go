@@ -18,7 +18,7 @@ const InProcessEnv = "MUNINN_MCP_IN_PROCESS"
 // client was still sending: it crashed or was killed. The forwarder exits
 // non-zero, as `muninn mcp` would have if it had crashed itself; it never
 // falls back mid-session, because the session's state lived in the daemon.
-var ErrDaemonGone = errors.New("shared MCP daemon closed the session")
+var ErrDaemonGone = errors.New("the shared MCP server closed the session")
 
 // Forward copies in to conn and conn to out until the session ends. When
 // in reaches EOF it half-closes conn so the daemon sees the end of the
@@ -37,7 +37,7 @@ func Forward(conn *net.UnixConn, in io.Reader, out io.Writer) error {
 	}()
 	_, err := io.Copy(out, conn)
 	if err != nil {
-		return fmt.Errorf("forwarding daemon output: %w", err)
+		return fmt.Errorf("forwarding shared MCP server output: %w", err)
 	}
 	if !inDone.Load() {
 		return ErrDaemonGone
