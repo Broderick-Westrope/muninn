@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"sync/atomic"
 )
 
 // ErrDaemonGone reports that the daemon closed the connection while the
@@ -20,25 +19,43 @@ var ErrDaemonGone = errors.New("the shared MCP server closed the session")
 // the client ended the session, the read error if in failed, and
 // ErrDaemonGone when the daemon ended it first.
 func Forward(conn *net.UnixConn, in io.Reader, out io.Writer) error {
-	// inErr is set, before CloseWrite, once in has ended: the daemon closes
-	// only after it sees that, so it is visible by the time out's copy ends.
-	var inEnded atomic.Bool
-	var inErr atomic.Value
+	// stdinEnded is closed once in has ended, before CloseWrite: the daemon
+	// closes only after it sees that, so it is visible by the time out's
+	// copy ends. A failed write to conn means the daemon went, which isn't
+	// a stdin problem, so only in's own read error is kept.
+	stdinEnded := make(chan struct{})
+	src := &readErrRecorder{r: in}
 	go func() {
-		if _, err := io.Copy(conn, in); err != nil {
-			inErr.Store(err)
+		_, err := io.Copy(conn, src)
+		if err == nil || src.err != nil {
+			close(stdinEnded)
 		}
-		inEnded.Store(true)
 		conn.CloseWrite()
 	}()
 	if _, err := io.Copy(out, conn); err != nil {
 		return fmt.Errorf("forwarding shared MCP server output: %w", err)
 	}
-	if !inEnded.Load() {
+	select {
+	case <-stdinEnded:
+	default:
 		return ErrDaemonGone
 	}
-	if err, ok := inErr.Load().(error); ok {
-		return fmt.Errorf("reading stdin: %w", err)
+	if src.err != nil {
+		return fmt.Errorf("reading stdin: %w", src.err)
 	}
 	return nil
+}
+
+// readErrRecorder keeps r's first non-EOF read error.
+type readErrRecorder struct {
+	r   io.Reader
+	err error
+}
+
+func (r *readErrRecorder) Read(p []byte) (int, error) {
+	n, err := r.r.Read(p)
+	if err != nil && err != io.EOF && r.err == nil {
+		r.err = err
+	}
+	return n, err
 }

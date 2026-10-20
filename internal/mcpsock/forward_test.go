@@ -108,3 +108,24 @@ func TestForwardReportsAStdinFailureAsSuch(t *testing.T) {
 		t.Errorf("Forward = %v, want the stdin error", err)
 	}
 }
+
+func TestForwardReportsDaemonGoneMidWrite(t *testing.T) {
+	client, server := socketPair(t)
+	stdin, feed := io.Pipe()
+	done := forward(client, stdin, io.Discard)
+
+	server.Close()
+	// The client keeps sending, so the forwarder's next socket write fails.
+	go func() {
+		for {
+			if _, err := feed.Write([]byte("request\n")); err != nil {
+				return
+			}
+		}
+	}()
+	t.Cleanup(func() { feed.Close() })
+
+	if err := wait(t, done); !errors.Is(err, ErrDaemonGone) {
+		t.Errorf("Forward = %v, want ErrDaemonGone", err)
+	}
+}
