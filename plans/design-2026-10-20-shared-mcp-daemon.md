@@ -123,7 +123,7 @@ sequenceDiagram
     alt no daemon or draining
         F->>S: run and wait
         S->>D: start detached, then exit
-        F->>D: retry admission until the 2 s budget runs out
+        F->>D: retry admission until the 5 s budget runs out
     end
     alt admitted
         C-->>D: bytes copied both ways
@@ -136,15 +136,17 @@ sequenceDiagram
 
 | Timer | Value | Owner | On expiry |
 | --- | --- | --- | --- |
-| Startup budget, first dial to admission, including running `--daemon-start` | 2 s | forwarder | serve in-process |
+| Startup budget, first dial to admission, including running `--daemon-start` | 5 s | forwarder | serve in-process |
+| Between daemon starts while waiting | 1.5 s | forwarder | start another daemon |
 | Admission exchange | 500 ms | both | not admitted; forwarder retries within its budget |
 | Wait to be reparented, then lock retry | 1 s each | daemon | exit; forwarders fall back |
 | Idle before exit | 5 min | daemon | drain and exit |
-| Each response write | 30 s | daemon | close that connection |
+| Each response write | 30 s | daemon | end that session |
+| Each call | 5 min | daemon | cancel the call |
 
-The daemon's two 1 s waits can together outlast the forwarder's budget.
-That only happens when an old daemon is slow to exit, and the cost is
-one session served in-process.
+The daemon's two 1 s waits fit inside the 5 s budget. A forwarder starts
+another daemon if 1.5 s after its last start nothing is admitting it,
+which replaces a daemon that lost the lock race and exited.
 
 ### Forwarder
 
@@ -277,12 +279,13 @@ the end of the session.
 
 - **EOF for any reason** (client closed stdin, client or forwarder
   died). The forwarder half-closes the socket on stdin EOF and exits
-  when the daemon closes it. The daemon gives each connection a "gone"
-  signal that fires as soon as a read on it returns EOF or an error, and
-  a receiving middleware on the shared `sdk.Server` (keyed by the call's
-  `ServerSession`) links each call's context to its session's signal.
-  The context passed to `Server.Connect` can't do this: go-sdk wraps it
-  so it never cancels (`internal/jsonrpc2/conn.go`, `notDone`), and
+  when the daemon closes it. The daemon gives each connection a session
+  context that ends as soon as a read on it returns EOF or an error, and
+  a receiving middleware on the shared `sdk.Server` links each call's
+  context to it; the session context reaches the middleware as a value
+  on the context passed to `Server.Connect`.
+  That context's own cancellation can't do this: go-sdk wraps it so it
+  never cancels (`internal/jsonrpc2/conn.go`, `notDone`), and
   request contexts derive from that wrapper. Cancelling on EOF stops
   abandoned `git` work at once instead of when its first write fails,
   which is the one improvement on today.
@@ -292,8 +295,10 @@ the end of the session.
   that can't take one in 30 s is stuck, and the daemon closes its
   connection. A forwarder blocked writing to a stuck client's stdout
   just stays blocked, which only affects that client.
-- **Malformed input.** A decode error ends the session in the SDK; the
-  daemon closes the connection whenever a session ends for any reason.
+- **Malformed input.** A decode error stops the SDK reading, but the
+  daemon only learns of it when the session's calls finish (at most the
+  5 minute call bound), because it wraps the socket rather than the
+  SDK's `Connection`; see Implementation Notes.
 
 ### What one process serving many sessions changes
 
@@ -328,8 +333,9 @@ pid and the inherited stdio, nothing has been read from stdin, and the
 26 MB of init heap disappears with the old process image.
 
 When the proxy isn't admitted, it execs back into
-`<resolved muninn> mcp --in-process <original arguments>`. The
-`--in-process` flag stops that from looping. If the proxy binary is
+`<resolved muninn> <original arguments>` with `MUNINN_MCP_IN_PROCESS=1`
+set, which stops that from looping. (A flag appended after the original
+arguments would be read as a positional argument after a `--`.) If the proxy binary is
 missing (a `go install` build, say), `muninn mcp` behaves as in phase 2.
 
 ## Risks
@@ -337,32 +343,37 @@ missing (a `go install` build, say), `muninn mcp` behaves as in phase 2.
 | Risk | Status |
 | --- | --- |
 | One crash or out-of-memory kill drops every session at once | Accepted; panic recovery covers the common case |
-| A background process outlives the session that started it, for up to 5 idle minutes | Accepted; `README.md:120` ("Nothing stays resident between sessions") needs rewording |
+| A background process outlives the session that started it, for up to 5 idle minutes | Accepted; the README says so |
+| The daemon keeps the environment of the session that started it, including `GOMEMLIMIT` and any tokens in the agent's environment, for its whole life | Accepted for now; passing an allowlisted environment is a follow-up |
+| Every rebuild or upgrade leaves an `mcp-<identity>.lock` behind, and `mcp.log` is never rotated | Accepted for now; both are small; sweeping stale state is a follow-up |
 | A shard that fails to load during a sync is never retried: Zoekt records the new file identity before loading it (`search/watcher.go`, `scan`), so the searcher keeps the old shard until the file changes again | Pre-existing in every long-lived `muninn mcp`; a daemon serves every session from the one stale searcher. Logged to `mcp.log`; fixing it is out of scope |
 | During a sync, search results and `read_file` can disagree, because the status file and the searcher's shard watcher update independently. Normally that lasts until the watcher catches up; after a failed shard load (row above) it lasts until the next sync rewrites that shard | Pre-existing and unchanged |
 | Exec handoff only works on Unix | Fine while scheduling is macOS-only |
 
 ## Testing
 
-- Daemon and forwarder in one test with a temp `XDG_STATE_HOME`: two
-  sessions run tool calls concurrently and both get correct results.
-- Closing stdin while a slow `git` call is in flight cancels that call
-  promptly, and other sessions are unaffected.
-- A stale socket with no lock holder is removed and replaced.
-- Two daemons started at once: exactly one serves, and with a warm
-  machine every forwarder is admitted by it.
-- Idle shutdown racing a connection, including one still in the listen
-  backlog: the forwarder is either admitted and served, or refused and
-  retries; never admitted and then dropped.
-- Daemon killed mid-session: the forwarder exits non-zero and doesn't
-  fall back.
-- No daemon possible (locking unsupported, path too long): `muninn mcp`
-  serves in-process and the existing MCP tests pass through it.
-- A handler panic returns a tool error and other sessions keep working.
-- A client that stops reading has its connection closed after the write
-  deadline, and other sessions are unaffected.
-- Phase 3: `--config` and the other original arguments survive both
-  exec hops.
+Status after the build. Covered by automated tests unless marked.
+
+- Two or more sessions share one daemon and get correct results
+  concurrently, with and without the proxy.
+- A client that goes away has its calls cancelled; other sessions are
+  unaffected.
+- A stale socket left by a SIGKILLed daemon is replaced by the next
+  session.
+- Five sessions starting at once share one daemon.
+- Idle shutdown racing a connection: covered by unit tests of the gate
+  (including a stale timer callback) and of `Dial` handing off from a
+  draining daemon to its successor. Not covered: a connection still in
+  the listen backlog at the moment of draining.
+- Daemon killed mid-session: the session exits non-zero and doesn't fall
+  back.
+- No daemon possible (state directory unusable or open to others, the
+  daemon can't open its log): the session is served in-process, with and
+  without the proxy. Not covered: locking unsupported, socket path too
+  long end to end (the path check is unit-tested).
+- A handler panic returns a tool error (unit test of `textHandler`).
+- A client that stops reading has its session ended by the write bound.
+- `--config` survives both exec hops, including the proxy handing back.
 
 ## Success Measure
 
@@ -439,5 +450,13 @@ The daemon uses the same value; with 17 concurrent sessions it stayed at
   the budget only delays sessions whose daemon can't start at all.
 - Idle periods are numbered, so a timer callback from an earlier period
   can't drain the daemon right after a session closes.
+- `--in-process` is kept as a user-facing escape hatch for ruling out the
+  shared server when debugging, and the README documents it. The
+  proxy's hand-back uses the environment variable instead.
+- The proxy binary, the Unix-socket daemon, and exec handoff between
+  binaries are new to muninn: nothing in the repo did this before. The
+  closest precedents are `internal/lock` (flock), `internal/launchd`
+  (background jobs), and `internal/web` (a long-lived listener). They're
+  justified by the measurements above.
 - `MUNINN_MCP_IDLE` (a Go duration) overrides the 5 minute idle timeout;
   the end-to-end tests use it.
