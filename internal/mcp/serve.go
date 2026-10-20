@@ -56,8 +56,36 @@ func serve(ctx context.Context, ln net.Listener, srv *sdk.Server, identity strin
 	}
 }
 
-// sessionKey carries a session's context through the SDK to boundCalls. The SDK strips cancellation from the context given to
-// Connect but keeps its values.
+// serveConn admits conn and runs its session until the client ends it or
+// ctx is done.
+func serveConn(ctx context.Context, srv *sdk.Server, conn net.Conn, identity string, g *gate) {
+	session, end := context.WithCancel(ctx)
+	defer end()
+	// Ending the session closes its connection, which also unblocks a
+	// response write to a client that has stopped reading.
+	defer context.AfterFunc(session, func() { conn.Close() })()
+	defer conn.Close()
+
+	if err := mcpsock.Admit(conn, identity, g.reserve, g.release); err != nil {
+		log.Printf("refused MCP connection: %v", err)
+		return
+	}
+	defer g.release()
+
+	sc := sessionConn{Conn: conn, end: end}
+	ss, err := srv.Connect(context.WithValue(ctx, sessionKey{}, session), &sdk.IOTransport{Reader: sc, Writer: sc}, nil)
+	if err != nil {
+		log.Printf("starting MCP session: %v", err)
+		return
+	}
+	log.Printf("MCP session %s opened", ss.ID())
+	err = ss.Wait()
+	log.Printf("MCP session %s ended: %v", ss.ID(), err)
+}
+
+// sessionKey carries a session's context through the SDK to boundCalls.
+// The SDK strips cancellation from the context given to Connect but keeps
+// its values.
 type sessionKey struct{}
 
 // callTimeout bounds every call the daemon serves. Git-backed tools have
@@ -95,7 +123,7 @@ var responseWriteTimeout = 30 * time.Second
 // tells its own Connection type the negotiated protocol version through an
 // unexported method that a wrapper would hide. The cost: undecodable input
 // doesn't end the session at once. The SDK stops reading, and the session
-// ends when its calls finish, within their own deadlines.
+// ends when its calls finish, within callTimeout.
 type sessionConn struct {
 	net.Conn
 	end context.CancelFunc
@@ -119,33 +147,6 @@ func (c sessionConn) Write(p []byte) (int, error) {
 		c.end()
 	}
 	return n, err
-}
-
-// serveConn admits conn and runs its session until the client ends it or
-// ctx is done.
-func serveConn(ctx context.Context, srv *sdk.Server, conn net.Conn, identity string, g *gate) {
-	session, end := context.WithCancel(ctx)
-	defer end()
-	// Ending the session closes its connection, which also unblocks a
-	// response write to a client that has stopped reading.
-	defer context.AfterFunc(session, func() { conn.Close() })()
-	defer conn.Close()
-
-	if err := mcpsock.Admit(conn, identity, g.reserve, g.release); err != nil {
-		log.Printf("refused MCP connection: %v", err)
-		return
-	}
-	defer g.release()
-
-	sc := sessionConn{Conn: conn, end: end}
-	ss, err := srv.Connect(context.WithValue(ctx, sessionKey{}, session), &sdk.IOTransport{Reader: sc, Writer: sc}, nil)
-	if err != nil {
-		log.Printf("starting MCP session: %v", err)
-		return
-	}
-	log.Printf("MCP session %s opened", ss.ID())
-	err = ss.Wait()
-	log.Printf("MCP session %s ended: %v", ss.ID(), err)
 }
 
 // gate counts open sessions and decides when the daemon has been idle long
