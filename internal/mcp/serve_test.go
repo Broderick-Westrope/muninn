@@ -292,6 +292,11 @@ func TestServeAcceptErrorEndsOpenSessions(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("serve hung on an accept error with a session open")
 	}
+	// The listener is closed, and its socket removed, before serve returns,
+	// so nothing of this daemon's can touch a successor's socket later.
+	if _, err := os.Stat(socket); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("socket still present after serve returned: %v", err)
+	}
 }
 
 // gatedListener holds every Accept after the first until gate closes.
