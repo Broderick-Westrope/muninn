@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"errors"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -430,4 +431,47 @@ func TestServeBoundsEveryCall(t *testing.T) {
 	receive(t, started, "the call to start")
 	// Nothing ends the session; only the call's own bound can stop it.
 	receive(t, cancelled, "the call to hit its time bound")
+}
+
+func TestServeLogsSessionsReadably(t *testing.T) {
+	var buf safeBuffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	f := newFixture(t, "")
+	d := startDaemon(t, f.srv, 100*time.Millisecond)
+	cs := d.connect(t)
+	grepText(t, cs, "banana")
+	cs.Close()
+	<-d.done
+	d.done <- nil
+
+	out := buf.String()
+	for _, want := range []string{"session 1 opened", "session 1 ended"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "use of closed network connection") {
+		t.Errorf("a normal session end is logged as an error:\n%s", out)
+	}
+}
+
+// safeBuffer is a bytes.Buffer safe for the log package and the test to
+// share.
+type safeBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (s *safeBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *safeBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }

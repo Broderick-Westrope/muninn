@@ -2,10 +2,12 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -38,6 +40,7 @@ func serve(ctx context.Context, ln net.Listener, srv *sdk.Server, identity strin
 	defer stop()
 
 	var wg sync.WaitGroup
+	var sessions atomic.Uint64 // numbers sessions in the log
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -57,13 +60,13 @@ func serve(ctx context.Context, ln net.Listener, srv *sdk.Server, identity strin
 			wg.Wait()
 			return err
 		}
-		wg.Go(func() { serveConn(ctx, srv, conn, identity, g) })
+		wg.Go(func() { serveConn(ctx, srv, conn, identity, g, &sessions) })
 	}
 }
 
 // serveConn admits conn and runs its session until the client ends it or
 // ctx is done.
-func serveConn(ctx context.Context, srv *sdk.Server, conn net.Conn, identity string, g *gate) {
+func serveConn(ctx context.Context, srv *sdk.Server, conn net.Conn, identity string, g *gate, sessions *atomic.Uint64) {
 	session, end := context.WithCancel(ctx)
 	defer end()
 	// Ending the session closes its connection, which also unblocks a
@@ -83,9 +86,15 @@ func serveConn(ctx context.Context, srv *sdk.Server, conn net.Conn, identity str
 		log.Printf("starting MCP session: %v", err)
 		return
 	}
-	log.Printf("MCP session %s opened", ss.ID())
-	err = ss.Wait()
-	log.Printf("MCP session %s ended: %v", ss.ID(), err)
+	id := sessions.Add(1)
+	log.Printf("session %d opened", id)
+	// The daemon closes a session's socket to end it, so a closed
+	// connection is how every session ends, not an error.
+	if err := ss.Wait(); err != nil && !errors.Is(err, net.ErrClosed) {
+		log.Printf("session %d ended: %v", id, err)
+		return
+	}
+	log.Printf("session %d ended", id)
 }
 
 // sessionKey carries a session's context through the SDK to boundCalls.
