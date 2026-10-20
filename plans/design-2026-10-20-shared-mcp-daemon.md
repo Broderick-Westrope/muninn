@@ -1,8 +1,9 @@
 # Muninn Design: One Shared MCP Server for Every Client
 
-**Status:** Design, not yet planned for implementation. Numbers marked
-"measured" were taken on 2026-10-20 on one machine (316 repos, 875 MB
-index, muninn from Homebrew, macOS `footprint`); everything else is
+**Status:** Built on `feat/shared-mcp-daemon` (all three phases); see
+[Implementation Notes](#implementation-notes) for where it differs from
+this design. Numbers marked "measured" were taken on 2026-10-20 on one
+machine (316 repos, 875 MB index, macOS `footprint`); everything else is
 projected.
 
 ## TL;DR
@@ -382,3 +383,50 @@ the burst, against the projections above. Phase 3's target is under
 - **Proxy discovery.** `muninn-mcp-proxy` next to the real path of
   `muninn` works for Homebrew and goreleaser archives. Is there any
   install path where the two could end up in different directories?
+
+## Implementation Notes
+
+What the build measured and where it departs from the design above.
+
+**Measured with 17 sessions** on the same index, each running three
+greps: 17 proxies at 3.2–3.6 MB each plus one daemon at 69 MB, about
+127 MB in total. Phase 2 alone measured 31 MB per forwarder (not the
+projected 26), and calling `debug.FreeOSMemory` before forwarding didn't
+lower it, which is what justified building phase 3.
+
+**Phase 1's limit is 64 MiB.** A burst of ten greps on one process:
+
+| Limit | Footprint after | CPU |
+| --- | --- | --- |
+| none | 88 MB | 0.31 s |
+| 64 MiB | 67 MB | 0.35 s |
+| 48 MiB | 56 MB | 0.75 s |
+| 32 MiB | 50 MB | 1.1 s |
+
+The daemon uses the same value; with 17 concurrent sessions it stayed at
+69 MB.
+
+**Cut:**
+
+- *The `git` semaphore.* `git` runs as subprocesses either way, and 17
+  separate servers already run them concurrently today, so sharing adds
+  no `git` concurrency.
+- *The 30 s write deadline.* A client that stops reading pins only its
+  own session; once that client exits, the proxy's write to its stdout
+  fails, the proxy exits, and the daemon's write fails in turn.
+
+**Changed:**
+
+- The proxy hands a session back to muninn by setting
+  `MUNINN_MCP_IN_PROCESS=1` rather than appending `--in-process`, which
+  after a `--` would be a positional argument and loop forever.
+- Calls are cancelled when their session's input ends or the daemon
+  shuts down, through receiving middleware that reads the session's
+  context from a value on the `Connect` context (the SDK strips
+  cancellation from that context but keeps its values).
+- `muninn mcp --daemon-start` refuses a state directory that isn't owned
+  by the user or is open to other users, since its permissions are the
+  socket's only access control. The forwarder then serves in-process and
+  says why on stderr.
+- `MUNINN_MCP_IDLE` (a Go duration) overrides the 5 minute idle timeout;
+  the end-to-end tests use it.
