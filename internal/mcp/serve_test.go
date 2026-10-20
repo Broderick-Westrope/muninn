@@ -164,8 +164,9 @@ func TestServeRefusesWrongIdentity(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if _, err := mcpsock.Dial(ctx, d.socket, "someone-else", noStart); !errors.Is(err, mcpsock.ErrNotAdmitted) {
-		t.Errorf("Dial err = %v, want ErrNotAdmitted", err)
+	_, err := mcpsock.Dial(ctx, d.socket, "someone-else", noStart)
+	if !errors.Is(err, mcpsock.ErrNotAdmitted) || !errors.Is(err, mcpsock.ErrIdentityMismatch) {
+		t.Errorf("Dial err = %v, want an identity mismatch", err)
 	}
 }
 
