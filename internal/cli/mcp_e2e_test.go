@@ -179,6 +179,13 @@ func TestMCPFallsBackInProcess(t *testing.T) {
 				t.Fatal(err)
 			}
 		},
+		// The state directory passes muninn's checks, so the proxy runs and
+		// must hand the session back when the daemon can't start.
+		"daemon can't open its log": func(t *testing.T, state string) {
+			if err := os.MkdirAll(filepath.Join(state, "mcp.log"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		},
 		// Other users could reach a socket in it, so the daemon refuses to
 		// listen there.
 		"state dir readable by others": func(t *testing.T, state string) {
