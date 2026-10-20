@@ -22,7 +22,7 @@ import (
 
 // mcpMemoryLimit is the soft heap limit for the MCP server. Measured on a
 // 316-repo index, the default GC let one process sit at about 88 MB after
-// a burst of greps; 64 MiB brought that to about 67 MB with no extra GC
+// a burst of greps; 64 MiB brought that to about 67 MB for 0.04 s more GC
 // CPU, while 48 and 32 MiB saved more but cost 2.5 to 3.5 times the CPU.
 const mcpMemoryLimit = 64 << 20
 

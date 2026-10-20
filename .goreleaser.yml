@@ -66,8 +66,8 @@ brews:
     homepage: "https://github.com/Broderick-Westrope/muninn"
     description: "Code search index and MCP server for your GitHub repos"
     license: "MIT"
-    # The default installs only one binary; muninn mcp looks for the proxy
-    # next to its own resolved path.
+    # Explicit so both binaries are certain to land in the same bin
+    # directory: muninn mcp looks for the proxy next to its own resolved path.
     install: |
       bin.install "muninn"
       bin.install "muninn-mcp-proxy"

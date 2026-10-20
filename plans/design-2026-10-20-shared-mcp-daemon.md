@@ -106,8 +106,8 @@ burst of representative tool calls, GC CPU, and latency) at 32, 48, and
 64 MiB. It applies only to `muninn mcp`, never to `muninn sync`, whose
 indexing legitimately needs more. The limit is soft: live data can still
 exceed it, and it says nothing about mmap'd shards, so it's a GC hint
-and not a ceiling. Phase 2's daemon gets its own value, benchmarked with
-concurrent sessions rather than copied from the single-session one.
+and not a ceiling. (Built: 64 MiB, and the daemon uses the same value;
+see Implementation Notes.)
 
 ## Phase 2: Shared Daemon
 
@@ -174,9 +174,10 @@ daemon decides to exit. So the first thing on every connection is a
 one-line exchange in muninn's own format, before any MCP bytes:
 
 1. The forwarder sends `muninn-admit v1 <identity>\n`.
-2. The daemon reads at most 256 bytes up to the newline. Under the
-   mutex that guards its idle-to-draining transition it only checks its
-   state and the identity, and reserves a session or refuses. It writes
+2. The daemon reads at most 256 bytes up to the newline and checks the
+   identity. Then, under the mutex that guards its idle-to-draining
+   transition, it only checks its state and reserves a session or
+   refuses. It writes
    the reply after releasing the mutex, so a slow peer can't stall other
    admissions or shutdown, and drops the reservation if the write fails.
 3. The reply is `ok <identity>\n` or `refused <reason>\n`. The forwarder
@@ -303,14 +304,14 @@ the end of the session.
 ### What one process serving many sessions changes
 
 - **Panics.** Neither the go-sdk nor `textHandler`
-  (`internal/mcp/server.go:178`) recovers panics in tool handlers. Today
+  (`internal/mcp/server.go`) recovered panics in tool handlers. Today
   a panic kills one session; in a daemon it would kill all of them.
   `textHandler` must recover and turn a panic into a tool error.
 - **History calls.** `search_commits` with `changed_regex` and similar
-  calls run `git` per call. A semaphore around `gitcmd`, sized to
-  `GOMAXPROCS` and acquired with the call's context so a cancelled call
-  stops waiting, stops 17 sessions starting 17 pickaxe scans at once.
-  Zoekt's searcher is built for concurrent queries and needs no limit.
+  calls run `git` per call. A semaphore around `gitcmd` was planned here
+  and not built: 17 separate servers already run `git` concurrently, so
+  sharing adds no concurrency (see Implementation Notes). Zoekt's
+  searcher is built for concurrent queries and needs no limit.
 - **Unbounded work.** The SDK queues each session's calls without a
   bound, searches have no wall-time limit, and `git` output isn't
   capped. All of that is true today; the daemon concentrates it in one
@@ -349,6 +350,9 @@ missing (a `go install` build, say), `muninn mcp` behaves as in phase 2.
 | A shard that fails to load during a sync is never retried: Zoekt records the new file identity before loading it (`search/watcher.go`, `scan`), so the searcher keeps the old shard until the file changes again | Pre-existing in every long-lived `muninn mcp`; a daemon serves every session from the one stale searcher. Logged to `mcp.log`; fixing it is out of scope |
 | During a sync, search results and `read_file` can disagree, because the status file and the searcher's shard watcher update independently. Normally that lasts until the watcher catches up; after a failed shard load (row above) it lasts until the next sync rewrites that shard | Pre-existing and unchanged |
 | Exec handoff only works on Unix | Fine while scheduling is macOS-only |
+| The 30 s write bound ends a session whose client is paused (say, suspended with Ctrl-Z) while a response larger than the socket and pipe buffers is being written | Accepted; responses are kilobytes, so this needs an unusually large one |
+| A session that falls back in-process says so only on stderr, which most MCP clients hide | Accepted for now; surfacing it in `muninn status` is a follow-up |
+| `go install` users update `muninn` and `muninn-mcp-proxy` separately | Handled: the proxy passes the spec on verbatim, so an older proxy doesn't drop fields a newer muninn added |
 
 ## Testing
 
