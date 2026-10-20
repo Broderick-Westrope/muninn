@@ -135,7 +135,7 @@ func runMCPDaemon(ctx context.Context, encoded string) error {
 		return fmt.Errorf("listening on %s: %w", spec.Socket(), err)
 	}
 
-	applyMemoryLimit(os.Getenv("GOMEMLIMIT"))
+	applyMemoryLimit()
 	searcher, err := search.Open(spec.IndexDir)
 	if err != nil {
 		ln.Close()

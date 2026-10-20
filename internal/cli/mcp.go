@@ -28,9 +28,9 @@ import (
 const mcpMemoryLimit = 64 << 20
 
 // applyMemoryLimit sets mcpMemoryLimit unless the user chose their own
-// limit through GOMEMLIMIT (passed as gomemlimit).
-func applyMemoryLimit(gomemlimit string) {
-	if gomemlimit != "" {
+// limit through GOMEMLIMIT.
+func applyMemoryLimit() {
+	if os.Getenv("GOMEMLIMIT") != "" {
 		return
 	}
 	debug.SetMemoryLimit(mcpMemoryLimit)
@@ -146,7 +146,7 @@ func execProxy(spec mcpsock.Spec) {
 
 // serveMCPInProcess serves one session over stdio from this process.
 func serveMCPInProcess(ctx context.Context) error {
-	applyMemoryLimit(os.Getenv("GOMEMLIMIT"))
+	applyMemoryLimit()
 	searcher, err := search.Open(xdg.IndexDir())
 	if err != nil {
 		return err
