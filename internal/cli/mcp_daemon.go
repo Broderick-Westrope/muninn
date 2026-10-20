@@ -25,8 +25,9 @@ import (
 // idle exit is cheap; this mostly saves churn between agent sessions.
 const defaultMCPIdle = 5 * time.Minute
 
-// mcpIdle returns the daemon's idle timeout, overridable through
-// MUNINN_MCP_IDLE (a Go duration) for tests and tuning.
+// mcpIdle returns the daemon's idle timeout. MUNINN_MCP_IDLE (a Go
+// duration) overrides it; it exists so the end-to-end tests don't wait
+// minutes, and isn't documented for users.
 func mcpIdle() time.Duration {
 	if d, err := time.ParseDuration(os.Getenv("MUNINN_MCP_IDLE")); err == nil && d > 0 {
 		return d
@@ -106,7 +107,12 @@ func runMCPDaemon(ctx context.Context, encoded string) error {
 		return fmt.Errorf("waiting to be reparented: %w", err)
 	}
 
-	lk, err := acquireLock(spec.Lock(), daemonSetupTimeout)
+	// An exiting daemon may still hold the lock for a moment.
+	var lk *lock.Lock
+	pollUntil(daemonSetupTimeout, func() bool {
+		lk, err = lock.TryAcquire(spec.Lock())
+		return !errors.Is(err, lock.ErrLocked)
+	})
 	if errors.Is(err, lock.ErrLocked) {
 		// Another daemon owns this identity; the forwarder will reach it.
 		return nil
@@ -145,19 +151,6 @@ func runMCPDaemon(ctx context.Context, encoded string) error {
 	err = srv.Serve(ctx, ln, spec.Identity, mcpIdle())
 	log.Printf("exiting: %v", err)
 	return err
-}
-
-// acquireLock takes path, retrying for up to timeout while another process
-// holds it. Its errors match lock.TryAcquire's.
-func acquireLock(path string, timeout time.Duration) (*lock.Lock, error) {
-	deadline := time.Now().Add(timeout)
-	for {
-		lk, err := lock.TryAcquire(path)
-		if !errors.Is(err, lock.ErrLocked) || time.Now().After(deadline) {
-			return lk, err
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
 }
 
 // pollUntil polls cond until it holds or timeout passes.
