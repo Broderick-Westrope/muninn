@@ -183,7 +183,9 @@ func TestMCPFallsBackInProcess(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			cs, cmd := e.session(t)
+			// A trailing "--" ends flag parsing, so falling back must not
+			// rely on appending a flag to the original arguments.
+			cs, cmd := e.session(t, "--")
 			listRepos(t, cs)
 
 			if got := program(t, cmd.Process.Pid); got != "muninn" {

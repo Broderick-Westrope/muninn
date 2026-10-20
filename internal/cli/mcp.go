@@ -68,7 +68,7 @@ in-process instead. --in-process always serves in-process.`,
 			if _, err := config.Load(resolveConfigPath()); err != nil {
 				return err
 			}
-			if !inProcess {
+			if !inProcess && os.Getenv(mcpsock.InProcessEnv) == "" {
 				err := forwardToMCPDaemon(cmd.Context())
 				if !errors.Is(err, errServeInProcess) {
 					return err

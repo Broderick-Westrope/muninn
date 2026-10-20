@@ -39,8 +39,9 @@ func run(args []string) int {
 		// Nothing has been read from stdin, so muninn can still serve this
 		// session itself.
 		fmt.Fprintf(os.Stderr, "muninn: serving in-process: %v\n", err)
-		argv := append(append([]string{spec.Muninn}, muninnArgs...), "--in-process")
-		err := syscall.Exec(spec.Muninn, argv, os.Environ())
+		argv := append([]string{spec.Muninn}, muninnArgs...)
+		env := append(os.Environ(), mcpsock.InProcessEnv+"=1")
+		err := syscall.Exec(spec.Muninn, argv, env)
 		fmt.Fprintf(os.Stderr, "muninn-mcp-proxy: running %s: %v\n", spec.Muninn, err)
 		return 1
 	}
