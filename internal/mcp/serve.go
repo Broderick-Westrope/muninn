@@ -20,12 +20,16 @@ import (
 // Serve closes ln and returns nil once no session has been open for idle.
 // When ctx is done it closes ln and every session, and returns nil.
 func (s *Server) Serve(ctx context.Context, ln net.Listener, identity string, idle time.Duration) error {
+	// Tools are registered before the first Accept: tool-list changes are
+	// broadcast to every session, so the set must be fixed up front.
+	return serve(ctx, ln, s.mcpServer(), identity, idle)
+}
+
+func serve(ctx context.Context, ln net.Listener, srv *sdk.Server, identity string, idle time.Duration) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// Tools are registered before the first Accept: tool-list changes are
-	// broadcast to every session, so the set must be fixed up front.
-	srv := s.mcpServer()
+	srv.AddReceivingMiddleware(cancelWithSession)
 	g := newGate(idle, func() { ln.Close() })
 	stop := context.AfterFunc(ctx, func() {
 		g.drain()
@@ -34,17 +38,58 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener, identity string, id
 	defer stop()
 
 	var wg sync.WaitGroup
-	defer wg.Wait()
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			if g.draining() {
-				return nil
+			if !g.draining() {
+				err = fmt.Errorf("accepting MCP connection: %w", err)
+			} else {
+				err = nil
 			}
-			return fmt.Errorf("accepting MCP connection: %w", err)
+			// End every session before waiting for them; otherwise an
+			// accept error with sessions open would wait forever.
+			cancel()
+			wg.Wait()
+			return err
 		}
 		wg.Go(func() { serveConn(ctx, srv, conn, identity, g) })
 	}
+}
+
+// sessionKey carries a session's context through the SDK to
+// cancelWithSession. The SDK strips cancellation from the context given to
+// Connect but keeps its values.
+type sessionKey struct{}
+
+// cancelWithSession cancels a call when its session ends, so a client
+// that goes away, or a daemon shutting down, doesn't leave calls running.
+// Responses can't be delivered then anyway: the SDK rejects every write
+// once a session's input has ended.
+func cancelWithSession(next sdk.MethodHandler) sdk.MethodHandler {
+	return func(ctx context.Context, method string, req sdk.Request) (sdk.Result, error) {
+		if session, ok := ctx.Value(sessionKey{}).(context.Context); ok {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithCancel(ctx)
+			defer cancel()
+			defer context.AfterFunc(session, cancel)()
+		}
+		return next(ctx, method, req)
+	}
+}
+
+// sessionConn ends its session as soon as a read fails, which is how the
+// daemon learns that the client is gone.
+type sessionConn struct {
+	net.Conn
+	end context.CancelFunc
+}
+
+func (c sessionConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if err != nil {
+		c.end()
+	}
+	return n, err
 }
 
 // serveConn admits conn and runs its session until the client ends it or
@@ -60,7 +105,10 @@ func serveConn(ctx context.Context, srv *sdk.Server, conn net.Conn, identity str
 	}
 	defer g.release()
 
-	ss, err := srv.Connect(ctx, &sdk.IOTransport{Reader: conn, Writer: conn}, nil)
+	session, end := context.WithCancel(ctx)
+	defer end()
+	sc := sessionConn{Conn: conn, end: end}
+	ss, err := srv.Connect(context.WithValue(ctx, sessionKey{}, session), &sdk.IOTransport{Reader: sc, Writer: sc}, nil)
 	if err != nil {
 		log.Printf("starting MCP session: %v", err)
 		return
