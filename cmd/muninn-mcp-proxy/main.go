@@ -13,6 +13,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"syscall"
 
 	"github.com/broderick-westrope/muninn/internal/mcpsock"
@@ -40,8 +41,7 @@ func run(args []string) int {
 		// session itself.
 		fmt.Fprintf(os.Stderr, "muninn: serving in-process: %v\n", err)
 		argv := append([]string{spec.Muninn}, muninnArgs...)
-		env := append(os.Environ(), mcpsock.InProcessEnv+"=1")
-		err := syscall.Exec(spec.Muninn, argv, env)
+		err := syscall.Exec(spec.Muninn, argv, inProcessEnv(os.Environ()))
 		fmt.Fprintf(os.Stderr, "muninn-mcp-proxy: running %s: %v\n", spec.Muninn, err)
 		return 1
 	}
@@ -51,4 +51,17 @@ func run(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// inProcessEnv returns env with mcpsock.InProcessEnv set. Any inherited
+// value is dropped rather than shadowed: with duplicates, the first wins,
+// and an inherited empty value would send muninn straight back here.
+func inProcessEnv(env []string) []string {
+	out := make([]string, 0, len(env)+1)
+	for _, kv := range env {
+		if !strings.HasPrefix(kv, mcpsock.InProcessEnv+"=") {
+			out = append(out, kv)
+		}
+	}
+	return append(out, mcpsock.InProcessEnv+"=1")
 }

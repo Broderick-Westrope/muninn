@@ -198,6 +198,9 @@ func TestMCPFallsBackInProcess(t *testing.T) {
 					t.Fatal(err)
 				}
 				setup(t, e.state)
+				// An inherited empty value must not stop the proxy from
+				// handing the session back to muninn.
+				e.env = append(e.env, "MUNINN_MCP_IN_PROCESS=")
 
 				// A trailing "--" ends flag parsing, so falling back must
 				// not rely on appending a flag to the original arguments.
