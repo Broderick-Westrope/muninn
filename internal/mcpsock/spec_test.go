@@ -134,7 +134,27 @@ func TestSpecRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecodeSpec: %v", err)
 	}
-	if got != s {
+	if got.Encode() != s.Encode() || got.Identity != s.Identity || got.Muninn != s.Muninn {
 		t.Errorf("round trip = %+v, want %+v", got, s)
+	}
+}
+
+// A proxy older than the muninn that wrote a spec must pass on fields it
+// doesn't know.
+func TestSpecPassesOnFieldsItDoesNotKnow(t *testing.T) {
+	s := newSpecFixture(t).spec(t)
+	newer := strings.TrimSuffix(s.Encode(), "}") + `,"added_later":"x"}`
+	got, err := DecodeSpec(newer)
+	if err != nil {
+		t.Fatalf("DecodeSpec: %v", err)
+	}
+	if got.Encode() != newer {
+		t.Errorf("Encode = %s, want the original %s", got.Encode(), newer)
+	}
+}
+
+func TestDecodeSpecRejectsAnIncompleteSpec(t *testing.T) {
+	if _, err := DecodeSpec(`{"muninn":"/bin/muninn"}`); err == nil {
+		t.Error("DecodeSpec accepted a spec with no paths or identity")
 	}
 }

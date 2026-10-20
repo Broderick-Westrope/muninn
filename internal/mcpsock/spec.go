@@ -47,6 +47,11 @@ type Spec struct {
 	// Identity names the daemon this session may share: sessions share a
 	// daemon only if they resolved the same binary and the same paths.
 	Identity string `json:"identity"`
+
+	// encoded is the text a decoded Spec came from. Encode returns it
+	// unchanged, so a proxy older than the muninn that wrote it passes on
+	// fields it doesn't know.
+	encoded string
 }
 
 // NewSpec resolves a Spec. muninn is resolved through symlinks (Homebrew
@@ -114,10 +119,10 @@ func (s Spec) stateFile(ext string) string {
 
 // Encode renders s for passing to another process as one argument.
 func (s Spec) Encode() string {
-	b, err := json.Marshal(s)
-	if err != nil {
-		panic(fmt.Sprintf("encoding spec: %v", err)) // only strings; can't fail
+	if s.encoded != "" {
+		return s.encoded
 	}
+	b, _ := json.Marshal(s) // only strings; can't fail
 	return string(b)
 }
 
@@ -127,5 +132,14 @@ func DecodeSpec(encoded string) (Spec, error) {
 	if err := json.Unmarshal([]byte(encoded), &s); err != nil {
 		return Spec{}, fmt.Errorf("decoding spec: %w", err)
 	}
+	for name, v := range map[string]string{
+		"muninn": s.Muninn, "index_dir": s.IndexDir, "status_path": s.StatusPath,
+		"mirrors_dir": s.MirrorsDir, "state_dir": s.StateDir, "identity": s.Identity,
+	} {
+		if v == "" {
+			return Spec{}, fmt.Errorf("decoding spec: %s is missing", name)
+		}
+	}
+	s.encoded = encoded
 	return s, nil
 }
