@@ -8,10 +8,12 @@
 package mcpsock
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"net"
+	"os/exec"
 	"strings"
 	"time"
 )
@@ -198,4 +200,23 @@ func readLine(conn net.Conn) (string, error) {
 func writeLine(conn net.Conn, line string) error {
 	_, err := conn.Write([]byte(line + "\n"))
 	return err
+}
+
+// StartupBudget bounds how long Connect waits to be admitted, including
+// starting a daemon, before the session should serve in-process instead.
+const StartupBudget = 2 * time.Second
+
+// Connect asks the daemon for spec to admit a session, starting one with
+// `muninn mcp --daemon-start` if none answers, within StartupBudget. Its
+// errors wrap ErrNotAdmitted.
+func Connect(ctx context.Context, spec Spec) (*net.UnixConn, error) {
+	ctx, cancel := context.WithTimeout(ctx, StartupBudget)
+	defer cancel()
+	return Dial(ctx, spec.Socket(), spec.Identity, func() error {
+		cmd := exec.Command(spec.Muninn, "mcp", "--daemon-start", "--spec", spec.Encode())
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("%w: %s", err, bytes.TrimSpace(out))
+		}
+		return nil
+	})
 }

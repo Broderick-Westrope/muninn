@@ -38,16 +38,6 @@ func mcpIdle() time.Duration {
 // reparented, and taking the lock from a daemon that is still exiting.
 const daemonSetupTimeout = time.Second
 
-// runMCPDaemonStart runs `muninn mcp --daemon-start` and waits for it. It
-// returns as soon as the daemon has been launched, not when it's ready.
-func runMCPDaemonStart(spec mcpsock.Spec) error {
-	cmd := exec.Command(spec.Muninn, "mcp", "--daemon-start", "--spec", spec.Encode())
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("starting MCP daemon: %w: %s", err, bytes.TrimSpace(out))
-	}
-	return nil
-}
-
 // startMCPDaemon launches the daemon detached and returns at once. The
 // daemon gets its own session, no stdio from the client, stderr on the
 // log, and / as its working directory; once this process exits, the

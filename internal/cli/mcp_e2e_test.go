@@ -2,9 +2,11 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -21,7 +23,9 @@ type e2e struct {
 	state string
 }
 
-func newE2E(t *testing.T) *e2e {
+// newE2E builds muninn, and muninn-mcp-proxy next to it when withProxy is
+// set, the way a release installs them.
+func newE2E(t *testing.T, withProxy bool) *e2e {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("builds and runs the muninn binary")
@@ -36,6 +40,12 @@ func newE2E(t *testing.T) *e2e {
 	build := exec.Command("go", "build", "-o", bin, "../..")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("go build: %v\n%s", err, out)
+	}
+	if withProxy {
+		build := exec.Command("go", "build", "-o", filepath.Join(root, "muninn-mcp-proxy"), "../../cmd/muninn-mcp-proxy")
+		if out, err := build.CombinedOutput(); err != nil {
+			t.Fatalf("go build proxy: %v\n%s", err, out)
+		}
 	}
 
 	e := &e2e{bin: bin, root: root, state: filepath.Join(root, "state", "muninn")}
@@ -58,8 +68,9 @@ func newE2E(t *testing.T) *e2e {
 	return e
 }
 
-// session starts `muninn mcp` with args the way an MCP client would.
-func (e *e2e) session(t *testing.T, args ...string) *sdk.ClientSession {
+// session starts `muninn mcp` with args the way an MCP client would, and
+// returns the client session and the process serving it.
+func (e *e2e) session(t *testing.T, args ...string) (*sdk.ClientSession, *exec.Cmd) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -71,7 +82,18 @@ func (e *e2e) session(t *testing.T, args ...string) *sdk.ClientSession {
 		t.Fatalf("connecting to muninn mcp: %v", err)
 	}
 	t.Cleanup(func() { cs.Close() })
-	return cs
+	return cs, cmd
+}
+
+// program returns the base name of the program pid is running now, which
+// changes when a process execs another binary.
+func program(t *testing.T, pid int) string {
+	t.Helper()
+	out, err := exec.Command("ps", "-o", "comm=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		t.Fatalf("ps: %v", err)
+	}
+	return filepath.Base(strings.TrimSpace(string(out)))
 }
 
 func listRepos(t *testing.T, cs *sdk.ClientSession) {
@@ -109,35 +131,73 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 }
 
 func TestMCPSessionsShareOneDaemon(t *testing.T) {
-	e := newE2E(t)
-
-	a := e.session(t)
-	b := e.session(t)
-	listRepos(t, a)
-	listRepos(t, b)
-
-	if got := strings.Count(e.daemonLog(t), "opened"); got != 2 {
-		t.Errorf("daemon log has %d opened sessions, want 2:\n%s", got, e.daemonLog(t))
+	tests := map[string]struct {
+		withProxy bool
+		program   string
+	}{
+		"forwarding from muninn":          {withProxy: false, program: "muninn"},
+		"forwarding from the small proxy": {withProxy: true, program: "muninn-mcp-proxy"},
 	}
-	socks, _ := filepath.Glob(filepath.Join(e.state, "mcp-*.sock"))
-	if len(socks) != 1 {
-		t.Errorf("socket files = %v, want exactly one", socks)
-	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			e := newE2E(t, tc.withProxy)
 
-	// With both sessions closed, the daemon idles out and removes its
-	// socket.
-	a.Close()
-	b.Close()
-	waitFor(t, "the daemon to idle out", func() bool {
-		socks, _ := filepath.Glob(filepath.Join(e.state, "mcp-*.sock"))
-		return len(socks) == 0
-	})
+			a, cmd := e.session(t)
+			b, _ := e.session(t)
+			listRepos(t, a)
+			listRepos(t, b)
+
+			if got := program(t, cmd.Process.Pid); got != tc.program {
+				t.Errorf("session runs %q, want %q", got, tc.program)
+			}
+			if got := strings.Count(e.daemonLog(t), "opened"); got != 2 {
+				t.Errorf("daemon log has %d opened sessions, want 2:\n%s", got, e.daemonLog(t))
+			}
+			socks, _ := filepath.Glob(filepath.Join(e.state, "mcp-*.sock"))
+			if len(socks) != 1 {
+				t.Errorf("socket files = %v, want exactly one", socks)
+			}
+
+			// With both sessions closed, the daemon idles out and removes
+			// its socket.
+			a.Close()
+			b.Close()
+			waitFor(t, "the daemon to idle out", func() bool {
+				socks, _ := filepath.Glob(filepath.Join(e.state, "mcp-*.sock"))
+				return len(socks) == 0
+			})
+		})
+	}
+}
+
+func TestMCPFallsBackInProcess(t *testing.T) {
+	for _, withProxy := range []bool{false, true} {
+		t.Run(fmt.Sprintf("proxy=%v", withProxy), func(t *testing.T) {
+			e := newE2E(t, withProxy)
+			// A file where the state directory should be: no daemon can
+			// start, so the session must be served in-process.
+			if err := os.MkdirAll(filepath.Dir(e.state), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(e.state, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			cs, cmd := e.session(t)
+			listRepos(t, cs)
+
+			if got := program(t, cmd.Process.Pid); got != "muninn" {
+				t.Errorf("session runs %q, want muninn serving in-process", got)
+			}
+		})
+	}
 }
 
 func TestMCPInProcessStartsNoDaemon(t *testing.T) {
-	e := newE2E(t)
+	e := newE2E(t, true)
 
-	listRepos(t, e.session(t, "--in-process"))
+	cs, _ := e.session(t, "--in-process")
+	listRepos(t, cs)
 
 	if socks, _ := filepath.Glob(filepath.Join(e.state, "mcp-*.sock")); len(socks) != 0 {
 		t.Errorf("socket files = %v, want none for --in-process", socks)

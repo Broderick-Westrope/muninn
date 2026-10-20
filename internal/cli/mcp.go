@@ -7,8 +7,9 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"runtime/debug"
-	"time"
+	"syscall"
 
 	"github.com/spf13/cobra"
 
@@ -25,10 +26,6 @@ import (
 // a burst of greps; 64 MiB brought that to about 67 MB with no extra GC
 // CPU, while 48 and 32 MiB saved more but cost 2.5 to 3.5 times the CPU.
 const mcpMemoryLimit = 64 << 20
-
-// startupBudget bounds how long a session waits to be admitted by a shared
-// daemon, including starting one, before it serves in-process instead.
-const startupBudget = 2 * time.Second
 
 // applyMemoryLimit sets mcpMemoryLimit unless the user chose their own
 // limit through GOMEMLIMIT (passed as gomemlimit).
@@ -109,14 +106,34 @@ func forwardToMCPDaemon(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("%w: %w", errServeInProcess, err)
 	}
-	dialCtx, cancel := context.WithTimeout(ctx, startupBudget)
-	conn, err := mcpsock.Dial(dialCtx, spec.Socket(), spec.Identity, func() error { return runMCPDaemonStart(spec) })
-	cancel()
+	execProxy(spec)
+	conn, err := mcpsock.Connect(ctx, spec)
 	if err != nil {
 		return fmt.Errorf("%w: %w", errServeInProcess, err)
 	}
 	defer conn.Close()
 	return mcpsock.Forward(conn, os.Stdin, os.Stdout)
+}
+
+// proxyName is the small forwarder installed next to muninn. It links only
+// the standard library, so it costs about 3 MB per session where muninn,
+// which links Zoekt, costs about 30 MB before it does anything.
+const proxyName = "muninn-mcp-proxy"
+
+// execProxy replaces this process with the proxy installed next to the
+// muninn binary, if there is one, handing it the spec and this process's
+// arguments so it can exec back into muninn to serve in-process. Nothing
+// has been read from stdin yet, and exec keeps the pid and stdio, so the
+// client sees no change. It returns only if there's no proxy or the exec
+// failed, and the caller then forwards from this process instead.
+func execProxy(spec mcpsock.Spec) {
+	proxy := filepath.Join(filepath.Dir(spec.Muninn), proxyName)
+	if _, err := os.Stat(proxy); err != nil {
+		return
+	}
+	argv := append([]string{proxy, "--spec", spec.Encode(), "--"}, os.Args[1:]...)
+	err := syscall.Exec(proxy, argv, os.Environ())
+	fmt.Fprintf(os.Stderr, "muninn: running %s: %v\n", proxy, err)
 }
 
 // serveMCPInProcess serves one session over stdio from this process.
