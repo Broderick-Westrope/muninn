@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"sync"
 	"testing"
 	"time"
 )
@@ -109,21 +110,55 @@ func TestForwardReportsAStdinFailureAsSuch(t *testing.T) {
 	}
 }
 
+// sendAfter returns one line once gate closes, then blocks; it records
+// when that line was handed out.
+type sendAfter struct {
+	gate, sent chan struct{}
+	once       sync.Once
+}
+
+func (r *sendAfter) Read(p []byte) (int, error) {
+	<-r.gate
+	n := 0
+	r.once.Do(func() {
+		n = copy(p, "request\n")
+		close(r.sent)
+	})
+	if n == 0 {
+		select {} // the client is still there, just quiet
+	}
+	return n, nil
+}
+
+// holdFirstWrite blocks its first Write until release closes.
+type holdFirstWrite struct {
+	release chan struct{}
+	once    sync.Once
+}
+
+func (w *holdFirstWrite) Write(p []byte) (int, error) {
+	w.once.Do(func() { <-w.release })
+	return len(p), nil
+}
+
+// The daemon dies while the client is still sending, and the forwarder's
+// write to it fails before the forwarder has seen the daemon's EOF.
 func TestForwardReportsDaemonGoneMidWrite(t *testing.T) {
 	client, server := socketPair(t)
-	stdin, feed := io.Pipe()
-	done := forward(client, stdin, io.Discard)
+	in := &sendAfter{gate: make(chan struct{}), sent: make(chan struct{})}
+	out := &holdFirstWrite{release: make(chan struct{})}
+	done := forward(client, in, out)
 
+	// The daemon sends one byte, so the forwarder's output copy blocks in
+	// out, then dies.
+	if _, err := server.Write([]byte("x")); err != nil {
+		t.Fatal(err)
+	}
 	server.Close()
-	// The client keeps sending, so the forwarder's next socket write fails.
-	go func() {
-		for {
-			if _, err := feed.Write([]byte("request\n")); err != nil {
-				return
-			}
-		}
-	}()
-	t.Cleanup(func() { feed.Close() })
+	close(in.gate)
+	<-in.sent
+	time.Sleep(100 * time.Millisecond) // let the socket write fail
+	close(out.release)
 
 	if err := wait(t, done); !errors.Is(err, ErrDaemonGone) {
 		t.Errorf("Forward = %v, want ErrDaemonGone", err)
