@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -338,24 +339,86 @@ func TestMCPConcurrentSessionsShareOneDaemon(t *testing.T) {
 	}
 }
 
-func TestMCPReplacesStaleSocket(t *testing.T) {
-	e := newE2E(t, true)
-	cs, _ := e.session(t)
-	listRepos(t, cs)
-	socket := e.sockets()[0]
-	cs.Close()
-	waitFor(t, "the daemon to idle out", func() bool { return len(e.sockets()) == 0 })
+// daemonPID returns the pid of the daemon serving e's index.
+func (e *e2e) daemonPID(t *testing.T) int {
+	t.Helper()
+	out, err := exec.Command("pgrep", "-f", "--", "--daemon --spec .*"+e.root).Output()
+	if err != nil {
+		t.Fatalf("finding the daemon: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.Fields(string(out))[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pid
+}
 
-	// What a daemon killed with SIGKILL leaves behind: a socket file with
-	// no listener and no lock holder.
-	if err := os.WriteFile(socket, nil, 0o600); err != nil {
+func TestMCPSurvivesAKilledDaemon(t *testing.T) {
+	e := newE2E(t, true)
+	cs, first := e.session(t)
+	listRepos(t, cs)
+
+	if err := syscall.Kill(e.daemonPID(t), syscall.SIGKILL); err != nil {
 		t.Fatal(err)
 	}
 
+	// The session's state lived in the daemon, so the session ends and
+	// says so, as `muninn mcp` crashing would have; it doesn't silently
+	// carry on in-process.
+	// Wait for the session to end by itself: closing it first would end
+	// it from the client's side.
+	done := make(chan struct{})
+	go func() { cs.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("session still open after its daemon was killed")
+	}
+	cs.Close()
+	if code := first.ProcessState.ExitCode(); code == 0 {
+		t.Error("session exited 0 after its daemon was killed, want a non-zero exit")
+	}
+	if socks := e.sockets(); len(socks) != 1 {
+		t.Fatalf("socket files = %v, want the killed daemon's stale socket", socks)
+	}
+
+	// The next session replaces the stale socket with a fresh daemon.
 	cs, cmd := e.session(t)
 	listRepos(t, cs)
 	if got := program(t, cmd.Process.Pid); got != "muninn-mcp-proxy" {
 		t.Errorf("session runs %q, want it forwarded to a fresh daemon", got)
+	}
+}
+
+func TestMCPConfigFlagSurvivesBothExecs(t *testing.T) {
+	setups := map[string]func(t *testing.T, state string){
+		"shared": func(*testing.T, string) {},
+		// The proxy has to hand the session back to muninn, which loads
+		// the config again.
+		"handed back": func(t *testing.T, state string) {
+			if err := os.MkdirAll(filepath.Join(state, "mcp.log"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+	for name, setup := range setups {
+		t.Run(name, func(t *testing.T) {
+			e := newE2E(t, true)
+			def := filepath.Join(e.root, "config", "muninn", "config.json")
+			moved := filepath.Join(e.root, "elsewhere.json")
+			if err := os.Rename(def, moved); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(e.state, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			setup(t, e.state)
+
+			// Without the flag reaching muninn, loading the default config
+			// fails and the session never initializes.
+			cs, _ := e.session(t, "--config", moved)
+			listRepos(t, cs)
+		})
 	}
 }
 
