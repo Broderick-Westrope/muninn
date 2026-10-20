@@ -8,7 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/broderick-westrope/muninn/internal/mcpsock"
@@ -78,34 +77,43 @@ func cancelWithSession(next sdk.MethodHandler) sdk.MethodHandler {
 	}
 }
 
-// sessionTransport ends its session as soon as the SDK fails to read from
-// it, whether the client went away or sent something it can't decode.
-// Either way the SDK accepts no more input and rejects every later write,
-// so nothing the session's calls produce can be delivered.
-type sessionTransport struct {
-	sdk.Transport
+// responseWriteTimeout bounds each write to a session's client. A response
+// is a few kilobytes of text, so a client that can't take one in this long
+// has stopped reading; without the bound it would hold its session, and
+// the daemon, for as long as its process lives.
+var responseWriteTimeout = 30 * time.Second
+
+// sessionConn ends its session when a read fails (the client went away or
+// ended its input) or a write times out (the client stopped reading).
+//
+// It wraps the socket rather than the SDK's Connection, because the SDK
+// tells its own Connection type the negotiated protocol version through an
+// unexported method that a wrapper would hide. The cost: undecodable input
+// doesn't end the session at once. The SDK stops reading, and the session
+// ends when its calls finish, within their own deadlines.
+type sessionConn struct {
+	net.Conn
 	end context.CancelFunc
 }
 
-func (t sessionTransport) Connect(ctx context.Context) (sdk.Connection, error) {
-	c, err := t.Transport.Connect(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return sessionConnection{Connection: c, end: t.end}, nil
-}
-
-type sessionConnection struct {
-	sdk.Connection
-	end context.CancelFunc
-}
-
-func (c sessionConnection) Read(ctx context.Context) (jsonrpc.Message, error) {
-	msg, err := c.Connection.Read(ctx)
+func (c sessionConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
 	if err != nil {
 		c.end()
 	}
-	return msg, err
+	return n, err
+}
+
+func (c sessionConn) Write(p []byte) (int, error) {
+	if err := c.Conn.SetWriteDeadline(time.Now().Add(responseWriteTimeout)); err != nil {
+		c.end()
+		return 0, err
+	}
+	n, err := c.Conn.Write(p)
+	if err != nil {
+		c.end()
+	}
+	return n, err
 }
 
 // serveConn admits conn and runs its session until the client ends it or
@@ -124,8 +132,8 @@ func serveConn(ctx context.Context, srv *sdk.Server, conn net.Conn, identity str
 	}
 	defer g.release()
 
-	transport := sessionTransport{Transport: &sdk.IOTransport{Reader: conn, Writer: conn}, end: end}
-	ss, err := srv.Connect(context.WithValue(ctx, sessionKey{}, session), transport, nil)
+	sc := sessionConn{Conn: conn, end: end}
+	ss, err := srv.Connect(context.WithValue(ctx, sessionKey{}, session), &sdk.IOTransport{Reader: sc, Writer: sc}, nil)
 	if err != nil {
 		log.Printf("starting MCP session: %v", err)
 		return
