@@ -246,3 +246,101 @@ func TestConnectBoundsAStarterThatHangs(t *testing.T) {
 		t.Errorf("Connect took %v, want it bounded by StartupBudget", elapsed)
 	}
 }
+
+// serveAll runs Admit on every connection to ln with g until ln closes.
+func serveAll(t *testing.T, ln net.Listener, identity string, g *gate) {
+	t.Helper()
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			Admit(conn, identity, g.reserve, g.release)
+			t.Cleanup(func() { conn.Close() })
+		}
+	}()
+}
+
+func TestDialHandsOffFromADrainingDaemon(t *testing.T) {
+	socket := shortSocketPath(t)
+	old, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveAll(t, old, "abc", &gate{open: false})
+
+	successor := &gate{open: true}
+	starts := 0
+	start := func(context.Context) error {
+		starts++
+		// What a successor does: the old daemon goes, the new one listens.
+		old.Close()
+		ln, err := net.Listen("unix", socket)
+		if err != nil {
+			return err
+		}
+		t.Cleanup(func() { ln.Close() })
+		serveAll(t, ln, "abc", successor)
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	conn, err := Dial(ctx, socket, "abc", start)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.Close()
+	if starts != 1 {
+		t.Errorf("start called %d times, want 1", starts)
+	}
+}
+
+func TestDialDoesNotStartADaemonPerDrainingRefusal(t *testing.T) {
+	socket := shortSocketPath(t)
+	ln, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	serveAll(t, ln, "abc", &gate{open: false})
+
+	starts := 0
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	Dial(ctx, socket, "abc", func(context.Context) error { starts++; return nil })
+
+	if starts != 1 {
+		t.Errorf("start called %d times in 1 s of draining refusals, want 1", starts)
+	}
+}
+
+func TestDialRetriesAStartWhoseDaemonNeverListened(t *testing.T) {
+	socket := shortSocketPath(t)
+	starts := 0
+	start := func(context.Context) error {
+		starts++
+		if starts == 1 {
+			return nil // this daemon lost a lock race and exited
+		}
+		ln, err := net.Listen("unix", socket)
+		if err != nil {
+			return err
+		}
+		t.Cleanup(func() { ln.Close() })
+		serveAll(t, ln, "abc", &gate{open: true})
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	conn, err := Dial(ctx, socket, "abc", start)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.Close()
+	if starts != 2 {
+		t.Errorf("start called %d times, want 2", starts)
+	}
+}

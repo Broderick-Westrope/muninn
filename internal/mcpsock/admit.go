@@ -93,14 +93,20 @@ func Admit(conn net.Conn, identity string, reserve func() bool, release func()) 
 // starting or draining.
 const retryInterval = 25 * time.Millisecond
 
+// restartAfter is how long Dial waits after starting a daemon before it
+// starts another. It is longer than a new daemon waits for the lock, so a
+// daemon that is still taking over from a draining one isn't duplicated,
+// but one that lost the race and exited gets replaced.
+const restartAfter = 1500 * time.Millisecond
+
 // Dial connects to the daemon at socket and asks it to admit a session
-// with identity, retrying until ctx expires. When nothing answers, it calls
-// start once to launch a daemon, and again after a draining daemon refuses
-// it. start gets Dial's context and must return when it ends. A start
-// error ends Dial at once. On success the connection carries
+// with identity, retrying until ctx expires. When nothing answers or a
+// draining daemon refuses it, it calls start to launch a daemon, at most
+// once per restartAfter. start gets Dial's context and must return when it
+// ends. A start error ends Dial at once. On success the connection carries
 // only MCP bytes from then on; on failure the error wraps ErrNotAdmitted.
 func Dial(ctx context.Context, socket, identity string, start func(context.Context) error) (*net.UnixConn, error) {
-	started := false
+	var lastStart time.Time
 	var last error
 	for {
 		conn, err := admit(ctx, socket, identity)
@@ -113,14 +119,12 @@ func Dial(ctx context.Context, socket, identity string, start func(context.Conte
 			// won't change that.
 			return nil, fmt.Errorf("%w: %w", ErrNotAdmitted, err)
 		}
-		if errors.Is(err, ErrDraining) {
-			started = false
-		}
-		if !started && (errors.Is(err, ErrDraining) || isNoListener(err)) {
+		needDaemon := errors.Is(err, ErrDraining) || isNoListener(err)
+		if needDaemon && (lastStart.IsZero() || time.Since(lastStart) >= restartAfter) {
 			if err := start(ctx); err != nil {
 				return nil, fmt.Errorf("%w: starting it: %w", ErrNotAdmitted, err)
 			}
-			started = true
+			lastStart = time.Now()
 		}
 		select {
 		case <-ctx.Done():
