@@ -276,11 +276,15 @@ the end of the session.
 
 - **EOF for any reason** (client closed stdin, client or forwarder
   died). The forwarder half-closes the socket on stdin EOF and exits
-  when the daemon closes it. The daemon gives each connection its own
-  context, passes it to `Server.Connect` so every call's context derives
-  from it, and cancels it as soon as a read on the connection returns
-  EOF or an error. That stops abandoned `git` work at once instead of
-  when its first write fails, which is the one improvement on today.
+  when the daemon closes it. The daemon gives each connection a "gone"
+  signal that fires as soon as a read on it returns EOF or an error, and
+  a receiving middleware on the shared `sdk.Server` (keyed by the call's
+  `ServerSession`) links each call's context to its session's signal.
+  The context passed to `Server.Connect` can't do this: go-sdk wraps it
+  so it never cancels (`internal/jsonrpc2/conn.go`, `notDone`), and
+  request contexts derive from that wrapper. Cancelling on EOF stops
+  abandoned `git` work at once instead of when its first write fails,
+  which is the one improvement on today.
 - **Client stops reading stdout.** Each write to a session's connection
   gets a fresh 30 s deadline. It bounds the whole write, not progress,
   which is fine because a response is a few kilobytes of text; a client
@@ -344,8 +348,8 @@ missing (a `go install` build, say), `muninn mcp` behaves as in phase 2.
 - Closing stdin while a slow `git` call is in flight cancels that call
   promptly, and other sessions are unaffected.
 - A stale socket with no lock holder is removed and replaced.
-- Two daemons started at once: exactly one serves, and every forwarder
-  is admitted by it.
+- Two daemons started at once: exactly one serves, and with a warm
+  machine every forwarder is admitted by it.
 - Idle shutdown racing a connection, including one still in the listen
   backlog: the forwarder is either admitted and served, or refused and
   retries; never admitted and then dropped.
