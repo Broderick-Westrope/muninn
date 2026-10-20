@@ -280,3 +280,24 @@ func TestMCPReplacesStaleSocket(t *testing.T) {
 		t.Errorf("session runs %q, want it forwarded to a fresh daemon", got)
 	}
 }
+
+func TestMCPDoesNotTrustASocketInAnOpenStateDir(t *testing.T) {
+	e := newE2E(t, true)
+	first, _ := e.session(t)
+	listRepos(t, first)
+
+	// Whatever listens on a socket in a directory others can write to
+	// might not be ours.
+	if err := os.Chmod(e.state, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	cs, cmd := e.session(t)
+	listRepos(t, cs)
+
+	if got := program(t, cmd.Process.Pid); got != "muninn" {
+		t.Errorf("session runs %q, want muninn serving in-process", got)
+	}
+	if got := strings.Count(e.daemonLog(t), "opened"); got != 1 {
+		t.Errorf("daemon log has %d opened sessions, want only the first:\n%s", got, e.daemonLog(t))
+	}
+}

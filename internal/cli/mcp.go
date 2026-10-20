@@ -106,6 +106,14 @@ func forwardToMCPDaemon(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("%w: %w", errServeInProcess, err)
 	}
+	// Check before dialing, not only before starting a daemon: whatever
+	// already listens in a directory others can reach might not be ours.
+	if err := os.MkdirAll(spec.StateDir, 0o700); err != nil {
+		return fmt.Errorf("%w: creating state directory: %w", errServeInProcess, err)
+	}
+	if err := checkPrivateDir(spec.StateDir); err != nil {
+		return fmt.Errorf("%w: %w", errServeInProcess, err)
+	}
 	execProxy(spec)
 	conn, err := mcpsock.Connect(ctx, spec)
 	if err != nil {
