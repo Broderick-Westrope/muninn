@@ -375,23 +375,43 @@ func TestDialGivesUpOnAnUnexpectedReply(t *testing.T) {
 	}
 }
 
-func TestDialStartsNoDaemonForASocketItCannotReach(t *testing.T) {
-	socket := shortSocketPath(t)
-	ln, err := net.Listen("unix", socket)
-	if err != nil {
-		t.Fatal(err)
+func TestDialGivesUpOnASocketItCannotReach(t *testing.T) {
+	cases := map[string]func(t *testing.T, socket string){
+		"permission denied": func(t *testing.T, socket string) {
+			ln, err := net.Listen("unix", socket)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { ln.Close() })
+			if err := os.Chmod(socket, 0); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"not a socket": func(t *testing.T, socket string) {
+			if err := os.WriteFile(socket, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
 	}
-	defer ln.Close()
-	if err := os.Chmod(socket, 0); err != nil {
-		t.Fatal(err)
-	}
+	for name, setup := range cases {
+		t.Run(name, func(t *testing.T) {
+			socket := shortSocketPath(t)
+			setup(t, socket)
 
-	starts := 0
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
-	defer cancel()
-	Dial(ctx, socket, "abc", func(context.Context) error { starts++; return nil })
-
-	if starts != 0 {
-		t.Errorf("start called %d times for a socket that exists but can't be reached, want 0", starts)
+			starts := 0
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			start := time.Now()
+			_, err := Dial(ctx, socket, "abc", func(context.Context) error { starts++; return nil })
+			if !errors.Is(err, ErrNotAdmitted) {
+				t.Errorf("Dial err = %v, want ErrNotAdmitted", err)
+			}
+			if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+				t.Errorf("Dial took %v, want it to give up at once", elapsed)
+			}
+			if starts != 0 {
+				t.Errorf("start called %d times, want 0", starts)
+			}
+		})
 	}
 }

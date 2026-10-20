@@ -120,9 +120,9 @@ func Dial(ctx context.Context, socket, identity string, start func(context.Conte
 			return conn, nil
 		}
 		last = err
-		if errors.Is(err, ErrIdentityMismatch) || errors.Is(err, ErrRefused) {
-			// Another binary, index or program owns this socket; waiting
-			// won't change that.
+		if errors.Is(err, ErrIdentityMismatch) || errors.Is(err, ErrRefused) || cannotReach(err) {
+			// Another binary, index or program owns this socket, or it
+			// can't be reached at all; waiting won't change that.
 			return nil, fmt.Errorf("%w: %w", ErrNotAdmitted, err)
 		}
 		needDaemon := errors.Is(err, ErrDraining) || isNoListener(err)
@@ -184,8 +184,18 @@ func admit(ctx context.Context, socket, identity string) (*net.UnixConn, error) 
 	return conn, nil
 }
 
+// cannotReach reports whether a dial failed for a reason a daemon starting
+// up won't fix: the socket path isn't a socket, or permission is denied.
+func cannotReach(err error) bool {
+	var opErr *net.OpError
+	return errors.As(err, &opErr) && opErr.Op == "dial" && !opErr.Timeout() && !isNoListener(err)
+}
+
 // isNoListener reports whether a dial failed because no daemon is
 // listening: the socket file is missing or left behind by a dead daemon.
+//
+// macOS also refuses a connection when a live daemon's listen backlog is
+// full; that starts a spare daemon, which loses the lock race and exits.
 func isNoListener(err error) bool {
 	return errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ECONNREFUSED)
 }
