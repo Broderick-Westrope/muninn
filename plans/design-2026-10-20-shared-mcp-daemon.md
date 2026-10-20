@@ -432,6 +432,11 @@ The daemon uses the same value; with 17 concurrent sessions it stayed at
   again, since the directory's permissions are the socket's only access
   control. Otherwise the session is served in-process and says why on
   stderr.
+- The startup budget is 5 s, not 2 s. Exercising it, the first launch of
+  a freshly installed build took 3.5 s to admit six sessions started
+  together, and on a busy machine a daemon took up to 3 s from launch to
+  its first line of Go. A healthy daemon admits as soon as it listens, so
+  the budget only delays sessions whose daemon can't start at all.
 - Idle periods are numbered, so a timer callback from an earlier period
   can't drain the daemon right after a session closes.
 - `MUNINN_MCP_IDLE` (a Go duration) overrides the 5 minute idle timeout;
