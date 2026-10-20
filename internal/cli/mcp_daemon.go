@@ -52,6 +52,9 @@ func startMCPDaemon(encoded string) error {
 	if err := os.MkdirAll(spec.StateDir, 0o700); err != nil {
 		return fmt.Errorf("creating state directory: %w", err)
 	}
+	if err := checkPrivateDir(spec.StateDir); err != nil {
+		return err
+	}
 	logFile, err := os.OpenFile(spec.Log(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return fmt.Errorf("opening MCP daemon log: %w", err)
@@ -65,6 +68,24 @@ func startMCPDaemon(encoded string) error {
 		return fmt.Errorf("starting MCP daemon: %w", err)
 	}
 	return cmd.Process.Release()
+}
+
+// checkPrivateDir returns an error unless dir belongs to this user and no
+// one else can reach into it. The daemon's socket lives there, and any
+// process that can connect to the socket can search the index; the
+// directory's permissions are the only access control.
+func checkPrivateDir(dir string) error {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("checking state directory: %w", err)
+	}
+	if st, ok := info.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Getuid() {
+		return fmt.Errorf("state directory %s belongs to uid %d, not this user", dir, st.Uid)
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		return fmt.Errorf("state directory %s is open to other users (mode %v); run `chmod 700 %s` to share the MCP server", dir, perm, dir)
+	}
+	return nil
 }
 
 // runMCPDaemon is the shared daemon: it owns the lock for its spec's

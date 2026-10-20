@@ -171,27 +171,46 @@ func TestMCPSessionsShareOneDaemon(t *testing.T) {
 }
 
 func TestMCPFallsBackInProcess(t *testing.T) {
-	for _, withProxy := range []bool{false, true} {
-		t.Run(fmt.Sprintf("proxy=%v", withProxy), func(t *testing.T) {
-			e := newE2E(t, withProxy)
-			// A file where the state directory should be: no daemon can
-			// start, so the session must be served in-process.
-			if err := os.MkdirAll(filepath.Dir(e.state), 0o700); err != nil {
+	causes := map[string]func(t *testing.T, state string){
+		// A file where the state directory should be: no daemon can start.
+		"state dir is a file": func(t *testing.T, state string) {
+			if err := os.WriteFile(state, nil, 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(e.state, nil, 0o600); err != nil {
+		},
+		// Other users could reach a socket in it, so the daemon refuses to
+		// listen there.
+		"state dir readable by others": func(t *testing.T, state string) {
+			if err := os.Mkdir(state, 0o755); err != nil {
 				t.Fatal(err)
 			}
-
-			// A trailing "--" ends flag parsing, so falling back must not
-			// rely on appending a flag to the original arguments.
-			cs, cmd := e.session(t, "--")
-			listRepos(t, cs)
-
-			if got := program(t, cmd.Process.Pid); got != "muninn" {
-				t.Errorf("session runs %q, want muninn serving in-process", got)
+			if err := os.Chmod(state, 0o755); err != nil {
+				t.Fatal(err)
 			}
-		})
+		},
+	}
+	for cause, setup := range causes {
+		for _, withProxy := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/proxy=%v", cause, withProxy), func(t *testing.T) {
+				e := newE2E(t, withProxy)
+				if err := os.MkdirAll(filepath.Dir(e.state), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				setup(t, e.state)
+
+				// A trailing "--" ends flag parsing, so falling back must
+				// not rely on appending a flag to the original arguments.
+				cs, cmd := e.session(t, "--")
+				listRepos(t, cs)
+
+				if got := program(t, cmd.Process.Pid); got != "muninn" {
+					t.Errorf("session runs %q, want muninn serving in-process", got)
+				}
+				if socks, _ := filepath.Glob(filepath.Join(e.state, "mcp-*.sock")); len(socks) != 0 {
+					t.Errorf("socket files = %v, want none", socks)
+				}
+			})
+		}
 	}
 }
 
