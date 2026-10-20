@@ -3,12 +3,15 @@ package mcp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -276,7 +279,8 @@ func (l *failingListener) Accept() (net.Conn, error) {
 func TestServeAcceptErrorEndsOpenSessions(t *testing.T) {
 	started, cancelled := make(chan struct{}, 1), make(chan struct{}, 1)
 	ln, socket := listenShort(t)
-	broken := errors.New("accept broke")
+	// Something other than the daemon closed its listener.
+	broken := fmt.Errorf("accept broke: %w", net.ErrClosed)
 	gate := make(chan struct{})
 	fl := &failingListener{Listener: ln, err: broken}
 	done := startServe(t, context.Background(), &gatedListener{fl, gate}, blockingServer(started, cancelled))
@@ -297,6 +301,35 @@ func TestServeAcceptErrorEndsOpenSessions(t *testing.T) {
 	// so nothing of this daemon's can touch a successor's socket later.
 	if _, err := os.Stat(socket); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("socket still present after serve returned: %v", err)
+	}
+}
+
+// flakyListener fails one Accept with err, then accepts normally.
+type flakyListener struct {
+	net.Listener
+	failed atomic.Bool
+	err    error
+}
+
+func (l *flakyListener) Accept() (net.Conn, error) {
+	if l.failed.CompareAndSwap(false, true) {
+		return nil, l.err
+	}
+	return l.Listener.Accept()
+}
+
+func TestServeRidesOutATransientAcceptError(t *testing.T) {
+	f := newFixture(t, "")
+	ln, socket := listenShort(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	fl := &flakyListener{Listener: ln, err: syscall.EMFILE}
+	go func() { done <- f.srv.Serve(ctx, fl, testIdentity, time.Minute) }()
+	defer func() { cancel(); <-done }()
+
+	d := &daemon{socket: socket}
+	if out := grepText(t, d.connect(t), "banana"); !strings.Contains(out, "other.go") {
+		t.Errorf("grep after a transient accept error failed:\n%s", out)
 	}
 }
 

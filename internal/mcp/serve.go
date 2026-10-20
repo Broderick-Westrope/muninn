@@ -20,7 +20,9 @@ import (
 // SDK server, so all sessions share s's searcher.
 //
 // Serve closes ln and returns nil once no session has been open for idle.
-// When ctx is done it closes ln and every session, and returns nil.
+// When ctx is done it closes ln and every session, and returns nil. If
+// something else closes ln, it ends every session and returns that error;
+// other accept errors are retried.
 func (s *Server) Serve(ctx context.Context, ln net.Listener, identity string, idle time.Duration) error {
 	// Tools are registered before the first Accept: tool-list changes are
 	// broadcast to every session, so the set must be fixed up front.
@@ -41,8 +43,18 @@ func serve(ctx context.Context, ln net.Listener, srv *sdk.Server, identity strin
 
 	var wg sync.WaitGroup
 	var sessions atomic.Uint64 // numbers sessions in the log
+	var backoff time.Duration
 	for {
 		conn, err := ln.Accept()
+		if err != nil && !g.draining() && !errors.Is(err, net.ErrClosed) {
+			// Running out of file descriptors and the like pass; ending
+			// every session for them wouldn't. Back off like net/http.
+			backoff = min(max(2*backoff, 5*time.Millisecond), time.Second)
+			log.Printf("accepting a connection: %v; retrying in %v", err, backoff)
+			time.Sleep(backoff)
+			continue
+		}
+		backoff = 0
 		if err != nil {
 			if !g.draining() {
 				err = fmt.Errorf("accepting MCP connection: %w", err)
