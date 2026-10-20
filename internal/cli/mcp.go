@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -56,8 +55,9 @@ in-process instead. --in-process always serves in-process.`,
 				return startMCPDaemon(spec)
 			}
 			// Zoekt logs shard loading via the stdlib logger; keep the
-			// server's stderr free of that noise.
-			log.SetOutput(io.Discard)
+			// server's stderr free of that noise, but not of errors such
+			// as a recovered tool panic.
+			log.SetOutput(dropInfo{os.Stderr})
 			// Git is a hard prerequisite for the mirror-backed tools: fail
 			// fast and loudly instead of surfacing per-call errors later.
 			if err := gitcmd.Validate(); err != nil {
@@ -70,10 +70,11 @@ in-process instead. --in-process always serves in-process.`,
 			}
 			if !inProcess && os.Getenv(mcpsock.InProcessEnv) == "" {
 				err := forwardToMCPDaemon(cmd.Context())
-				if !errors.Is(err, errServeInProcess) {
+				var fallback serveInProcess
+				if !errors.As(err, &fallback) {
 					return err
 				}
-				fmt.Fprintf(os.Stderr, "muninn: serving in-process: %v\n", err)
+				fmt.Fprintf(os.Stderr, "muninn: serving in-process: %v\n", fallback.reason)
 			}
 			return serveMCPInProcess(cmd.Context())
 		},
@@ -88,36 +89,39 @@ in-process instead. --in-process always serves in-process.`,
 	return cmd
 }
 
-// errServeInProcess reports that the session could not be handed to a
-// shared daemon, before any MCP bytes were read.
-var errServeInProcess = errors.New("no shared MCP server")
+// serveInProcess reports why the session could not be handed to the
+// shared MCP server, before any MCP bytes were read.
+type serveInProcess struct{ reason error }
+
+func (e serveInProcess) Error() string { return e.reason.Error() }
+func (e serveInProcess) Unwrap() error { return e.reason }
 
 // forwardToMCPDaemon hands this session's stdio to the shared daemon for
-// its spec, starting one if needed. It returns an error wrapping
-// errServeInProcess if no daemon admitted the session; nothing has been
+// its spec, starting one if needed. It returns a serveInProcess
+// error if no daemon admitted the session; nothing has been
 // read from stdin then, so the caller can still serve in-process. After
 // admission it never falls back.
 func forwardToMCPDaemon(ctx context.Context) error {
 	exe, err := os.Executable()
 	if err != nil {
-		return fmt.Errorf("%w: locating muninn binary: %w", errServeInProcess, err)
+		return serveInProcess{fmt.Errorf("locating muninn binary: %w", err)}
 	}
 	spec, err := mcpsock.NewSpec(exe, xdg.IndexDir(), xdg.StatusPath(), xdg.MirrorsDir(), xdg.StateDir())
 	if err != nil {
-		return fmt.Errorf("%w: %w", errServeInProcess, err)
+		return serveInProcess{err}
 	}
 	// Check before dialing, not only before starting a daemon: whatever
 	// already listens in a directory others can reach might not be ours.
 	if err := os.MkdirAll(spec.StateDir, 0o700); err != nil {
-		return fmt.Errorf("%w: creating state directory: %w", errServeInProcess, err)
+		return serveInProcess{fmt.Errorf("creating state directory: %w", err)}
 	}
 	if err := checkPrivateDir(spec.StateDir); err != nil {
-		return fmt.Errorf("%w: %w", errServeInProcess, err)
+		return serveInProcess{err}
 	}
 	execProxy(spec)
 	conn, err := mcpsock.Connect(ctx, spec)
 	if err != nil {
-		return fmt.Errorf("%w: %w", errServeInProcess, err)
+		return serveInProcess{err}
 	}
 	defer conn.Close()
 	return mcpsock.Forward(conn, os.Stdin, os.Stdout)
