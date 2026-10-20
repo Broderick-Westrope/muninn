@@ -422,9 +422,9 @@ The daemon uses the same value; with 17 concurrent sessions it stayed at
   takes over 30 s, or the daemon shuts down; ending it closes the socket.
   The wrapper sits on the socket, not the SDK's `Connection`, whose
   unexported hooks a wrapper would hide, so undecodable input ends the
-  session only once its calls finish within their own deadlines.
-- Calls are cancelled when their session ends, through receiving
-  middleware that reads the session's context from a value on the
+  session only once its calls finish.
+- Every call is bounded at 5 minutes, and cancelled when its session
+  ends, through receiving middleware that reads the session's context from a value on the
   `Connect` context (the SDK strips cancellation from that context but
   keeps its values).
 - `muninn mcp` checks that the state directory is owned by the user and
@@ -432,5 +432,7 @@ The daemon uses the same value; with 17 concurrent sessions it stayed at
   again, since the directory's permissions are the socket's only access
   control. Otherwise the session is served in-process and says why on
   stderr.
+- Idle periods are numbered, so a timer callback from an earlier period
+  can't drain the daemon right after a session closes.
 - `MUNINN_MCP_IDLE` (a Go duration) overrides the 5 minute idle timeout;
   the end-to-end tests use it.
