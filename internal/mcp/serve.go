@@ -29,7 +29,7 @@ func serve(ctx context.Context, ln net.Listener, srv *sdk.Server, identity strin
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	srv.AddReceivingMiddleware(cancelWithSession)
+	srv.AddReceivingMiddleware(boundCalls)
 	g := newGate(idle, func() { ln.Close() })
 	stop := context.AfterFunc(ctx, func() {
 		g.drain()
@@ -56,21 +56,26 @@ func serve(ctx context.Context, ln net.Listener, srv *sdk.Server, identity strin
 	}
 }
 
-// sessionKey carries a session's context through the SDK to
-// cancelWithSession. The SDK strips cancellation from the context given to
+// sessionKey carries a session's context through the SDK to boundCalls. The SDK strips cancellation from the context given to
 // Connect but keeps its values.
 type sessionKey struct{}
 
-// cancelWithSession cancels a call when its session ends, so a client
-// that goes away, or a daemon shutting down, doesn't leave calls running.
-// Responses can't be delivered then anyway: the SDK rejects every write
-// once a session's input has ended.
-func cancelWithSession(next sdk.MethodHandler) sdk.MethodHandler {
+// callTimeout bounds every call the daemon serves. Git-backed tools have
+// their own shorter deadlines, but searches have none, and a call whose
+// session stopped reading undecodable input can't be cancelled any other
+// way; in a shared daemon it would keep the daemon from ever idling out.
+// No legitimate call comes near it.
+var callTimeout = 5 * time.Minute
+
+// boundCalls ends each call when its session ends, so a client that goes
+// away, or a daemon shutting down, doesn't leave calls running, and after
+// callTimeout regardless. Responses can't be delivered once a session has
+// ended anyway: the SDK rejects every write after its input ends.
+func boundCalls(next sdk.MethodHandler) sdk.MethodHandler {
 	return func(ctx context.Context, method string, req sdk.Request) (sdk.Result, error) {
+		ctx, cancel := context.WithTimeout(ctx, callTimeout)
+		defer cancel()
 		if session, ok := ctx.Value(sessionKey{}).(context.Context); ok {
-			var cancel context.CancelFunc
-			ctx, cancel = context.WithCancel(ctx)
-			defer cancel()
 			defer context.AfterFunc(session, cancel)()
 		}
 		return next(ctx, method, req)

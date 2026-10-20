@@ -409,3 +409,20 @@ func TestGateIgnoresAnExpiryFromAnEarlierIdlePeriod(t *testing.T) {
 		t.Error("the current period's expiry didn't drain an idle daemon")
 	}
 }
+
+func TestServeBoundsEveryCall(t *testing.T) {
+	prev := callTimeout
+	callTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { callTimeout = prev })
+
+	started, cancelled := make(chan struct{}, 1), make(chan struct{}, 1)
+	ln, socket := listenShort(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := startServe(t, ctx, ln, blockingServer(started, cancelled))
+	defer func() { cancel(); <-done }()
+
+	callBlock(t, socket)
+	receive(t, started, "the call to start")
+	// Nothing ends the session; only the call's own bound can stop it.
+	receive(t, cancelled, "the call to hit its time bound")
+}
