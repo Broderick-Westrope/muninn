@@ -96,9 +96,10 @@ const retryInterval = 25 * time.Millisecond
 // Dial connects to the daemon at socket and asks it to admit a session
 // with identity, retrying until ctx expires. When nothing answers, it calls
 // start once to launch a daemon, and again after a draining daemon refuses
-// it. A start error ends Dial at once. On success the connection carries
+// it. start gets Dial's context and must return when it ends. A start
+// error ends Dial at once. On success the connection carries
 // only MCP bytes from then on; on failure the error wraps ErrNotAdmitted.
-func Dial(ctx context.Context, socket, identity string, start func() error) (*net.UnixConn, error) {
+func Dial(ctx context.Context, socket, identity string, start func(context.Context) error) (*net.UnixConn, error) {
 	started := false
 	var last error
 	for {
@@ -116,7 +117,7 @@ func Dial(ctx context.Context, socket, identity string, start func() error) (*ne
 			started = false
 		}
 		if !started && (errors.Is(err, ErrDraining) || isNoListener(err)) {
-			if err := start(); err != nil {
+			if err := start(ctx); err != nil {
 				return nil, fmt.Errorf("%w: starting daemon: %w", ErrNotAdmitted, err)
 			}
 			started = true
@@ -212,8 +213,9 @@ const StartupBudget = 2 * time.Second
 func Connect(ctx context.Context, spec Spec) (*net.UnixConn, error) {
 	ctx, cancel := context.WithTimeout(ctx, StartupBudget)
 	defer cancel()
-	return Dial(ctx, spec.Socket(), spec.Identity, func() error {
-		cmd := exec.Command(spec.Muninn, "mcp", "--daemon-start", "--spec", spec.Encode())
+	return Dial(ctx, spec.Socket(), spec.Identity, func(ctx context.Context) error {
+		cmd := exec.CommandContext(ctx, spec.Muninn, "mcp", "--daemon-start", "--spec", spec.Encode())
+		cmd.WaitDelay = 100 * time.Millisecond
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("%w: %s", err, bytes.TrimSpace(out))
 		}

@@ -46,7 +46,7 @@ func startDaemon(t *testing.T, srv *Server, idle time.Duration) *daemon {
 	return d
 }
 
-func noStart() error { return errors.New("no daemon start in this test") }
+func noStart(context.Context) error { return errors.New("no daemon start in this test") }
 
 // connect opens an MCP client session to d through admission.
 func (d *daemon) connect(t *testing.T) *sdk.ClientSession {

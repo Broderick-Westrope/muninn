@@ -63,7 +63,7 @@ func serveOnce(t *testing.T, socket, identity string, g *gate) (<-chan error, <-
 	return errs, conns
 }
 
-func noStart() error { return errors.New("no daemon in this test") }
+func noStart(context.Context) error { return errors.New("no daemon in this test") }
 
 func TestDialAdmitted(t *testing.T) {
 	socket := shortSocketPath(t)
@@ -196,7 +196,7 @@ func TestDialStartsDaemonWhenNoneListens(t *testing.T) {
 	g := &gate{open: true}
 	starts := 0
 	var errs <-chan error
-	start := func() error {
+	start := func(context.Context) error {
 		starts++
 		errs, _ = serveOnce(t, socket, "abc", g)
 		return nil
@@ -227,5 +227,22 @@ func TestDialStartError(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Errorf("Dial took %v after start failed, want an immediate return", elapsed)
+	}
+}
+
+func TestConnectBoundsAStarterThatHangs(t *testing.T) {
+	socket := shortSocketPath(t)
+	hang := filepath.Join(filepath.Dir(socket), "muninn")
+	if err := os.WriteFile(hang, []byte("#!/bin/sh\nexec sleep 30\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	spec := Spec{Muninn: hang, StateDir: filepath.Dir(socket), Identity: "abc"}
+
+	start := time.Now()
+	if _, err := Connect(context.Background(), spec); !errors.Is(err, ErrNotAdmitted) {
+		t.Errorf("Connect err = %v, want ErrNotAdmitted", err)
+	}
+	if elapsed := time.Since(start); elapsed > StartupBudget+time.Second {
+		t.Errorf("Connect took %v, want it bounded by StartupBudget", elapsed)
 	}
 }
