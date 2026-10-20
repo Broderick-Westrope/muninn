@@ -11,7 +11,7 @@ func TestApplyMemoryLimit(t *testing.T) {
 		env  string
 		want int64
 	}{
-		"defaults when GOMEMLIMIT is unset":  {env: "", want: mcpMemoryLimit},
+		"defaults when GOMEMLIMIT is unset":   {env: "", want: mcpMemoryLimit},
 		"leaves an explicit GOMEMLIMIT alone": {env: "1GiB", want: math.MaxInt64},
 	}
 	for name, tc := range tests {
