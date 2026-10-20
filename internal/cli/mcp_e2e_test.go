@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -222,5 +223,57 @@ func TestMCPInProcessStartsNoDaemon(t *testing.T) {
 
 	if socks, _ := filepath.Glob(filepath.Join(e.state, "mcp-*.sock")); len(socks) != 0 {
 		t.Errorf("socket files = %v, want none for --in-process", socks)
+	}
+}
+
+func (e *e2e) sockets() []string {
+	socks, _ := filepath.Glob(filepath.Join(e.state, "mcp-*.sock"))
+	return socks
+}
+
+func TestMCPConcurrentSessionsShareOneDaemon(t *testing.T) {
+	e := newE2E(t, true)
+
+	const n = 5
+	sessions := make(chan *sdk.ClientSession, n)
+	var wg sync.WaitGroup
+	for range n {
+		wg.Go(func() {
+			cs, _ := e.session(t)
+			sessions <- cs
+		})
+	}
+	wg.Wait()
+	close(sessions)
+	for cs := range sessions {
+		listRepos(t, cs)
+	}
+
+	if got := strings.Count(e.daemonLog(t), "opened"); got != n {
+		t.Errorf("daemon log has %d opened sessions, want %d:\n%s", got, n, e.daemonLog(t))
+	}
+	if socks := e.sockets(); len(socks) != 1 {
+		t.Errorf("socket files = %v, want exactly one", socks)
+	}
+}
+
+func TestMCPReplacesStaleSocket(t *testing.T) {
+	e := newE2E(t, true)
+	cs, _ := e.session(t)
+	listRepos(t, cs)
+	socket := e.sockets()[0]
+	cs.Close()
+	waitFor(t, "the daemon to idle out", func() bool { return len(e.sockets()) == 0 })
+
+	// What a daemon killed with SIGKILL leaves behind: a socket file with
+	// no listener and no lock holder.
+	if err := os.WriteFile(socket, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cs, cmd := e.session(t)
+	listRepos(t, cs)
+	if got := program(t, cmd.Process.Pid); got != "muninn-mcp-proxy" {
+		t.Errorf("session runs %q, want it forwarded to a fresh daemon", got)
 	}
 }
