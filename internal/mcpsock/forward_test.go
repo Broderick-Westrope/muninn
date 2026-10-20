@@ -88,3 +88,23 @@ func TestForwardReportsDaemonGone(t *testing.T) {
 		t.Errorf("Forward = %v, want ErrDaemonGone", err)
 	}
 }
+
+// failingReader fails its first read, as stdin does when the client's pipe
+// breaks.
+type failingReader struct{ err error }
+
+func (r failingReader) Read([]byte) (int, error) { return 0, r.err }
+
+func TestForwardReportsAStdinFailureAsSuch(t *testing.T) {
+	client, server := socketPair(t)
+	broken := errors.New("stdin broke")
+	done := forward(client, failingReader{broken}, io.Discard)
+
+	// The daemon sees the half-close and ends the session.
+	io.ReadAll(server)
+	server.Close()
+
+	if err := wait(t, done); !errors.Is(err, broken) {
+		t.Errorf("Forward = %v, want the stdin error", err)
+	}
+}
