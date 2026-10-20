@@ -223,7 +223,7 @@ func Connect(ctx context.Context, spec Spec) (*net.UnixConn, error) {
 	ctx, cancel := context.WithTimeout(ctx, StartupBudget)
 	defer cancel()
 	return Dial(ctx, spec.Socket(), spec.Identity, func(ctx context.Context) error {
-		cmd := exec.CommandContext(ctx, spec.Muninn, "mcp", "--daemon-start", "--spec", spec.Encode())
+		cmd := exec.CommandContext(ctx, spec.Muninn, "mcp", "--"+DaemonStartFlag, "--"+SpecFlag, spec.Encode())
 		cmd.WaitDelay = 100 * time.Millisecond
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("%w: %s", err, bytes.TrimSpace(out))

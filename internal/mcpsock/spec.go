@@ -11,6 +11,20 @@ import (
 	"strconv"
 )
 
+// InProcessEnv, set to any non-empty value, makes `muninn mcp` serve
+// in-process. The proxy sets it when it hands a session back to muninn:
+// an environment variable survives any argument list, where a flag
+// appended after a "--" would be read as a positional argument.
+const InProcessEnv = "MUNINN_MCP_IN_PROCESS"
+
+// DaemonStartFlag and SpecFlag are the `muninn mcp` flags that start the
+// shared MCP server for a Spec. Connect runs them and muninn registers
+// them, so this is their one definition.
+const (
+	DaemonStartFlag = "daemon-start"
+	SpecFlag        = "spec"
+)
+
 // maxSocketPath is the longest socket path macOS accepts: sun_path holds
 // 104 bytes including the terminating NUL.
 const maxSocketPath = 103

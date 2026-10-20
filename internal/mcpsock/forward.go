@@ -8,12 +8,6 @@ import (
 	"sync/atomic"
 )
 
-// InProcessEnv, set to any non-empty value, makes `muninn mcp` serve
-// in-process. The proxy sets it when it hands a session back to muninn:
-// an environment variable survives any argument list, where a flag
-// appended after a "--" would be read as a positional argument.
-const InProcessEnv = "MUNINN_MCP_IN_PROCESS"
-
 // ErrDaemonGone reports that the daemon closed the connection while the
 // client was still sending: it crashed or was killed. The forwarder exits
 // non-zero, as `muninn mcp` would have if it had crashed itself; it never
