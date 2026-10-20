@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/broderick-westrope/muninn/internal/mcpsock"
@@ -77,27 +78,45 @@ func cancelWithSession(next sdk.MethodHandler) sdk.MethodHandler {
 	}
 }
 
-// sessionConn ends its session as soon as a read fails, which is how the
-// daemon learns that the client is gone.
-type sessionConn struct {
-	net.Conn
+// sessionTransport ends its session as soon as the SDK fails to read from
+// it, whether the client went away or sent something it can't decode.
+// Either way the SDK accepts no more input and rejects every later write,
+// so nothing the session's calls produce can be delivered.
+type sessionTransport struct {
+	sdk.Transport
 	end context.CancelFunc
 }
 
-func (c sessionConn) Read(p []byte) (int, error) {
-	n, err := c.Conn.Read(p)
+func (t sessionTransport) Connect(ctx context.Context) (sdk.Connection, error) {
+	c, err := t.Transport.Connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return sessionConnection{Connection: c, end: t.end}, nil
+}
+
+type sessionConnection struct {
+	sdk.Connection
+	end context.CancelFunc
+}
+
+func (c sessionConnection) Read(ctx context.Context) (jsonrpc.Message, error) {
+	msg, err := c.Connection.Read(ctx)
 	if err != nil {
 		c.end()
 	}
-	return n, err
+	return msg, err
 }
 
 // serveConn admits conn and runs its session until the client ends it or
 // ctx is done.
 func serveConn(ctx context.Context, srv *sdk.Server, conn net.Conn, identity string, g *gate) {
+	session, end := context.WithCancel(ctx)
+	defer end()
+	// Ending the session closes its connection, which also unblocks a
+	// response write to a client that has stopped reading.
+	defer context.AfterFunc(session, func() { conn.Close() })()
 	defer conn.Close()
-	stop := context.AfterFunc(ctx, func() { conn.Close() })
-	defer stop()
 
 	if err := mcpsock.Admit(conn, identity, g.reserve, g.release); err != nil {
 		log.Printf("refused MCP connection: %v", err)
@@ -105,10 +124,8 @@ func serveConn(ctx context.Context, srv *sdk.Server, conn net.Conn, identity str
 	}
 	defer g.release()
 
-	session, end := context.WithCancel(ctx)
-	defer end()
-	sc := sessionConn{Conn: conn, end: end}
-	ss, err := srv.Connect(context.WithValue(ctx, sessionKey{}, session), &sdk.IOTransport{Reader: sc, Writer: sc}, nil)
+	transport := sessionTransport{Transport: &sdk.IOTransport{Reader: conn, Writer: conn}, end: end}
+	ss, err := srv.Connect(context.WithValue(ctx, sessionKey{}, session), transport, nil)
 	if err != nil {
 		log.Printf("starting MCP session: %v", err)
 		return

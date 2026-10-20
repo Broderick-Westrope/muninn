@@ -306,3 +306,65 @@ func (l *gatedListener) Accept() (net.Conn, error) {
 	}
 	return l.failingListener.Accept()
 }
+
+func TestServeCancelsCallsOnMalformedInput(t *testing.T) {
+	started, cancelled := make(chan struct{}, 1), make(chan struct{}, 1)
+	ln, socket := listenShort(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := startServe(t, ctx, ln, blockingServer(started, cancelled))
+	defer func() { cancel(); <-done }()
+
+	conn := callBlock(t, socket)
+	receive(t, started, "the call to start")
+	if _, err := conn.Write([]byte("not json\n")); err != nil {
+		t.Fatal(err)
+	}
+
+	receive(t, cancelled, "the call to be cancelled after malformed input")
+}
+
+// floodServer has one tool, "flood", whose response is far larger than a
+// socket buffer, so writing it blocks until the client reads.
+func floodServer() *sdk.Server {
+	srv := sdk.NewServer(&sdk.Implementation{Name: "test"}, nil)
+	big := strings.Repeat("x", 8<<20)
+	sdk.AddTool(srv, &sdk.Tool{Name: "flood"}, func(context.Context, *sdk.CallToolRequest, struct{}) (*sdk.CallToolResult, any, error) {
+		return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: big}}}, nil, nil
+	})
+	return srv
+}
+
+func TestServeEndsAStalledSessionWhenItsInputEnds(t *testing.T) {
+	ln, socket := listenShort(t)
+	done := make(chan error, 1)
+	go func() { done <- serve(context.Background(), ln, floodServer(), testIdentity, 100*time.Millisecond) }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	conn, err := mcpsock.Dial(ctx, socket, testIdentity, noStart)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.Close()
+	// Speak MCP by hand so nothing reads the response.
+	for _, line := range []string{
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}`,
+		`{"jsonrpc":"2.0","method":"notifications/initialized"}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"flood","arguments":{}}}`,
+	} {
+		if _, err := conn.Write([]byte(line + "\n")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	time.Sleep(200 * time.Millisecond) // let the response write block
+	conn.CloseWrite()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("serve = %v, want nil after idling out", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("a session blocked writing to a client that ended its input kept the daemon up")
+	}
+}
