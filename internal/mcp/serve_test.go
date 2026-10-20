@@ -72,11 +72,21 @@ func (d *daemon) connect(t *testing.T) *sdk.ClientSession {
 
 func grepText(t *testing.T, cs *sdk.ClientSession, pattern string) string {
 	t.Helper()
+	out, err := grep(cs, pattern)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// grep is grepText without failing the test, for use off the test
+// goroutine.
+func grep(cs *sdk.ClientSession, pattern string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	res, err := cs.CallTool(ctx, &sdk.CallToolParams{Name: "grep", Arguments: map[string]any{"pattern": pattern}})
 	if err != nil {
-		t.Fatalf("CallTool: %v", err)
+		return "", fmt.Errorf("CallTool: %w", err)
 	}
 	var b strings.Builder
 	for _, c := range res.Content {
@@ -84,7 +94,7 @@ func grepText(t *testing.T, cs *sdk.ClientSession, pattern string) string {
 			b.WriteString(tc.Text)
 		}
 	}
-	return b.String()
+	return b.String(), nil
 }
 
 func TestServeSharesOneServerAcrossSessions(t *testing.T) {
@@ -95,7 +105,12 @@ func TestServeSharesOneServerAcrossSessions(t *testing.T) {
 	for range 3 {
 		cs := d.connect(t)
 		wg.Go(func() {
-			if out := grepText(t, cs, "banana"); !strings.Contains(out, "acme/widget/other.go:3:") {
+			out, err := grep(cs, "banana")
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if !strings.Contains(out, "acme/widget/other.go:3:") {
 				t.Errorf("grep output missing match:\n%s", out)
 			}
 		})
