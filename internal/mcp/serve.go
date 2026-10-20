@@ -123,12 +123,12 @@ func serveConn(ctx context.Context, srv *sdk.Server, conn net.Conn, identity str
 // mutex, so a session is either admitted before draining starts or refused;
 // it is never admitted by a daemon that is about to exit.
 type gate struct {
-	mu      sync.Mutex
-	active  int
-	isDrain bool
-	idle    time.Duration
-	timer   *time.Timer
-	onIdle  func()
+	mu           sync.Mutex
+	active       int
+	drainStarted bool
+	idle         time.Duration
+	timer        *time.Timer
+	onIdle       func()
 }
 
 // newGate returns a gate whose idle clock is already running, so a daemon
@@ -143,7 +143,7 @@ func newGate(idle time.Duration, onIdle func()) *gate {
 func (g *gate) reserve() bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.isDrain {
+	if g.drainStarted {
 		return false
 	}
 	g.active++
@@ -156,7 +156,7 @@ func (g *gate) release() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.active--
-	if g.active == 0 && !g.isDrain {
+	if g.active == 0 && !g.drainStarted {
 		g.timer.Reset(g.idle)
 	}
 }
@@ -165,11 +165,11 @@ func (g *gate) release() {
 // out; a session admitted in the meantime cancels it.
 func (g *gate) fire() {
 	g.mu.Lock()
-	if g.active > 0 || g.isDrain {
+	if g.active > 0 || g.drainStarted {
 		g.mu.Unlock()
 		return
 	}
-	g.isDrain = true
+	g.drainStarted = true
 	g.mu.Unlock()
 	g.onIdle()
 }
@@ -178,12 +178,12 @@ func (g *gate) fire() {
 func (g *gate) drain() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.isDrain = true
+	g.drainStarted = true
 	g.timer.Stop()
 }
 
 func (g *gate) draining() bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return g.isDrain
+	return g.drainStarted
 }
