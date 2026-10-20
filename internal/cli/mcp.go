@@ -70,13 +70,20 @@ in-process instead. --in-process always serves in-process.`,
 			}
 			if !inProcess && os.Getenv(mcpsock.InProcessEnv) == "" {
 				err := forwardToMCPDaemon(cmd.Context())
-				var fallback serveInProcess
+				var fallback fallbackError
 				if !errors.As(err, &fallback) {
 					return err
 				}
 				fmt.Fprintf(os.Stderr, "muninn: serving in-process: %v\n", fallback.reason)
 			}
-			return serveMCPInProcess(cmd.Context())
+			applyMemoryLimit()
+			searcher, err := search.Open(xdg.IndexDir())
+			if err != nil {
+				return err
+			}
+			defer searcher.Close()
+			srv := muninnmcp.New(searcher, xdg.StatusPath(), xdg.MirrorsDir())
+			return srv.Run(cmd.Context())
 		},
 	}
 	cmd.Flags().BoolVar(&inProcess, "in-process", false, "serve this session in-process instead of through the shared server")
@@ -89,22 +96,23 @@ in-process instead. --in-process always serves in-process.`,
 	return cmd
 }
 
-// serveInProcess reports why the session could not be handed to the
-// shared MCP server, before any MCP bytes were read.
-type serveInProcess struct{ reason error }
+// fallbackError says why the session could not be handed to the shared
+// MCP server, before any MCP bytes were read, so it can be served
+// in-process instead.
+type fallbackError struct{ reason error }
 
-func (e serveInProcess) Error() string { return e.reason.Error() }
-func (e serveInProcess) Unwrap() error { return e.reason }
+func (e fallbackError) Error() string { return e.reason.Error() }
+func (e fallbackError) Unwrap() error { return e.reason }
 
 // forwardToMCPDaemon hands this session's stdio to the shared daemon for
-// its spec, starting one if needed. It returns a serveInProcess
+// its spec, starting one if needed. It returns a fallbackError
 // error if no daemon admitted the session; nothing has been
 // read from stdin then, so the caller can still serve in-process. After
 // admission it never falls back.
 func forwardToMCPDaemon(ctx context.Context) error {
 	exe, err := os.Executable()
 	if err != nil {
-		return serveInProcess{fmt.Errorf("locating muninn binary: %w", err)}
+		return fallbackError{fmt.Errorf("locating muninn binary: %w", err)}
 	}
 	// A daemon would fail on a missing index only after detaching, where
 	// the forwarder can't see why and waits out its budget; fail here
@@ -114,20 +122,20 @@ func forwardToMCPDaemon(ctx context.Context) error {
 	}
 	spec, err := mcpsock.NewSpec(exe, xdg.IndexDir(), xdg.StatusPath(), xdg.MirrorsDir(), xdg.StateDir())
 	if err != nil {
-		return serveInProcess{err}
+		return fallbackError{err}
 	}
 	// Check before dialing, not only before starting a daemon: whatever
 	// already listens in a directory others can reach might not be ours.
 	if err := os.MkdirAll(spec.StateDir, 0o700); err != nil {
-		return serveInProcess{fmt.Errorf("creating state directory: %w", err)}
+		return fallbackError{fmt.Errorf("creating state directory: %w", err)}
 	}
 	if err := checkPrivateDir(spec.StateDir); err != nil {
-		return serveInProcess{err}
+		return fallbackError{err}
 	}
 	execProxy(spec)
 	conn, err := mcpsock.Connect(ctx, spec)
 	if err != nil {
-		return serveInProcess{err}
+		return fallbackError{err}
 	}
 	defer conn.Close()
 	return mcpsock.Forward(conn, os.Stdin, os.Stdout)
@@ -149,19 +157,7 @@ func execProxy(spec mcpsock.Spec) {
 	if _, err := os.Stat(proxy); err != nil {
 		return
 	}
-	argv := append([]string{proxy, "--spec", spec.Encode(), "--"}, os.Args[1:]...)
+	argv := append([]string{proxy, "--" + mcpsock.SpecFlag, spec.Encode(), "--"}, os.Args[1:]...)
 	err := syscall.Exec(proxy, argv, os.Environ())
 	fmt.Fprintf(os.Stderr, "muninn: running %s: %v\n", proxy, err)
-}
-
-// serveMCPInProcess serves one session over stdio from this process.
-func serveMCPInProcess(ctx context.Context) error {
-	applyMemoryLimit()
-	searcher, err := search.Open(xdg.IndexDir())
-	if err != nil {
-		return err
-	}
-	defer searcher.Close()
-	srv := muninnmcp.New(searcher, xdg.StatusPath(), xdg.MirrorsDir())
-	return srv.Run(ctx)
 }

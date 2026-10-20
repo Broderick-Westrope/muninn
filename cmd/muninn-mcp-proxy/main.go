@@ -24,7 +24,7 @@ func main() {
 }
 
 func run(args []string) int {
-	if len(args) < 3 || args[0] != "--spec" || args[2] != "--" {
+	if len(args) < 3 || args[0] != "--"+mcpsock.SpecFlag || args[2] != "--" {
 		fmt.Fprintln(os.Stderr, "usage: muninn-mcp-proxy --spec <spec> -- <muninn arguments>")
 		return 2
 	}
