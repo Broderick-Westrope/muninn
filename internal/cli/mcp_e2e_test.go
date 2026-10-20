@@ -24,6 +24,45 @@ type e2e struct {
 	state string
 }
 
+// binariesRoot is where builtBinaries put its builds, removed by TestMain.
+var binariesRoot string
+
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if binariesRoot != "" {
+		os.RemoveAll(binariesRoot)
+	}
+	os.Exit(code)
+}
+
+// builtBinaries builds muninn into two directories once per test run, the
+// second with muninn-mcp-proxy beside it the way a release installs them,
+// and runs each binary once. macOS scans a new binary on its first launch,
+// which with several sessions starting at once can outlast the startup
+// budget; installed binaries pay that once, so tests shouldn't on every
+// session.
+var builtBinaries = sync.OnceValues(func() ([2]string, error) {
+	var dirs [2]string
+	root, err := os.MkdirTemp("/tmp", "mcpbin")
+	if err != nil {
+		return dirs, err
+	}
+	binariesRoot = root
+	dirs = [2]string{filepath.Join(root, "plain"), filepath.Join(root, "proxy")}
+	builds := [][]string{
+		{"-o", filepath.Join(dirs[0], "muninn"), "../.."},
+		{"-o", filepath.Join(dirs[1], "muninn"), "../.."},
+		{"-o", filepath.Join(dirs[1], "muninn-mcp-proxy"), "../../cmd/muninn-mcp-proxy"},
+	}
+	for _, args := range builds {
+		if out, err := exec.Command("go", append([]string{"build"}, args...)...).CombinedOutput(); err != nil {
+			return dirs, fmt.Errorf("go build %v: %w\n%s", args, err, out)
+		}
+		exec.Command(args[1], "--version").Run()
+	}
+	return dirs, nil
+})
+
 // newE2E builds muninn, and muninn-mcp-proxy next to it when withProxy is
 // set, the way a release installs them.
 func newE2E(t *testing.T, withProxy bool) *e2e {
@@ -35,18 +74,24 @@ func newE2E(t *testing.T, withProxy bool) *e2e {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { os.RemoveAll(root) })
-
-	bin := filepath.Join(root, "muninn")
-	build := exec.Command("go", "build", "-o", bin, "../..")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("go build: %v\n%s", err, out)
-	}
-	if withProxy {
-		build := exec.Command("go", "build", "-o", filepath.Join(root, "muninn-mcp-proxy"), "../../cmd/muninn-mcp-proxy")
-		if out, err := build.CombinedOutput(); err != nil {
-			t.Fatalf("go build proxy: %v\n%s", err, out)
+	t.Cleanup(func() {
+		// Daemons that lost the race to own the socket can still be
+		// starting, and would recreate the state directory to take the
+		// lock; wait for every process of this test's to exit first.
+		deadline := time.Now().Add(5 * time.Second)
+		for exec.Command("pgrep", "-f", root).Run() == nil && time.Now().Before(deadline) {
+			time.Sleep(50 * time.Millisecond)
 		}
+		os.RemoveAll(root)
+	})
+
+	dirs, err := builtBinaries()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(dirs[0], "muninn")
+	if withProxy {
+		bin = filepath.Join(dirs[1], "muninn")
 	}
 
 	e := &e2e{bin: bin, root: root, state: filepath.Join(root, "state", "muninn")}
@@ -77,6 +122,7 @@ func (e *e2e) session(t *testing.T, args ...string) (*sdk.ClientSession, *exec.C
 	defer cancel()
 	cmd := exec.Command(e.bin, append([]string{"mcp"}, args...)...)
 	cmd.Env = e.env
+	cmd.Stderr = testWriter{t}
 	client := sdk.NewClient(&sdk.Implementation{Name: "e2e"}, nil)
 	cs, err := client.Connect(ctx, &sdk.CommandTransport{Command: cmd}, nil)
 	if err != nil {
@@ -84,6 +130,15 @@ func (e *e2e) session(t *testing.T, args ...string) (*sdk.ClientSession, *exec.C
 	}
 	t.Cleanup(func() { cs.Close() })
 	return cs, cmd
+}
+
+// testWriter sends a session's stderr to the test log, so a session that
+// fell back in-process says why.
+type testWriter struct{ t *testing.T }
+
+func (w testWriter) Write(p []byte) (int, error) {
+	w.t.Logf("session stderr: %s", strings.TrimSpace(string(p)))
+	return len(p), nil
 }
 
 // program returns the base name of the program pid is running now, which
