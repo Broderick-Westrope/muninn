@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
+	"runtime/debug"
 
 	"github.com/spf13/cobra"
 
@@ -14,6 +16,21 @@ import (
 	"github.com/broderick-westrope/muninn/internal/xdg"
 )
 
+// mcpMemoryLimit is the soft heap limit for the MCP server. Measured on a
+// 316-repo index, the default GC let one process sit at about 88 MB after
+// a burst of greps; 64 MiB brought that to about 67 MB with no extra GC
+// CPU, while 48 and 32 MiB saved more but cost 2.5 to 3.5 times the CPU.
+const mcpMemoryLimit = 64 << 20
+
+// applyMemoryLimit sets mcpMemoryLimit unless the user chose their own
+// limit through GOMEMLIMIT (passed as gomemlimit).
+func applyMemoryLimit(gomemlimit string) {
+	if gomemlimit != "" {
+		return
+	}
+	debug.SetMemoryLimit(mcpMemoryLimit)
+}
+
 func newMCPCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "mcp",
@@ -22,6 +39,7 @@ func newMCPCmd() *cobra.Command {
 			// Zoekt logs shard loading via the stdlib logger; keep the
 			// server's stderr free of that noise.
 			log.SetOutput(io.Discard)
+			applyMemoryLimit(os.Getenv("GOMEMLIMIT"))
 			// Git is a hard prerequisite for the mirror-backed tools: fail
 			// fast and loudly instead of surfacing per-call errors later.
 			if err := gitcmd.Validate(); err != nil {
