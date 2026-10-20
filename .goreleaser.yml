@@ -7,7 +7,8 @@ before:
     - go mod tidy
 
 builds:
-  - binary: muninn
+  - id: muninn
+    binary: muninn
     main: .
     env:
       - CGO_ENABLED=0
@@ -20,9 +21,26 @@ builds:
       - -trimpath
     ldflags:
       - -s -w -X github.com/broderick-westrope/muninn/internal/cli.Version={{ .Version }}
+  # Installed next to muninn: `muninn mcp` execs it so each MCP session's
+  # forwarder doesn't carry Zoekt's package-init memory.
+  - id: muninn-mcp-proxy
+    binary: muninn-mcp-proxy
+    main: ./cmd/muninn-mcp-proxy
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+    goarch:
+      - arm64
+      - amd64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
 
 archives:
-  - name_template: "{{ .Binary }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+  # ProjectName, not Binary: the archive holds two binaries.
+  - name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     files:
       - README.md
       - LICENSE*
@@ -48,6 +66,11 @@ brews:
     homepage: "https://github.com/Broderick-Westrope/muninn"
     description: "Code search index and MCP server for your GitHub repos"
     license: "MIT"
+    # The default installs only one binary; muninn mcp looks for the proxy
+    # next to its own resolved path.
+    install: |
+      bin.install "muninn"
+      bin.install "muninn-mcp-proxy"
     dependencies:
       - name: git
       - name: universal-ctags
