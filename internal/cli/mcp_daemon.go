@@ -35,6 +35,9 @@ func mcpIdle() time.Duration {
 	return defaultMCPIdle
 }
 
+// daemonFlag runs the shared MCP server itself; only --daemon-start uses it.
+const daemonFlag = "daemon"
+
 // daemonSetupTimeout bounds each of the daemon's startup waits: being
 // reparented, and taking the lock from a daemon that is still exiting.
 const daemonSetupTimeout = time.Second
@@ -61,7 +64,7 @@ func startMCPDaemon(encoded string) error {
 		return fmt.Errorf("opening shared MCP server log: %w", err)
 	}
 	defer logFile.Close()
-	cmd := exec.Command(spec.Muninn, "mcp", "--daemon", "--"+mcpsock.SpecFlag, encoded)
+	cmd := exec.Command(spec.Muninn, "mcp", "--"+daemonFlag, "--"+mcpsock.SpecFlag, encoded)
 	cmd.Stderr = logFile
 	cmd.Dir = "/"
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
@@ -109,12 +112,14 @@ func runMCPDaemon(ctx context.Context, encoded string) error {
 
 	// An exiting daemon may still hold the lock for a moment.
 	var lk *lock.Lock
-	pollUntil(daemonSetupTimeout, func() bool {
+	for deadline := time.Now().Add(daemonSetupTimeout); ; time.Sleep(10 * time.Millisecond) {
 		lk, err = lock.TryAcquire(spec.Lock())
-		return !errors.Is(err, lock.ErrLocked)
-	})
+		if !errors.Is(err, lock.ErrLocked) || time.Now().After(deadline) {
+			break
+		}
+	}
 	if errors.Is(err, lock.ErrLocked) {
-		// Another daemon owns this identity; the forwarder will reach it.
+		log.Printf("another shared MCP server owns this index; exiting")
 		return nil
 	}
 	if err != nil {
@@ -148,9 +153,12 @@ func runMCPDaemon(ctx context.Context, encoded string) error {
 	defer stop()
 	log.Printf("serving %s", spec.Socket())
 	srv := muninnmcp.New(searcher, spec.StatusPath, spec.MirrorsDir)
-	err = srv.Serve(ctx, ln, spec.Identity, mcpIdle())
-	log.Printf("exiting: %v", err)
-	return err
+	if err := srv.Serve(ctx, ln, spec.Identity, mcpIdle()); err != nil {
+		log.Printf("exiting: %v", err)
+		return err
+	}
+	log.Printf("exiting")
+	return nil
 }
 
 // pollUntil polls cond until it holds or timeout passes.

@@ -79,10 +79,10 @@ in-process instead. --in-process always serves in-process.`,
 		},
 	}
 	cmd.Flags().BoolVar(&inProcess, "in-process", false, "serve this session in-process instead of through the shared server")
-	cmd.Flags().BoolVar(&daemon, "daemon", false, "run the shared MCP server")
+	cmd.Flags().BoolVar(&daemon, daemonFlag, false, "run the shared MCP server")
 	cmd.Flags().BoolVar(&daemonStart, mcpsock.DaemonStartFlag, false, "start the shared MCP server detached")
 	cmd.Flags().StringVar(&spec, mcpsock.SpecFlag, "", "startup spec for --daemon and --daemon-start")
-	for _, name := range []string{"daemon", mcpsock.DaemonStartFlag, mcpsock.SpecFlag} {
+	for _, name := range []string{daemonFlag, mcpsock.DaemonStartFlag, mcpsock.SpecFlag} {
 		cmd.Flags().MarkHidden(name)
 	}
 	return cmd
