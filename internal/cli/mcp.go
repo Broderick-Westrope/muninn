@@ -106,6 +106,12 @@ func forwardToMCPDaemon(ctx context.Context) error {
 	if err != nil {
 		return serveInProcess{fmt.Errorf("locating muninn binary: %w", err)}
 	}
+	// A daemon would fail on a missing index only after detaching, where
+	// the forwarder can't see why and waits out its budget; fail here
+	// instead, with the error serving in-process would give.
+	if _, err := os.Stat(xdg.IndexDir()); err != nil {
+		return fmt.Errorf("opening index directory %s: %w", xdg.IndexDir(), err)
+	}
 	spec, err := mcpsock.NewSpec(exe, xdg.IndexDir(), xdg.StatusPath(), xdg.MirrorsDir(), xdg.StateDir())
 	if err != nil {
 		return serveInProcess{err}

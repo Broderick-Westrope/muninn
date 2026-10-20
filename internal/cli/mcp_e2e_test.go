@@ -442,3 +442,24 @@ func TestMCPDoesNotTrustASocketInAnOpenStateDir(t *testing.T) {
 		t.Errorf("daemon log has %d opened sessions, want only the first:\n%s", got, e.daemonLog(t))
 	}
 }
+
+// Before the first sync there's no index. That used to fail at once, and
+// must still: not after the startup budget, with a pile of daemons
+// started along the way.
+func TestMCPWithNoIndexFailsFast(t *testing.T) {
+	e := newE2E(t, true)
+	if err := os.RemoveAll(filepath.Join(e.root, "data", "muninn", "index")); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	if _, _, err := e.connect(t); err == nil {
+		t.Fatal("session started with no index")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("failing took %v, want well under the startup budget", elapsed)
+	}
+	if strings.Contains(e.daemonLog(t), "serving") {
+		t.Errorf("a daemon started with no index:\n%s", e.daemonLog(t))
+	}
+}

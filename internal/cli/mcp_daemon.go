@@ -129,6 +129,16 @@ func runMCPDaemon(ctx context.Context, encoded string) error {
 	}
 	defer lk.Release()
 
+	// Open the searcher before listening, so a socket that answers is one
+	// that can serve, however long a cold index takes to load.
+	applyMemoryLimit()
+	searcher, err := search.Open(spec.IndexDir)
+	if err != nil {
+		log.Printf("opening index: %v", err)
+		return err
+	}
+	defer searcher.Close()
+
 	// Holding the lock means no other daemon is alive for this identity,
 	// so a socket file here is stale.
 	if err := os.Remove(spec.Socket()); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -139,15 +149,6 @@ func runMCPDaemon(ctx context.Context, encoded string) error {
 		log.Printf("listening: %v", err)
 		return fmt.Errorf("listening on %s: %w", spec.Socket(), err)
 	}
-
-	applyMemoryLimit()
-	searcher, err := search.Open(spec.IndexDir)
-	if err != nil {
-		ln.Close()
-		log.Printf("opening index: %v", err)
-		return err
-	}
-	defer searcher.Close()
 
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
