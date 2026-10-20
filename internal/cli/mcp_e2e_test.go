@@ -58,6 +58,7 @@ var builtBinaries = sync.OnceValues(func() ([2]string, error) {
 		if out, err := exec.Command("go", append([]string{"build"}, args...)...).CombinedOutput(); err != nil {
 			return dirs, fmt.Errorf("go build %v: %w\n%s", args, err, out)
 		}
+		// Only to launch it once; the proxy exits with a usage error.
 		exec.Command(args[1], "--version").Run()
 	}
 	return dirs, nil
@@ -118,6 +119,16 @@ func newE2E(t *testing.T, withProxy bool) *e2e {
 // returns the client session and the process serving it.
 func (e *e2e) session(t *testing.T, args ...string) (*sdk.ClientSession, *exec.Cmd) {
 	t.Helper()
+	cs, cmd, err := e.connect(t, args...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cs, cmd
+}
+
+// connect is session without failing the test, for use off the test
+// goroutine.
+func (e *e2e) connect(t *testing.T, args ...string) (*sdk.ClientSession, *exec.Cmd, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	cmd := exec.Command(e.bin, append([]string{"mcp"}, args...)...)
@@ -126,10 +137,10 @@ func (e *e2e) session(t *testing.T, args ...string) (*sdk.ClientSession, *exec.C
 	client := sdk.NewClient(&sdk.Implementation{Name: "e2e"}, nil)
 	cs, err := client.Connect(ctx, &sdk.CommandTransport{Command: cmd}, nil)
 	if err != nil {
-		t.Fatalf("connecting to muninn mcp: %v", err)
+		return nil, nil, fmt.Errorf("connecting to muninn mcp: %w", err)
 	}
 	t.Cleanup(func() { cs.Close() })
-	return cs, cmd
+	return cs, cmd, nil
 }
 
 // testWriter sends a session's stderr to the test log, so a session that
@@ -209,8 +220,7 @@ func TestMCPSessionsShareOneDaemon(t *testing.T) {
 			if got := strings.Count(e.daemonLog(t), "opened"); got != 2 {
 				t.Errorf("daemon log has %d opened sessions, want 2:\n%s", got, e.daemonLog(t))
 			}
-			socks, _ := filepath.Glob(filepath.Join(e.state, "mcp-*.sock"))
-			if len(socks) != 1 {
+			if socks := e.sockets(); len(socks) != 1 {
 				t.Errorf("socket files = %v, want exactly one", socks)
 			}
 
@@ -218,10 +228,7 @@ func TestMCPSessionsShareOneDaemon(t *testing.T) {
 			// its socket.
 			a.Close()
 			b.Close()
-			waitFor(t, "the daemon to idle out", func() bool {
-				socks, _ := filepath.Glob(filepath.Join(e.state, "mcp-*.sock"))
-				return len(socks) == 0
-			})
+			waitFor(t, "the daemon to idle out", func() bool { return len(e.sockets()) == 0 })
 		})
 	}
 }
@@ -272,7 +279,7 @@ func TestMCPFallsBackInProcess(t *testing.T) {
 				if got := program(t, cmd.Process.Pid); got != "muninn" {
 					t.Errorf("session runs %q, want muninn serving in-process", got)
 				}
-				if socks, _ := filepath.Glob(filepath.Join(e.state, "mcp-*.sock")); len(socks) != 0 {
+				if socks := e.sockets(); len(socks) != 0 {
 					t.Errorf("socket files = %v, want none", socks)
 				}
 			})
@@ -286,7 +293,7 @@ func TestMCPInProcessStartsNoDaemon(t *testing.T) {
 	cs, _ := e.session(t, "--in-process")
 	listRepos(t, cs)
 
-	if socks, _ := filepath.Glob(filepath.Join(e.state, "mcp-*.sock")); len(socks) != 0 {
+	if socks := e.sockets(); len(socks) != 0 {
 		t.Errorf("socket files = %v, want none for --in-process", socks)
 	}
 }
@@ -301,15 +308,24 @@ func TestMCPConcurrentSessionsShareOneDaemon(t *testing.T) {
 
 	const n = 5
 	sessions := make(chan *sdk.ClientSession, n)
+	errs := make(chan error, n)
 	var wg sync.WaitGroup
 	for range n {
 		wg.Go(func() {
-			cs, _ := e.session(t)
+			cs, _, err := e.connect(t)
+			if err != nil {
+				errs <- err
+				return
+			}
 			sessions <- cs
 		})
 	}
 	wg.Wait()
 	close(sessions)
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
 	for cs := range sessions {
 		listRepos(t, cs)
 	}
