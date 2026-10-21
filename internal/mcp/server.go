@@ -1,5 +1,6 @@
-// Package mcp implements muninn's MCP server: a stdio transport exposing
-// ten tools (grep, glob, list_repos, read_file, list_tree,
+// Package mcp implements muninn's MCP server, served either to one client
+// over stdio (Run) or to many sessions over a Unix listener (Serve). It
+// exposes ten tools (grep, glob, list_repos, read_file, list_tree,
 // find_symbol_definitions, find_symbol_references, search_commits,
 // get_diff, blame) over the search core, the status file, and the bare
 // git mirrors.
@@ -8,6 +9,8 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"log"
+	"runtime/debug"
 	"strings"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -175,8 +178,18 @@ func summarizeRepos(names []string, limit int) string {
 
 // textHandler adapts a text-returning tool method to the SDK's typed
 // handler signature. Errors are surfaced by the SDK as tool errors.
+//
+// A panic becomes a tool error too. The SDK doesn't recover panics in
+// handlers, and in a shared daemon one would end every client's session,
+// not just the caller's.
 func textHandler[In any](fn func(context.Context, In) (string, error)) sdk.ToolHandlerFor[In, any] {
-	return func(ctx context.Context, req *sdk.CallToolRequest, in In) (*sdk.CallToolResult, any, error) {
+	return func(ctx context.Context, req *sdk.CallToolRequest, in In) (_ *sdk.CallToolResult, _ any, err error) {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[ERROR] tool handler panicked: %v\n%s", r, debug.Stack())
+				err = fmt.Errorf("internal error: %v", r)
+			}
+		}()
 		text, err := fn(ctx, in)
 		if err != nil {
 			return nil, nil, err

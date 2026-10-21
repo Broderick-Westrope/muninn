@@ -1,0 +1,493 @@
+package mcpsock
+
+import (
+	"bufio"
+	"context"
+	"errors"
+	"net"
+	"os"
+	"path/filepath"
+	"syscall"
+	"testing"
+	"time"
+)
+
+// shortSocketPath returns a socket path short enough for macOS's 104-byte
+// sun_path limit; t.TempDir under /var/folders is often too long.
+func shortSocketPath(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "mcpsock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return filepath.Join(dir, "s.sock")
+}
+
+// gate is a server-side admission policy for tests.
+type gate struct {
+	open     bool
+	admitted int
+}
+
+func (g *gate) reserve() bool {
+	if !g.open {
+		return false
+	}
+	g.admitted++
+	return true
+}
+
+func (g *gate) release() { g.admitted-- }
+
+// serveOnce listens on socket and runs Admit on the first connection,
+// sending its result and the connection on the returned channels.
+func serveOnce(t *testing.T, socket, identity string, g *gate) (<-chan error, <-chan net.Conn) {
+	t.Helper()
+	ln, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	errs := make(chan error, 1)
+	conns := make(chan net.Conn, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			errs <- err
+			return
+		}
+		t.Cleanup(func() { conn.Close() })
+		errs <- Admit(conn, identity, g.reserve, g.release)
+		conns <- conn
+	}()
+	return errs, conns
+}
+
+// errNoStart is what noStart fails with, so a test can tell Dial asked
+// for a daemon from Dial giving up for some other reason.
+var errNoStart = errors.New("no daemon in this test")
+
+func noStart(context.Context) error { return errNoStart }
+
+func TestDialAdmitted(t *testing.T) {
+	socket := shortSocketPath(t)
+	g := &gate{open: true}
+	errs, _ := serveOnce(t, socket, "abc", g)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	conn, err := Dial(ctx, socket, "abc", noStart)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.Close()
+	if err := <-errs; err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+	if g.admitted != 1 {
+		t.Errorf("admitted = %d, want 1", g.admitted)
+	}
+}
+
+func TestDialRefused(t *testing.T) {
+	tests := map[string]struct {
+		serverIdentity string
+		open           bool
+		wantAdmitErr   error
+		wantDialErr    error
+	}{
+		"identity mismatch": {serverIdentity: "other", open: true, wantAdmitErr: ErrIdentityMismatch, wantDialErr: ErrIdentityMismatch},
+		// A draining daemon is a reason to start a new one.
+		"draining": {serverIdentity: "abc", open: false, wantAdmitErr: ErrDraining, wantDialErr: errNoStart},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			socket := shortSocketPath(t)
+			g := &gate{open: tc.open}
+			errs, _ := serveOnce(t, socket, tc.serverIdentity, g)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+			defer cancel()
+			_, err := Dial(ctx, socket, "abc", noStart)
+			if !errors.Is(err, ErrNotAdmitted) || !errors.Is(err, tc.wantDialErr) {
+				t.Errorf("Dial err = %v, want ErrNotAdmitted wrapping %v", err, tc.wantDialErr)
+			}
+			if err := <-errs; !errors.Is(err, tc.wantAdmitErr) {
+				t.Errorf("Admit err = %v, want %v", err, tc.wantAdmitErr)
+			}
+			if g.admitted != 0 {
+				t.Errorf("admitted = %d, want 0", g.admitted)
+			}
+		})
+	}
+}
+
+func TestDialSilentServerTimesOut(t *testing.T) {
+	socket := shortSocketPath(t)
+	ln, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		// Accept and never answer.
+		conn, err := ln.Accept()
+		if err == nil {
+			t.Cleanup(func() { conn.Close() })
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	start := time.Now()
+	if _, err := Dial(ctx, socket, "abc", noStart); !errors.Is(err, ErrNotAdmitted) || !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Errorf("Dial err = %v, want an admission timeout", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2500*time.Millisecond {
+		t.Errorf("Dial took %v, want it bounded by the context", elapsed)
+	}
+}
+
+func TestAdmitRejectsStranger(t *testing.T) {
+	socket := shortSocketPath(t)
+	g := &gate{open: true}
+	errs, _ := serveOnce(t, socket, "abc", g)
+
+	conn, err := net.Dial("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte(`{"jsonrpc":"2.0","id":1,"method":"initialize"}` + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-errs; !errors.Is(err, ErrBadRequest) {
+		t.Errorf("Admit err = %v, want ErrBadRequest", err)
+	}
+	if g.admitted != 0 {
+		t.Errorf("admitted = %d, want 0", g.admitted)
+	}
+}
+
+func TestAdmitLeavesFollowingBytesUnread(t *testing.T) {
+	socket := shortSocketPath(t)
+	g := &gate{open: true}
+	errs, conns := serveOnce(t, socket, "abc", g)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	conn, err := Dial(ctx, socket, "abc", noStart)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.Close()
+	if err := <-errs; err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+	server := <-conns
+
+	if _, err := conn.Write([]byte("first MCP line\n")); err != nil {
+		t.Fatal(err)
+	}
+	line, err := bufio.NewReader(server).ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if line != "first MCP line\n" {
+		t.Errorf("server read %q after admission, want the client's first line intact", line)
+	}
+}
+
+func TestDialStartsDaemonWhenNoneListens(t *testing.T) {
+	socket := shortSocketPath(t)
+	g := &gate{open: true}
+	starts := 0
+	var errs <-chan error
+	start := func(context.Context) error {
+		starts++
+		errs, _ = serveOnce(t, socket, "abc", g)
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	conn, err := Dial(ctx, socket, "abc", start)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.Close()
+	if err := <-errs; err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+	if starts != 1 {
+		t.Errorf("start called %d times, want 1", starts)
+	}
+}
+
+func TestDialStartError(t *testing.T) {
+	socket := shortSocketPath(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	start := time.Now()
+	if _, err := Dial(ctx, socket, "abc", noStart); !errors.Is(err, ErrNotAdmitted) || !errors.Is(err, errNoStart) {
+		t.Errorf("Dial err = %v, want the start error", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("Dial took %v after start failed, want an immediate return", elapsed)
+	}
+}
+
+func TestConnectBoundsAStarterThatHangs(t *testing.T) {
+	socket := shortSocketPath(t)
+	hang := filepath.Join(filepath.Dir(socket), "muninn")
+	if err := os.WriteFile(hang, []byte("#!/bin/sh\nexec sleep 30\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	spec := Spec{Muninn: hang, StateDir: filepath.Dir(socket), Identity: "abc"}
+
+	start := time.Now()
+	if _, err := Connect(context.Background(), spec); !errors.Is(err, ErrNotAdmitted) {
+		t.Errorf("Connect err = %v, want ErrNotAdmitted", err)
+	}
+	if elapsed := time.Since(start); elapsed > StartupBudget+time.Second {
+		t.Errorf("Connect took %v, want it bounded by StartupBudget", elapsed)
+	}
+}
+
+// serveAll runs Admit on every connection to ln with g until ln closes.
+func serveAll(t *testing.T, ln net.Listener, identity string, g *gate) {
+	t.Helper()
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			Admit(conn, identity, g.reserve, g.release)
+			t.Cleanup(func() { conn.Close() })
+		}
+	}()
+}
+
+func TestDialHandsOffFromADrainingDaemon(t *testing.T) {
+	socket := shortSocketPath(t)
+	old, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveAll(t, old, "abc", &gate{open: false})
+
+	successor := &gate{open: true}
+	starts := 0
+	start := func(context.Context) error {
+		starts++
+		// What a successor does: the old daemon goes, the new one listens.
+		old.Close()
+		ln, err := net.Listen("unix", socket)
+		if err != nil {
+			return err
+		}
+		t.Cleanup(func() { ln.Close() })
+		serveAll(t, ln, "abc", successor)
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	conn, err := Dial(ctx, socket, "abc", start)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.Close()
+	if starts != 1 {
+		t.Errorf("start called %d times, want 1", starts)
+	}
+}
+
+func TestDialDoesNotStartADaemonPerDrainingRefusal(t *testing.T) {
+	socket := shortSocketPath(t)
+	ln, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	serveAll(t, ln, "abc", &gate{open: false})
+
+	starts := 0
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	Dial(ctx, socket, "abc", func(context.Context) error { starts++; return nil })
+
+	if starts != 1 {
+		t.Errorf("start called %d times in 1 s of draining refusals, want 1", starts)
+	}
+}
+
+func TestDialRetriesAStartWhoseDaemonNeverListened(t *testing.T) {
+	socket := shortSocketPath(t)
+	starts := 0
+	start := func(context.Context) error {
+		starts++
+		if starts == 1 {
+			return nil // this daemon lost a lock race and exited
+		}
+		ln, err := net.Listen("unix", socket)
+		if err != nil {
+			return err
+		}
+		t.Cleanup(func() { ln.Close() })
+		serveAll(t, ln, "abc", &gate{open: true})
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	conn, err := Dial(ctx, socket, "abc", start)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.Close()
+	if starts != 2 {
+		t.Errorf("start called %d times, want 2", starts)
+	}
+}
+
+func TestDialGivesUpOnAnUnexpectedReply(t *testing.T) {
+	socket := shortSocketPath(t)
+	ln, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			readLine(conn)
+			writeLine(conn, "muninn-admit v2 please upgrade")
+			conn.Close()
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	start := time.Now()
+	if _, err := Dial(ctx, socket, "abc", noStart); !errors.Is(err, ErrNotAdmitted) || !errors.Is(err, ErrRefused) {
+		t.Errorf("Dial err = %v, want a refusal", err)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Errorf("Dial took %v, want it to give up at once on a reply it can't use", elapsed)
+	}
+}
+
+func TestDialGivesUpOnASocketItCannotReach(t *testing.T) {
+	cases := map[string]func(t *testing.T, socket string){
+		"permission denied": func(t *testing.T, socket string) {
+			ln, err := net.Listen("unix", socket)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { ln.Close() })
+			if err := os.Chmod(socket, 0); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"not a socket": func(t *testing.T, socket string) {
+			if err := os.WriteFile(socket, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+	for name, setup := range cases {
+		t.Run(name, func(t *testing.T) {
+			socket := shortSocketPath(t)
+			setup(t, socket)
+
+			starts := 0
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			start := time.Now()
+			_, err := Dial(ctx, socket, "abc", func(context.Context) error { starts++; return nil })
+			if !errors.Is(err, ErrNotAdmitted) {
+				t.Errorf("Dial err = %v, want ErrNotAdmitted", err)
+			}
+			if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+				t.Errorf("Dial took %v, want it to give up at once", elapsed)
+			}
+			if starts != 0 {
+				t.Errorf("start called %d times, want 0", starts)
+			}
+		})
+	}
+}
+
+// While a daemon holds the lock but isn't listening yet, it is still
+// starting; launching another would only add load.
+func TestConnectStartsNoDaemonWhileOneIsStarting(t *testing.T) {
+	socket := shortSocketPath(t)
+	dir := filepath.Dir(socket)
+	marker := filepath.Join(dir, "started")
+	bin := filepath.Join(dir, "muninn")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\ntouch "+marker+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	spec := Spec{Muninn: bin, StateDir: dir, Identity: "abc"}
+
+	held, err := os.OpenFile(spec.Lock(), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	if err := syscall.Flock(int(held.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	begin := time.Now()
+	// It waits for the starting daemon until its budget runs out.
+	if _, err := Connect(ctx, spec); !errors.Is(err, ErrNotAdmitted) || !isNoListener(err) {
+		t.Errorf("Connect err = %v, want it still waiting for a listener", err)
+	}
+	if elapsed := time.Since(begin); elapsed < 900*time.Millisecond {
+		t.Errorf("Connect gave up after %v, want it to wait out its budget", elapsed)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("Connect started a daemon while another held the lock")
+	}
+}
+
+// A start that found a daemon still holding the lock (exiting, or starting)
+// launched nothing, so it mustn't hold back the next start.
+func TestDialRetriesAtOnceAfterAStartThatLaunchedNothing(t *testing.T) {
+	socket := shortSocketPath(t)
+	starts := 0
+	start := func(context.Context) error {
+		starts++
+		if starts == 1 {
+			return errDaemonStarting
+		}
+		ln, err := net.Listen("unix", socket)
+		if err != nil {
+			return err
+		}
+		t.Cleanup(func() { ln.Close() })
+		serveAll(t, ln, "abc", &gate{open: true})
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	begin := time.Now()
+	conn, err := Dial(ctx, socket, "abc", start)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.Close()
+	if elapsed := time.Since(begin); elapsed > 500*time.Millisecond {
+		t.Errorf("Dial took %v, want no restart delay after a start that launched nothing", elapsed)
+	}
+}

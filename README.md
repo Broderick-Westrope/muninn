@@ -18,7 +18,10 @@ Named for Odin's raven that flies out over the world and brings back memory.
 brew install broderick-westrope/tap/muninn
 # OR
 go install github.com/broderick-westrope/muninn@latest
+go install github.com/broderick-westrope/muninn/cmd/muninn-mcp-proxy@latest
 ```
+
+The second `go install` is optional: without `muninn-mcp-proxy` next to `muninn`, MCP sessions still share one server but each costs about 30 MB instead of 3 MB.
 
 ## Configure
 
@@ -115,6 +118,8 @@ all reported rather than recorded as success.
 
 Tools: `grep`, `glob`, `list_repos`, `read_file`, `list_tree`, `find_symbol_definitions`, `find_symbol_references`, `search_commits`, `get_diff`, `blame`. File reads are pinned to the indexed commit so line numbers always match search results. `find_symbol_references` is approximate (text search excluding definition sites). `search_commits` filters commit history (author, date, message, path, pickaxe content-change search); `get_diff` shows one commit or compares two revs with agent-safe truncation; `blame` attributes lines at the indexed commit by default so its line numbers agree with `read_file`.
 
+Every session shares one background server per index, so opening more agent sessions costs about 3 MB each instead of a full copy of the searcher. `muninn mcp` starts that server on demand and hands its stdio to it through `muninn-mcp-proxy`, which ships alongside `muninn`. The server exits after 5 minutes with no sessions and logs to `mcp.log` in the state directory (`~/.local/state/muninn/` by default). If it can't be reached within 5 s, the session is served in-process as before and says why on stderr. `muninn mcp --in-process` always serves in-process, which is useful for ruling out the shared server when debugging; `pkill -f 'muninn mcp --daemon'` stops a running one. That ends every open session, which exits with an error; the next session starts a fresh server.
+
 ## Data
 
-XDG paths: mirrors + index under `~/.local/share/muninn/`, sync status + logs under `~/.local/state/muninn/`. Nothing stays resident between sessions — the MCP server lives only as long as the agent session, the web UI only until Ctrl-C, and sync is a short-lived scheduled job.
+XDG paths: mirrors + index under `~/.local/share/muninn/`, sync status + logs under `~/.local/state/muninn/`. Nothing stays resident for long: the shared MCP server exits 5 minutes after its last session ends, the web UI runs only until Ctrl-C, and sync is a short-lived scheduled job.

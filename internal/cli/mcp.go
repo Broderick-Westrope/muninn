@@ -1,27 +1,63 @@
 package cli
 
 import (
+	"context"
+	"errors"
 	"fmt"
-	"io"
 	"log"
+	"os"
+	"path/filepath"
+	"runtime/debug"
+	"syscall"
 
 	"github.com/spf13/cobra"
 
 	"github.com/broderick-westrope/muninn/internal/config"
 	"github.com/broderick-westrope/muninn/internal/gitcmd"
 	muninnmcp "github.com/broderick-westrope/muninn/internal/mcp"
+	"github.com/broderick-westrope/muninn/internal/mcpsock"
 	"github.com/broderick-westrope/muninn/internal/search"
 	"github.com/broderick-westrope/muninn/internal/xdg"
 )
 
+// mcpMemoryLimit is the soft heap limit for the MCP server. Measured on a
+// 316-repo index, the default GC let one process sit at about 88 MB after
+// a burst of greps using 0.31 s of CPU. 64 MiB brought that to about
+// 67 MB for 0.35 s; 48 and 32 MiB saved more but took 0.75 s and 1.1 s.
+const mcpMemoryLimit = 64 << 20
+
+// applyMemoryLimit sets mcpMemoryLimit unless the user chose their own
+// limit through GOMEMLIMIT.
+func applyMemoryLimit() {
+	if os.Getenv("GOMEMLIMIT") != "" {
+		return
+	}
+	debug.SetMemoryLimit(mcpMemoryLimit)
+}
+
 func newMCPCmd() *cobra.Command {
-	return &cobra.Command{
+	var inProcess, daemon, daemonStart bool
+	var spec string
+	cmd := &cobra.Command{
 		Use:   "mcp",
 		Short: "Run the MCP server over stdio",
+		Long: `Run the MCP server over stdio.
+
+Sessions share one background server per index, started on demand and
+stopped after a few idle minutes, so each extra session costs little
+memory. If the shared server can't be reached, the session is served
+in-process instead. --in-process always serves in-process.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			switch {
+			case daemon:
+				return runMCPDaemon(cmd.Context(), spec)
+			case daemonStart:
+				return startMCPDaemon(spec)
+			}
 			// Zoekt logs shard loading via the stdlib logger; keep the
-			// server's stderr free of that noise.
-			log.SetOutput(io.Discard)
+			// server's stderr free of that noise, but not of errors such
+			// as a recovered tool panic.
+			log.SetOutput(dropInfo{os.Stderr})
 			// Git is a hard prerequisite for the mirror-backed tools: fail
 			// fast and loudly instead of surfacing per-call errors later.
 			if err := gitcmd.Validate(); err != nil {
@@ -32,6 +68,15 @@ func newMCPCmd() *cobra.Command {
 			if _, err := config.Load(resolveConfigPath()); err != nil {
 				return err
 			}
+			if !inProcess && os.Getenv(mcpsock.InProcessEnv) == "" {
+				err := forwardToMCPDaemon(cmd.Context())
+				var fallback fallbackError
+				if !errors.As(err, &fallback) {
+					return err
+				}
+				fmt.Fprintf(os.Stderr, "muninn: serving in-process: %v\n", fallback.reason)
+			}
+			applyMemoryLimit()
 			searcher, err := search.Open(xdg.IndexDir())
 			if err != nil {
 				return err
@@ -41,4 +86,79 @@ func newMCPCmd() *cobra.Command {
 			return srv.Run(cmd.Context())
 		},
 	}
+	cmd.Flags().BoolVar(&inProcess, "in-process", false, "serve this session in-process instead of through the shared server")
+	cmd.Flags().BoolVar(&daemon, daemonFlag, false, "run the shared MCP server")
+	cmd.Flags().BoolVar(&daemonStart, mcpsock.DaemonStartFlag, false, "start the shared MCP server detached")
+	cmd.Flags().StringVar(&spec, mcpsock.SpecFlag, "", "startup spec for --daemon and --daemon-start")
+	for _, name := range []string{daemonFlag, mcpsock.DaemonStartFlag, mcpsock.SpecFlag} {
+		cmd.Flags().MarkHidden(name)
+	}
+	return cmd
+}
+
+// fallbackError says why the session could not be handed to the shared
+// MCP server, before any MCP bytes were read, so it can be served
+// in-process instead.
+type fallbackError struct{ reason error }
+
+func (e fallbackError) Error() string { return e.reason.Error() }
+func (e fallbackError) Unwrap() error { return e.reason }
+
+// forwardToMCPDaemon hands this session's stdio to the shared daemon for
+// its spec, starting one if needed. Any failure before admission returns
+// a fallbackError, and the caller serves in-process; nothing has been read
+// from stdin then. The exception is a missing index, which fails the
+// session as serving in-process would. After admission it never falls
+// back.
+func forwardToMCPDaemon(ctx context.Context) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return fallbackError{fmt.Errorf("locating muninn binary: %w", err)}
+	}
+	// A daemon would fail on a missing index only after detaching, where
+	// the forwarder can't see why and waits out its budget; fail here
+	// instead, with the error serving in-process would give.
+	if _, err := os.Stat(xdg.IndexDir()); err != nil {
+		return fmt.Errorf("opening index directory %s: %w", xdg.IndexDir(), err)
+	}
+	spec, err := mcpsock.NewSpec(exe, xdg.IndexDir(), xdg.StatusPath(), xdg.MirrorsDir(), xdg.StateDir())
+	if err != nil {
+		return fallbackError{err}
+	}
+	// Check before dialing, not only before starting a daemon: whatever
+	// already listens in a directory others can reach might not be ours.
+	if err := os.MkdirAll(spec.StateDir, 0o700); err != nil {
+		return fallbackError{fmt.Errorf("creating state directory: %w", err)}
+	}
+	if err := checkPrivateDir(spec.StateDir); err != nil {
+		return fallbackError{err}
+	}
+	execProxy(spec)
+	conn, err := mcpsock.Connect(ctx, spec)
+	if err != nil {
+		return fallbackError{fmt.Errorf("%w (the shared server logs to %s)", err, spec.Log())}
+	}
+	defer conn.Close()
+	return mcpsock.Forward(conn, os.Stdin, os.Stdout)
+}
+
+// proxyName is the small forwarder installed next to muninn. It links only
+// the standard library, so it costs about 3 MB per session where muninn,
+// which links Zoekt, costs about 30 MB before it does anything.
+const proxyName = "muninn-mcp-proxy"
+
+// execProxy replaces this process with the proxy installed next to the
+// muninn binary, if there is one, handing it the spec and this process's
+// arguments so it can exec back into muninn to serve in-process. Nothing
+// has been read from stdin yet, and exec keeps the pid and stdio, so the
+// client sees no change. It returns only if there's no proxy or the exec
+// failed, and the caller then forwards from this process instead.
+func execProxy(spec mcpsock.Spec) {
+	proxy := filepath.Join(filepath.Dir(spec.Muninn), proxyName)
+	if _, err := os.Stat(proxy); err != nil {
+		return
+	}
+	argv := append([]string{proxy, "--" + mcpsock.SpecFlag, spec.Encode(), "--"}, os.Args[1:]...)
+	err := syscall.Exec(proxy, argv, os.Environ())
+	fmt.Fprintf(os.Stderr, "muninn: running %s: %v\n", proxy, err)
 }
