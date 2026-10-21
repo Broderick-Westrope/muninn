@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"os/exec"
 	"strings"
 	"syscall"
@@ -232,12 +233,18 @@ func writeLine(conn net.Conn, line string) error {
 const StartupBudget = 5 * time.Second
 
 // Connect asks the daemon for spec to admit a session, starting one with
-// `muninn mcp --daemon-start` if none answers, within StartupBudget. Its
+// `muninn mcp --daemon-start` if none answers and none holds the lock,
+// within StartupBudget. Its
 // errors wrap ErrNotAdmitted.
 func Connect(ctx context.Context, spec Spec) (*net.UnixConn, error) {
 	ctx, cancel := context.WithTimeout(ctx, StartupBudget)
 	defer cancel()
 	return Dial(ctx, spec.Socket(), spec.Identity, func(ctx context.Context) error {
+		if lockHeld(spec.Lock()) {
+			// A daemon owns this identity but isn't listening yet: it is
+			// still opening the index. Another would only add load.
+			return nil
+		}
 		cmd := exec.CommandContext(ctx, spec.Muninn, "mcp", "--"+DaemonStartFlag, "--"+SpecFlag, spec.Encode())
 		cmd.WaitDelay = 100 * time.Millisecond
 		if out, err := cmd.CombinedOutput(); err != nil {
@@ -245,4 +252,21 @@ func Connect(ctx context.Context, spec Spec) (*net.UnixConn, error) {
 		}
 		return nil
 	})
+}
+
+// lockHeld reports whether some process holds the daemon lock at path. It
+// probes with flock directly rather than through internal/lock, which would
+// link more than the standard library into the proxy, and never creates
+// the file. A daemon that collides with the probe retries for a second.
+func lockHeld(path string) bool {
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		return errors.Is(err, syscall.EWOULDBLOCK)
+	}
+	syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	return false
 }

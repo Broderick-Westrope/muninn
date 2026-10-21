@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -413,5 +414,35 @@ func TestDialGivesUpOnASocketItCannotReach(t *testing.T) {
 				t.Errorf("start called %d times, want 0", starts)
 			}
 		})
+	}
+}
+
+// While a daemon holds the lock but isn't listening yet, it is still
+// starting; launching another would only add load.
+func TestConnectStartsNoDaemonWhileOneIsStarting(t *testing.T) {
+	socket := shortSocketPath(t)
+	dir := filepath.Dir(socket)
+	marker := filepath.Join(dir, "started")
+	bin := filepath.Join(dir, "muninn")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\ntouch "+marker+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	spec := Spec{Muninn: bin, StateDir: dir, Identity: "abc"}
+
+	held, err := os.OpenFile(spec.Lock(), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	if err := syscall.Flock(int(held.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	Connect(ctx, spec)
+
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("Connect started a daemon while another held the lock")
 	}
 }
