@@ -44,6 +44,7 @@ archives:
     files:
       - README.md
       - LICENSE*
+      - docs/*.md
 
 release:
   prerelease: auto
@@ -75,7 +76,8 @@ brews:
       - name: git
       - name: universal-ctags
     caveats: |
-      Create ~/.config/muninn/config.json (see the README for the schema), then:
+      Create ~/.config/muninn/config.json (schema:
+      https://github.com/Broderick-Westrope/muninn/blob/master/docs/configuration.md), then:
         muninn sync             # first sync: clone mirrors + build the index
         muninn sync --install   # schedule syncs via launchd (hourly by default)
 
