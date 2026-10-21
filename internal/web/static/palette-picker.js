@@ -11,14 +11,17 @@
 //     row stays selected, found again by key.
 //   - Enter runs at once unless a lookup is pending and the selection sits
 //     where its rows will land. Then it waits, and once results arrive it
-//     runs the first of the lookup's rows, or nothing if there are none or
-//     the lookup failed: never a fallback row the user did not see.
+//     runs the first of the lookup's rows. If the lookup found none it runs
+//     the row Enter was pressed on, if that is still the one selected, and
+//     otherwise nothing; a failed lookup runs nothing. It never runs a row
+//     the user did not see selected.
 //   - Moving the selection or editing the input cancels a waiting Enter.
 export function createPicker() {
   let keys = [];
   let active = 0;
   let navigated = false;
   let queued = false;
+  let queuedKey; // the row selected when Enter was queued
   let lookupStart = Infinity;
   let lookupCount = 0;
 
@@ -64,6 +67,7 @@ export function createPicker() {
     enter({ pending }) {
       if (pending && !navigated && active >= lookupStart) {
         queued = true;
+        queuedKey = keys[active];
         return 'queue';
       }
       return 'run';
@@ -74,7 +78,8 @@ export function createPicker() {
     settle({ ok }) {
       if (!queued) return -1;
       queued = false;
-      if (!ok || lookupCount === 0) return -1;
+      if (!ok) return -1;
+      if (lookupCount === 0) return keys.length && keys[active] === queuedKey ? active : -1;
       return active >= lookupStart && active < lookupStart + lookupCount ? active : -1;
     },
 

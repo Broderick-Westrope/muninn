@@ -57,12 +57,22 @@ test('Enter where pending lookup rows will land waits, then runs the first of th
   assert.equal(p.settle({ ok: true }), 0);
 });
 
-test('a queued Enter runs nothing when the lookup found no rows', () => {
+test('a queued Enter with no lookup rows runs the row it was pressed on, still selected', () => {
+  const p = createPicker();
+  const pending = { keys: ['search'], lookupStart: 0, lookupCount: 0 };
+  p.render({ ...pending, reset: true });
+  p.enter({ pending: true });
+
+  p.render({ ...pending, reset: false });
+  assert.equal(p.settle({ ok: true }), 0);
+});
+
+test('a queued Enter with no lookup rows runs nothing if a different row is now on top', () => {
   const p = createPicker();
   p.render({ keys: ['search'], lookupStart: 0, lookupCount: 0, reset: true });
   p.enter({ pending: true });
 
-  p.render({ keys: ['search'], lookupStart: 0, lookupCount: 0, reset: false });
+  p.render({ keys: ['cmd:clear', 'search'], lookupStart: 0, lookupCount: 0, reset: false });
   assert.equal(p.settle({ ok: true }), -1);
 });
 
@@ -89,4 +99,13 @@ test('after the user moves, Enter runs their row even while a lookup is pending'
   p.render({ ...filesOnly, reset: true });
   p.move(1);
   assert.equal(p.enter({ pending: true }), 'run');
+});
+
+test('a queued Enter with nothing to select runs nothing', () => {
+  const p = createPicker();
+  p.render({ keys: [], lookupStart: 0, lookupCount: 0, reset: true });
+  p.enter({ pending: true });
+
+  p.render({ keys: [], lookupStart: 0, lookupCount: 0, reset: false });
+  assert.equal(p.settle({ ok: true }), -1);
 });
