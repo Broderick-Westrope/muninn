@@ -446,3 +446,35 @@ func TestConnectStartsNoDaemonWhileOneIsStarting(t *testing.T) {
 		t.Error("Connect started a daemon while another held the lock")
 	}
 }
+
+// A start that found a daemon still holding the lock (exiting, or starting)
+// launched nothing, so it mustn't hold back the next start.
+func TestDialRetriesAtOnceAfterAStartThatLaunchedNothing(t *testing.T) {
+	socket := shortSocketPath(t)
+	starts := 0
+	start := func(context.Context) error {
+		starts++
+		if starts == 1 {
+			return errDaemonStarting
+		}
+		ln, err := net.Listen("unix", socket)
+		if err != nil {
+			return err
+		}
+		t.Cleanup(func() { ln.Close() })
+		serveAll(t, ln, "abc", &gate{open: true})
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	begin := time.Now()
+	conn, err := Dial(ctx, socket, "abc", start)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.Close()
+	if elapsed := time.Since(begin); elapsed > 500*time.Millisecond {
+		t.Errorf("Dial took %v, want no restart delay after a start that launched nothing", elapsed)
+	}
+}

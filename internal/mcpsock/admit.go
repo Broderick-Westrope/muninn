@@ -102,15 +102,22 @@ const retryInterval = 25 * time.Millisecond
 
 // restartAfter is how long Dial waits after starting a daemon before it
 // starts another, so a daemon that lost the lock race and exited gets
-// replaced. On a busy machine a daemon can take longer than this to start,
-// so a spare is sometimes launched; it loses the lock race and exits.
+// replaced. A daemon that is slow to take the lock (it first waits to be
+// reparented) can still get a spare launched; the spare loses the lock
+// race and exits.
 const restartAfter = 1500 * time.Millisecond
 
+// errDaemonStarting is what a start func returns when it launched nothing
+// because a daemon already holds the lock: it is starting, or exiting.
+// Dial keeps polling and may start one again on its next attempt.
+var errDaemonStarting = errors.New("a daemon already holds the lock")
+
 // Dial connects to the daemon at socket and asks it to admit a session
-// with identity, retrying until ctx expires. When nothing answers or a
-// draining daemon refuses it, it calls start to launch a daemon, at most
-// once per restartAfter. start gets Dial's context and must return when it
-// ends. A start error ends Dial at once. On success the connection carries
+// with identity, retrying until ctx expires. When no daemon is listening
+// or a draining one refuses it, it calls start to launch a daemon, at
+// most once per restartAfter (a start that returns errDaemonStarting
+// doesn't count). start gets Dial's context and must return when it ends.
+// Any other start error ends Dial at once. On success the connection carries
 // only MCP bytes from then on; on failure the error wraps ErrNotAdmitted.
 func Dial(ctx context.Context, socket, identity string, start func(context.Context) error) (*net.UnixConn, error) {
 	var lastStart time.Time
@@ -128,10 +135,13 @@ func Dial(ctx context.Context, socket, identity string, start func(context.Conte
 		}
 		needDaemon := errors.Is(err, ErrDraining) || isNoListener(err)
 		if needDaemon && ctx.Err() == nil && (lastStart.IsZero() || time.Since(lastStart) >= restartAfter) {
-			if err := start(ctx); err != nil {
+			switch err := start(ctx); {
+			case errors.Is(err, errDaemonStarting):
+			case err != nil:
 				return nil, fmt.Errorf("%w: starting it: %w", ErrNotAdmitted, err)
+			default:
+				lastStart = time.Now()
 			}
-			lastStart = time.Now()
 		}
 		select {
 		case <-ctx.Done():
@@ -196,7 +206,8 @@ func cannotReach(err error) bool {
 // listening: the socket file is missing or left behind by a dead daemon.
 //
 // macOS also refuses a connection when a live daemon's listen backlog is
-// full; that starts a spare daemon, which loses the lock race and exits.
+// full. Dial then asks for a start, and Connect skips it because the live
+// daemon holds the lock.
 func isNoListener(err error) bool {
 	return errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ECONNREFUSED)
 }
@@ -233,17 +244,16 @@ func writeLine(conn net.Conn, line string) error {
 const StartupBudget = 5 * time.Second
 
 // Connect asks the daemon for spec to admit a session, starting one with
-// `muninn mcp --daemon-start` if none answers and none holds the lock,
-// within StartupBudget. Its
-// errors wrap ErrNotAdmitted.
+// `muninn mcp --daemon-start` if none is listening and none holds the
+// lock, within StartupBudget. Its errors wrap ErrNotAdmitted.
 func Connect(ctx context.Context, spec Spec) (*net.UnixConn, error) {
 	ctx, cancel := context.WithTimeout(ctx, StartupBudget)
 	defer cancel()
 	return Dial(ctx, spec.Socket(), spec.Identity, func(ctx context.Context) error {
 		if lockHeld(spec.Lock()) {
-			// A daemon owns this identity but isn't listening yet: it is
-			// still opening the index. Another would only add load.
-			return nil
+			// A daemon owns this identity but isn't listening: it is still
+			// opening the index, or exiting. Another would only add load.
+			return errDaemonStarting
 		}
 		cmd := exec.CommandContext(ctx, spec.Muninn, "mcp", "--"+DaemonStartFlag, "--"+SpecFlag, spec.Encode())
 		cmd.WaitDelay = 100 * time.Millisecond
