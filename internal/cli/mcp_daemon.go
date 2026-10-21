@@ -112,6 +112,12 @@ func serveMCPDaemon(ctx context.Context, encoded string) error {
 		}
 	}
 
+	// --daemon-start checked this, but the directory could have changed
+	// since, and its mode is the socket's only access control.
+	if err := checkPrivateDir(spec.StateDir); err != nil {
+		return err
+	}
+
 	// An exiting daemon may still hold the lock for a moment.
 	var lk *lock.Lock
 	for deadline := time.Now().Add(daemonSetupTimeout); ; time.Sleep(10 * time.Millisecond) {
