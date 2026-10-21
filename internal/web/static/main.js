@@ -9,7 +9,7 @@ import {
   resetFile,
   setCurrentFile,
   showFile,
-  targetLine,
+  targetLines,
 } from './file.js';
 import { initHints } from './query.js';
 import { loadRepos } from './repos.js';
@@ -47,7 +47,7 @@ function route() {
         document.body.dataset.view === 'file'
       ) {
         setCurrentFile(loc);
-        if (loc.line) targetLine(loc.line, true);
+        if (loc.line) targetLines(loc.line, loc.endLine, true);
         refreshFileActions();
         showTree(loc);
         return;

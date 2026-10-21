@@ -6,26 +6,40 @@ import { fileHash } from './routes.js';
 
 let fileEl = null;
 let fileCtl = null; // AbortController for the in-flight file fetch
-let currentFile = null; // {repo, path, line} when the file view is showing
+let currentFile = null; // {repo, path, line, endLine} when the file view is showing
 let currentFileData = null; // /api/file response for the showing file
 
 export function initFile(el) {
   fileEl = el;
-  // Clicking a gutter line number selects that line and updates the URL
-  // (shareable deep link) without adding a history entry or re-rendering.
+  // Clicking a gutter line number selects that line, and shift-clicking
+  // extends the selection to a range from the first selected line, as on
+  // GitHub. The URL is updated (shareable deep link) without adding a
+  // history entry or re-rendering.
   fileEl.addEventListener('click', (e) => {
     const a = e.target.closest('a.lnlinks');
     if (!a || !currentFile) return;
     e.preventDefault();
     const n = Number(a.parentElement.id.slice(1));
-    currentFile.line = n;
+    const anchor = currentFile.line;
+    if (e.shiftKey && anchor && anchor !== n) {
+      currentFile.line = Math.min(anchor, n);
+      currentFile.endLine = Math.max(anchor, n);
+    } else {
+      currentFile.line = n;
+      currentFile.endLine = 0;
+    }
+    const { repo, path, line, endLine } = currentFile;
     history.replaceState(
       null,
       '',
-      location.pathname + location.search + fileHash(currentFile.repo, currentFile.path, n),
+      location.pathname + location.search + fileHash(repo, path, line, endLine),
     );
-    targetLine(n, false);
+    targetLines(line, endLine, false);
     refreshFileActions();
+  });
+  // Shift-click would otherwise extend a text selection across the code.
+  fileEl.addEventListener('mousedown', (e) => {
+    if (e.shiftKey && e.target.closest('a.lnlinks')) e.preventDefault();
   });
 }
 
@@ -72,7 +86,7 @@ export async function showFile(loc) {
     body.append(plainPre(data.content));
   }
   fileEl.replaceChildren(fileHeader(loc, data), body);
-  if (loc.line) targetLine(loc.line, true);
+  if (loc.line) targetLines(loc.line, loc.endLine, true);
 }
 
 function fileHeader(loc, data) {
@@ -101,10 +115,34 @@ function fileHeader(loc, data) {
 
 const EDITOR_LABELS = { cursor: 'Cursor', vscode: 'VS Code' };
 
+// GitHub renders these formats instead of showing source, and line anchors
+// only resolve on the unrendered view (?plain=1).
+const GITHUB_RENDERED = new Set([
+  'md', 'markdown', 'mdown', 'mkdn', 'mkd', 'mdwn', 'mdtxt', 'mdtext', 'rmd',
+  'rst', 'rest', 'adoc', 'asciidoc', 'asc', 'org', 'textile', 'rdoc',
+  'creole', 'mediawiki', 'wiki', 'pod', 'pod6', 'ipynb', 'csv', 'tsv',
+  'svg', 'geojson', 'topojson',
+]);
+
+function githubRendered(path) {
+  const base = path.slice(path.lastIndexOf('/') + 1);
+  const dot = base.lastIndexOf('.');
+  return dot > 0 && GITHUB_RENDERED.has(base.slice(dot + 1).toLowerCase());
+}
+
+// lineLabel renders a target as "L10" or "L10-L20", the form both GitHub
+// anchors and the copied path use.
+function lineLabel(loc) {
+  if (!loc.line) return '';
+  return loc.endLine > loc.line ? `L${loc.line}-L${loc.endLine}` : `L${loc.line}`;
+}
+
 function githubUrl(loc, data) {
   const p = loc.path.split('/').map(encodeURIComponent).join('/');
-  const anchor = loc.line ? `#L${loc.line}` : '';
-  return `https://github.com/${loc.repo}/blob/${data.indexedCommit}/${p}${anchor}`;
+  const label = lineLabel(loc);
+  const plain = label && githubRendered(loc.path) ? '?plain=1' : '';
+  const anchor = label ? `#${label}` : '';
+  return `https://github.com/${loc.repo}/blob/${data.indexedCommit}/${p}${plain}${anchor}`;
 }
 
 function editorUrl(loc, data) {
@@ -120,7 +158,7 @@ function fileActions(loc, data) {
   acts.append(
     copyBtn(() => {
       const f = currentFile || loc;
-      return `${f.repo}/${f.path}` + (f.line ? `:L${f.line}` : '');
+      return `${f.repo}/${f.path}` + (f.line ? `:${lineLabel(f)}` : '');
     }, 'Copy path'),
   );
   const gh = document.createElement('a');
@@ -129,6 +167,7 @@ function fileActions(loc, data) {
   gh.target = '_blank';
   gh.rel = 'noopener';
   gh.textContent = 'GitHub';
+  gh.title = 'Shift-click line numbers to select a range';
   acts.append(gh, copyBtn(() => gh.href, 'Copy GitHub permalink', 'link'));
   if (data.localPath) acts.append(editorButton(loc, data));
   return acts;
@@ -230,13 +269,20 @@ function plainPre(content) {
   return pre;
 }
 
-export function targetLine(n, scroll) {
-  $('.line.hl', fileEl)?.classList.remove('hl');
-  const ln = document.getElementById('L' + n);
-  if (!ln) return;
-  const line = ln.closest('.line');
-  line.classList.add('hl');
-  if (scroll) line.scrollIntoView({ block: 'center' });
+// targetLines highlights line through endLine (just line when endLine is 0)
+// and optionally scrolls the first highlighted line into view.
+export function targetLines(line, endLine, scroll) {
+  for (const el of fileEl.querySelectorAll('.line.hl')) el.classList.remove('hl');
+  const last = endLine > line ? endLine : line;
+  let first = null;
+  for (let n = line; n <= last; n++) {
+    const ln = document.getElementById('L' + n);
+    if (!ln) break;
+    const el = ln.closest('.line');
+    el.classList.add('hl');
+    first ??= el;
+  }
+  if (first && scroll) first.scrollIntoView({ block: last > line ? 'start' : 'center' });
 }
 
 function friendlyFileError(e) {
