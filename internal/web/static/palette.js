@@ -76,12 +76,13 @@ export function initPalette(o) {
   input = document.createElement('input');
   input.type = 'text';
   input.className = 'pal-input';
-  input.placeholder = 'Type a command, file[:line], or repo — > commands, @ symbols, : line';
+  input.placeholder = 'Search files, commands, repos…';
   input.autocomplete = 'off';
   input.spellcheck = false;
   input.setAttribute('autocapitalize', 'off');
   input.setAttribute('role', 'combobox');
   input.setAttribute('aria-expanded', 'true');
+  input.setAttribute('aria-autocomplete', 'list');
   input.setAttribute('aria-controls', 'pal-list');
 
   listEl = document.createElement('ul');
