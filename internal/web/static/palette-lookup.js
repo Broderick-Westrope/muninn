@@ -6,10 +6,10 @@
 // for display only, so a fast Enter can never open a file from an older
 // query.
 //
-// fetch(args, signal) resolves to {items, truncated}. onSettle({ok}) runs
+// load(args, signal) resolves to {items, truncated}. onSettle({ok}) runs
 // when a still-wanted lookup finishes, so the caller can re-render; ok is
 // false when it failed.
-export function createLookup({ fetch, debounceMs, onSettle }) {
+export function createLookup({ load, debounceMs, onSettle }) {
   let done = { key: '', items: [], truncated: false, error: '' };
   let pendingKey = '';
   let timer = 0;
@@ -39,7 +39,7 @@ export function createLookup({ fetch, debounceMs, onSettle }) {
       ctl = mine;
       let next;
       try {
-        const r = await fetch(args, mine.signal);
+        const r = await load(args, mine.signal);
         next = { key, items: r.items, truncated: r.truncated, error: '' };
       } catch (e) {
         if (e.name === 'AbortError') return;

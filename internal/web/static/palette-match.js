@@ -58,14 +58,6 @@ export function mergeFiles(scoped, global) {
   return out;
 }
 
-// keepActive picks the selected index after a re-render. An async update
-// (results arriving) keeps the user's selection so Enter runs what they
-// chose; a new input resets to the top.
-export function keepActive(prevKey, keys, reset) {
-  if (reset) return 0;
-  const i = keys.indexOf(prevKey);
-  return i === -1 ? 0 : i;
-}
 
 // fuzzyFilter keeps the items whose title matches term, best first.
 export function fuzzyFilter(list, term) {
@@ -149,10 +141,3 @@ export function keyIntent(e, mac) {
   return null;
 }
 
-// shouldQueueEnter decides whether an Enter waits for the pending lookup.
-// It waits only when the selected row is at or below where the lookup's
-// rows will land (lookupStart): those rows could displace it. A command
-// listed above the lookup, or a row the user picked, runs at once.
-export function shouldQueueEnter({ pending, navigated, active, lookupStart }) {
-  return pending && !navigated && active >= lookupStart;
-}

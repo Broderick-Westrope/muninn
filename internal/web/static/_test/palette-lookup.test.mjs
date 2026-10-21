@@ -18,7 +18,7 @@ const tick = () => new Promise((r) => setTimeout(r, 0));
 
 test('a pending lookup shows the previous results as stale, never fresh', async () => {
   const f = deferredFetch();
-  const lookup = createLookup({ fetch: f.fetch, debounceMs: 0, onSettle: () => {} });
+  const lookup = createLookup({ load: f.fetch, debounceMs: 0, onSettle: () => {} });
   lookup.view('old', 'old');
   await tick();
   f.calls[0].resolve({ items: ['old.ts'], truncated: false });
@@ -34,7 +34,7 @@ test('a pending lookup shows the previous results as stale, never fresh', async 
 
 test('a slow response for a superseded key never replaces the current one', async () => {
   const f = deferredFetch();
-  const lookup = createLookup({ fetch: f.fetch, debounceMs: 0, onSettle: () => {} });
+  const lookup = createLookup({ load: f.fetch, debounceMs: 0, onSettle: () => {} });
   lookup.view('a', 'a');
   await tick();
   lookup.view('b', 'b');
@@ -52,7 +52,7 @@ test('a slow response for a superseded key never replaces the current one', asyn
 
 test('re-rendering the same key does not restart its request', async () => {
   const f = deferredFetch();
-  const lookup = createLookup({ fetch: f.fetch, debounceMs: 0, onSettle: () => {} });
+  const lookup = createLookup({ load: f.fetch, debounceMs: 0, onSettle: () => {} });
   lookup.view('a', 'a');
   lookup.view('a', 'a');
   await tick();
@@ -65,7 +65,7 @@ test('re-rendering the same key does not restart its request', async () => {
 test('an empty key cancels the pending lookup', async () => {
   const f = deferredFetch();
   let settled = 0;
-  const lookup = createLookup({ fetch: f.fetch, debounceMs: 0, onSettle: () => settled++ });
+  const lookup = createLookup({ load: f.fetch, debounceMs: 0, onSettle: () => settled++ });
   lookup.view('a', 'a');
   await tick();
 
@@ -80,7 +80,7 @@ test('an empty key cancels the pending lookup', async () => {
 
 test('a failed lookup is fresh with its error', async () => {
   const f = deferredFetch();
-  const lookup = createLookup({ fetch: f.fetch, debounceMs: 0, onSettle: () => {} });
+  const lookup = createLookup({ load: f.fetch, debounceMs: 0, onSettle: () => {} });
   lookup.view('a', 'a');
   await tick();
   f.calls[0].reject(new Error('bad query'));
@@ -94,7 +94,7 @@ test('a failed lookup is fresh with its error', async () => {
 
 test('returning to a loaded key cancels the newer pending request', async () => {
   const f = deferredFetch();
-  const lookup = createLookup({ fetch: f.fetch, debounceMs: 0, onSettle: () => {} });
+  const lookup = createLookup({ load: f.fetch, debounceMs: 0, onSettle: () => {} });
   lookup.view('a', 'a');
   await tick();
   f.calls[0].resolve({ items: ['a.ts'], truncated: false });
@@ -114,7 +114,7 @@ test('returning to a loaded key cancels the newer pending request', async () => 
 test('onSettle reports whether the lookup failed', async () => {
   const f = deferredFetch();
   const settled = [];
-  const lookup = createLookup({ fetch: f.fetch, debounceMs: 0, onSettle: (r) => settled.push(r.ok) });
+  const lookup = createLookup({ load: f.fetch, debounceMs: 0, onSettle: (r) => settled.push(r.ok) });
   lookup.view('a', 'a');
   await tick();
   f.calls[0].reject(new Error('boom'));
@@ -125,7 +125,7 @@ test('onSettle reports whether the lookup failed', async () => {
 
 test('a failed lookup is retried after cancel', async () => {
   const f = deferredFetch();
-  const lookup = createLookup({ fetch: f.fetch, debounceMs: 0, onSettle: () => {} });
+  const lookup = createLookup({ load: f.fetch, debounceMs: 0, onSettle: () => {} });
   lookup.view('a', 'a');
   await tick();
   f.calls[0].reject(new Error('boom'));
@@ -141,7 +141,7 @@ test('a failed lookup is retried after cancel', async () => {
 
 test('cancel forgets successful results so the next session refetches', async () => {
   const f = deferredFetch();
-  const lookup = createLookup({ fetch: f.fetch, debounceMs: 0, onSettle: () => {} });
+  const lookup = createLookup({ load: f.fetch, debounceMs: 0, onSettle: () => {} });
   lookup.view('a', 'a');
   await tick();
   f.calls[0].resolve({ items: ['a.ts'], truncated: false });

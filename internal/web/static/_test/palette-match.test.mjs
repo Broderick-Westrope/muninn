@@ -3,25 +3,11 @@ import { test } from 'node:test';
 
 import {
   fuzzy,
-  keepActive,
   keyIntent,
   lookupQuery,
   mergeFiles,
-  shouldQueueEnter,
   splitLineTarget,
 } from '../palette-match.js';
-
-test('keepActive keeps the selected item when an async update re-renders', () => {
-  assert.equal(keepActive('cmd:permalink', ['cmd:focus', 'cmd:permalink', 'file:a'], false), 1);
-});
-
-test('keepActive resets to the top when the input changed', () => {
-  assert.equal(keepActive('cmd:permalink', ['cmd:focus', 'cmd:permalink'], true), 0);
-});
-
-test('keepActive falls back to the top when the selection is gone', () => {
-  assert.equal(keepActive('cmd:gone', ['cmd:focus', 'cmd:permalink'], false), 0);
-});
 
 test('mergeFiles puts current-repo matches first without duplicates', () => {
   const scoped = [{ repo: 'o/cur', path: 'src/index.ts' }];
@@ -34,7 +20,6 @@ test('mergeFiles puts current-repo matches first without duplicates', () => {
     { repo: 'o/other', path: 'index.ts' },
   ]);
 });
-
 
 test('splitLineTarget reads a trailing line or range off a file term', () => {
   assert.deepEqual(splitLineTarget('payments.ts:15'), { base: 'payments.ts', target: { line: 15, endLine: 0 } });
@@ -80,16 +65,6 @@ test('keyIntent leaves keys alone while an IME is composing', () => {
 
 test('lookupQuery passes repo: atoms through to scope a lookup', () => {
   assert.equal(lookupQuery('file', 'repo:pilot payments.ts'), 'repo:pilot file:payments\\.ts type:file');
-});
-
-test('shouldQueueEnter waits only when the lookup supplies the selected row', () => {
-  // Files are pending and lead the list: Enter waits for them.
-  assert.equal(shouldQueueEnter({ pending: true, navigated: false, active: 0, lookupStart: 0 }), true);
-  // A command sits above the pending files: run it now.
-  assert.equal(shouldQueueEnter({ pending: true, navigated: false, active: 0, lookupStart: 2 }), false);
-  // The user picked a row themselves.
-  assert.equal(shouldQueueEnter({ pending: true, navigated: true, active: 3, lookupStart: 0 }), false);
-  assert.equal(shouldQueueEnter({ pending: false, navigated: false, active: 0, lookupStart: 0 }), false);
 });
 
 test('splitLineTarget drops a trailing colon typed before the line number', () => {

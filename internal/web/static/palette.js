@@ -5,15 +5,14 @@ import { createLookup } from './palette-lookup.js';
 import {
   fuzzyFilter,
   isGoToLineKey as isGoToLineKeyFor,
-  keepActive,
   keyIntent,
   lookupQuery,
   mergeFiles,
   parse,
-  shouldQueueEnter,
   splitLineTarget,
   substringPositions,
 } from './palette-match.js';
+import { createPicker } from './palette-picker.js';
 import { fileHash, lineSuffix, parseLineRange } from './routes.js';
 
 // The command palette (Cmd/Ctrl+K). Plain text mixes commands, recent and
@@ -48,27 +47,17 @@ let toastEl = null;
 let toastTimer = 0;
 
 let items = []; // selectable items in render order
-let active = 0;
 let repoNames = null; // cached /api/repos names, loaded on first open
 
-// navigated is set once the user moves the selection after typing; an
-// Enter before that, while a lookup is in flight, waits for its results
-// instead of running whatever happens to be on top.
-let navigated = false;
-let enterQueued = false;
-let lookupStart = Infinity; // index where the lookup's rows begin in items
-
+const picker = createPicker();
 const lookup = createLookup({
-  fetch: fetchLookup,
+  load: fetchLookup,
   debounceMs: REMOTE_DEBOUNCE_MS,
   onSettle: ({ ok }) => {
     if (!paletteOpen()) return;
-    update(!navigated);
-    if (!enterQueued) return;
-    enterQueued = false;
-    // On failure the fallback on top is not what Enter was waiting for;
-    // stay open with the error showing instead.
-    if (ok && items[active]) runItem(items[active]);
+    update(false);
+    const i = picker.settle({ ok });
+    if (i >= 0) runItem(items[i]);
   },
 });
 
@@ -126,17 +115,14 @@ export function initPalette(o) {
   document.body.append(toastEl);
 
   input.addEventListener('input', () => {
-    navigated = false;
-    enterQueued = false;
+    picker.input();
     update(true);
   });
   input.addEventListener('keydown', onKey);
   listEl.addEventListener('mousemove', (e) => {
     const li = e.target.closest('li[data-i]');
-    if (li && Number(li.dataset.i) !== active) {
-      navigated = true;
-      enterQueued = false;
-      setActive(Number(li.dataset.i), false);
+    if (li && Number(li.dataset.i) !== picker.active()) {
+      showActive(picker.hover(Number(li.dataset.i)), false);
     }
   });
   listEl.addEventListener('click', (e) => {
@@ -149,7 +135,7 @@ export function initPalette(o) {
   });
   dlg.addEventListener('close', () => {
     lookup.cancel();
-    enterQueued = false;
+    picker.close();
   });
 }
 
@@ -167,8 +153,7 @@ export function openPalette(prefix) {
   if (!dlg.open) dlg.showModal();
   input.value = prefix;
   input.focus();
-  navigated = false;
-  enterQueued = false;
+  picker.input();
   update(true);
   if (!repoNames) loadRepoNames();
 }
@@ -200,16 +185,15 @@ async function loadRepoNames() {
     repoNames = null; // retried on the next open
     return;
   }
-  if (paletteOpen()) update(!navigated);
+  if (paletteOpen()) update(false);
 }
 
 // ---------------------------------------------------------------------------
 // Building the list
 
-// update rebuilds the list. reset moves the selection to the top. Async
-// re-renders (results arriving) pass reset only until the user has moved
-// the selection: after that they keep it, so Enter still runs what the
-// user picked.
+// update rebuilds the list. reset is true for an input change; async
+// re-renders (results arriving) pass false and the picker decides whether
+// the selection stays.
 function update(reset = true) {
   const { mode, term } = parse(input.value);
   const groups = [];
@@ -374,9 +358,9 @@ function symbolItems(files, term) {
 // Rendering and keys
 
 function render(groups, reset) {
-  const prevKey = items[active]?.key;
   items = [];
-  lookupStart = Infinity;
+  let lookupStart = Infinity;
+  let lookupCount = 0;
   const frag = document.createDocumentFragment();
   for (const g of groups) {
     const stale = g.stale || [];
@@ -386,7 +370,10 @@ function render(groups, reset) {
     head.setAttribute('role', 'presentation');
     head.textContent = g.label;
     frag.append(head);
-    if (g.lookup) lookupStart = items.length;
+    if (g.lookup) {
+      lookupStart = items.length;
+      lookupCount = g.items.length;
+    }
     for (const it of g.items) {
       const keyed = { ...it, key: `${g.label}\u0000${it.title}\u0000${it.detail || ''}` };
       frag.append(itemEl(keyed, items.push(keyed) - 1));
@@ -408,8 +395,8 @@ function render(groups, reset) {
     frag.append(n);
   }
   listEl.replaceChildren(frag);
-  active = keepActive(prevKey, items.map((it) => it.key), reset);
-  setActive(active, reset);
+  const keys = items.map((it) => it.key);
+  showActive(picker.render({ keys, lookupStart, lookupCount, reset }), reset);
 }
 
 // itemEl renders one row; i is its index among selectable items, or -1 for
@@ -480,12 +467,12 @@ function highlight(el, text, positions) {
   flush();
 }
 
-function setActive(i, reset) {
+// showActive marks row i selected; reset scrolls the list back to the top.
+function showActive(i, reset) {
   for (const el of listEl.querySelectorAll('[aria-selected="true"]')) {
     el.setAttribute('aria-selected', 'false');
   }
-  active = items.length ? (i + items.length) % items.length : 0;
-  const el = $item(active);
+  const el = items.length ? document.getElementById(`pal-${i}`) : null;
   if (!el) {
     input.removeAttribute('aria-activedescendant');
     return;
@@ -495,8 +482,6 @@ function setActive(i, reset) {
   if (reset) listEl.scrollTop = 0;
   else el.scrollIntoView({ block: 'nearest' });
 }
-
-const $item = (i) => (items.length ? document.getElementById(`pal-${i}`) : null);
 
 function onKey(e) {
   // Keys typed here must never reach the page's global shortcuts ("/",
@@ -512,19 +497,10 @@ function onKey(e) {
     // otherwise fire behind the modal.
     if (opts.currentFile()) openPalette(':');
   } else if (intent === 'down' || intent === 'up') {
-    // Moving the selection is a new choice: a queued Enter was for the old
-    // one and must not fire on whatever is selected when results land.
-    navigated = true;
-    enterQueued = false;
-    setActive(active + (intent === 'down' ? 1 : -1), false);
+    showActive(picker.move(intent === 'down' ? 1 : -1), false);
   } else if (intent === 'run') {
-    // Typed fast and hit Enter: wait for the lookup the input asked for
-    // rather than run a row from before it arrived.
-    if (shouldQueueEnter({ pending: lookup.pending(), navigated, active, lookupStart })) {
-      enterQueued = true;
-    } else if (items[active]) {
-      runItem(items[active]);
-    }
+    const it = items[picker.active()];
+    if (picker.enter({ pending: lookup.pending() }) === 'run' && it) runItem(it);
   }
 }
 
@@ -534,7 +510,7 @@ async function runItem(it) {
   if (it.stay !== undefined) {
     input.value = it.stay;
     input.focus();
-    navigated = false;
+    picker.input();
     update(true);
     return;
   }
