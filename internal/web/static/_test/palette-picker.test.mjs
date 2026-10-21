@@ -3,7 +3,9 @@ import { test } from 'node:test';
 
 import { createPicker } from '../palette-picker.js';
 
-// Rows as palette.js renders them: commands first, then lookup rows.
+// Row layouts: withFiles puts commands above the lookup's rows (a command
+// listed first must run at once); filesOnly matches palette.js's mixed
+// mode, where the lookup's rows lead.
 const withFiles = { keys: ['cmd:a', 'cmd:b', 'file:x', 'file:y'], lookupStart: 2, lookupCount: 2 };
 const filesOnly = { keys: ['file:x', 'file:y', 'search'], lookupStart: 0, lookupCount: 2 };
 

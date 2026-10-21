@@ -20,8 +20,9 @@ var staticFiles embed.FS
 //
 // Embedded files carry no modification time, so without Cache-Control a
 // browser may keep serving modules from an older muninn after an upgrade,
-// mixing old and new code. no-cache makes it revalidate on every load,
-// which costs nothing against a loopback server.
+// mixing old and new code. With no validator to check against, no-cache
+// means a full refetch on every load, which costs nothing against a
+// loopback server.
 func staticHandler() http.Handler {
 	sub, err := fs.Sub(staticFiles, "static")
 	if err != nil {

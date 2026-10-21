@@ -10,11 +10,13 @@
 //     arriving) until the user moves the selection; after that the moved
 //     row stays selected, found again by key.
 //   - Enter runs at once unless a lookup is pending and the selection sits
-//     where its rows will land. Then it waits, and once results arrive it
-//     runs the first of the lookup's rows. If the lookup found none it runs
-//     the row Enter was pressed on, if that is still the one selected, and
-//     otherwise nothing; a failed lookup runs nothing. It never runs a row
-//     the user did not see selected.
+//     where its rows will land (in practice, the lookup's group is first
+//     and Enter was pressed before it filled). Then it waits for the
+//     user's intent to become visible: once results arrive it runs the
+//     first of the lookup's rows, which is where the selection lands. If
+//     the lookup found none it runs the row Enter was pressed on, if that
+//     is still selected, and otherwise nothing; a failed lookup runs
+//     nothing.
 //   - Moving the selection or editing the input cancels a waiting Enter.
 export function createPicker() {
   let keys = [];
