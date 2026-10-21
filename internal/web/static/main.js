@@ -1,8 +1,16 @@
 'use strict';
 
 import { $, note } from './dom.js';
-import { clearFacets, facetParams, initFacets, loadFacets } from './facets.js';
 import {
+  activeCount,
+  clearFacets,
+  facetParams,
+  initFacets,
+  loadFacets,
+  selectOnly,
+} from './facets.js';
+import {
+  fileCommands,
   getCurrentFile,
   initFile,
   refreshFileActions,
@@ -11,6 +19,7 @@ import {
   showFile,
   targetLines,
 } from './file.js';
+import { initPalette, isMac, paletteOpen, rememberFile, togglePalette } from './palette.js';
 import { initHints } from './query.js';
 import { loadRepos } from './repos.js';
 import { parseFileHash } from './routes.js';
@@ -25,6 +34,7 @@ const statsEl = $('#stats');
 const repoBadge = $('#repo-badge');
 const treeEl = $('#sidebar-tree');
 const facetsEl = $('#sidebar-facets');
+const paletteBtn = $('#palette-btn');
 
 const DEBOUNCE_MS = 200;
 
@@ -55,6 +65,7 @@ function route() {
       if (document.body.dataset.view === 'results') savedScroll = window.scrollY;
       setCurrentFile(loc);
       document.body.dataset.view = 'file';
+      rememberFile(loc);
       showFile(loc);
       showTree(loc);
       return;
@@ -92,7 +103,73 @@ searchInput.addEventListener('keydown', (e) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// Command palette
+
+function focusSearch() {
+  searchInput.focus();
+  searchInput.select();
+}
+
+// searchInRepo narrows results to one repo and returns to them, ready for a
+// query.
+function searchInRepo(repo) {
+  selectOnly('repo', repo);
+  location.hash = '#/';
+  focusSearch();
+}
+
+// commands is the palette's command list for the current view; it is
+// rebuilt on every keystroke so it always reflects the live state.
+function commands() {
+  const inFile = document.body.dataset.view === 'file';
+  const f = getCurrentFile();
+  const cmds = [{ title: 'Focus search', keys: ['/'], run: focusSearch }];
+  if (inFile && f) {
+    cmds.push(...fileCommands());
+    cmds.push(
+      { title: 'Go to line…', keys: [':'], stay: ':' },
+      { title: 'Search in this repo', detail: f.repo, run: () => searchInRepo(f.repo) },
+      {
+        title: 'Back to results',
+        keys: ['esc'],
+        run: () => {
+          location.hash = '#/';
+        },
+      },
+    );
+  }
+  cmds.push({ title: 'Go to symbol…', keys: ['@'], stay: '@' });
+  if (searchInput.value) {
+    cmds.push({
+      title: 'Clear search',
+      run: () => {
+        searchInput.value = '';
+        search(true);
+        focusSearch();
+      },
+    });
+  }
+  if (activeCount() > 0) {
+    cmds.push({ title: 'Clear all filters', keys: ['shift', '⌫'], run: clearFacets });
+  }
+  cmds.push({
+    title: 'Copy link to this page',
+    toast: 'Link copied',
+    run: () => navigator.clipboard.writeText(location.href),
+  });
+  return cmds;
+}
+
 document.addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'k') {
+    e.preventDefault();
+    togglePalette();
+    return;
+  }
+  // The palette stops its own keys from bubbling; this guards against a
+  // key that reaches the page while it is open some other way.
+  if (paletteOpen()) return;
   if (e.key === 'Escape' && document.body.dataset.view === 'file') {
     // preventDefault: a focused type=search input would otherwise clear
     // itself natively, wiping the query on the way back to results.
@@ -124,6 +201,18 @@ initTree(treeEl);
 // selection, so its refetch is immediate and cheap (same query).
 initFacets({ facetsEl, onToggle: () => search(false, true) });
 initHints(hintsEl, searchInput);
+initPalette({
+  commands,
+  currentFile: () => (document.body.dataset.view === 'file' ? getCurrentFile() : null),
+  search: (q) => {
+    searchInput.value = q;
+    search(true);
+  },
+  searchRepo: searchInRepo,
+});
+paletteBtn.textContent = isMac ? '⌘K' : 'Ctrl K';
+paletteBtn.title = `Command palette (${isMac ? '⌘K' : 'Ctrl+K'})`;
+paletteBtn.addEventListener('click', togglePalette);
 
 const initialQ = new URLSearchParams(location.search).get('q') || '';
 searchInput.value = initialQ;

@@ -588,6 +588,164 @@ footer {
   box-shadow: inset 2px 0 var(--accent);
 }
 
+/* ---- command palette ------------------------------------------------- */
+
+#palette-btn {
+  padding: 1px 7px;
+  font: 11px var(--mono);
+  color: var(--muted);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+#palette-btn:hover {
+  color: var(--fg);
+  border-color: var(--accent);
+}
+
+dialog.palette {
+  width: min(640px, calc(100vw - 32px));
+  max-height: min(520px, calc(100vh - 20vh - 32px));
+  margin: 12vh auto auto;
+  padding: 0;
+  display: none;
+  flex-direction: column;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.28);
+  overflow: hidden;
+}
+
+dialog.palette[open] {
+  display: flex;
+}
+
+dialog.palette::backdrop {
+  background: rgba(0, 0, 0, 0.32);
+}
+
+.pal-input {
+  padding: 12px 14px;
+  font: 14px var(--mono);
+  color: var(--fg);
+  background: none;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  outline: none;
+}
+
+.pal-list {
+  flex: 1;
+  margin: 0;
+  padding: 4px 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.pal-group {
+  padding: 8px 14px 3px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.pal-item {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 5px 14px;
+  cursor: pointer;
+}
+
+.pal-item[aria-selected="true"] {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  box-shadow: inset 2px 0 var(--accent);
+}
+
+.pal-title {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pal-title mark {
+  color: inherit;
+  background: none;
+  font-weight: 700;
+  text-decoration: underline;
+  text-decoration-color: var(--accent);
+  text-underline-offset: 2px;
+}
+
+.pal-detail {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.pal-keys {
+  display: flex;
+  gap: 3px;
+  margin-left: auto;
+}
+
+.pal-note {
+  padding: 4px 14px 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.pal-foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  padding: 7px 14px;
+  font-size: 11px;
+  color: var(--muted);
+  border-top: 1px solid var(--border);
+}
+
+.palette kbd {
+  display: inline-block;
+  min-width: 1.6em;
+  padding: 0 4px;
+  font: 11px/1.5 var(--mono);
+  text-align: center;
+  color: var(--muted);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.toast {
+  position: fixed;
+  bottom: 40px;
+  left: 50%;
+  z-index: 20;
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--bg);
+  background: var(--fg);
+  border-radius: 6px;
+  transform: translateX(-50%);
+}
+
+.toast[hidden] {
+  display: none;
+}
+
 /* ---- messages ---------------------------------------------------------- */
 
 .note {

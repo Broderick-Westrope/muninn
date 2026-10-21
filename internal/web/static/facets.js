@@ -130,7 +130,7 @@ function toggle(kind, value) {
 }
 
 // activeCount is how many facet values are selected across all categories.
-const activeCount = () => selected.repo.size + selected.ext.size;
+export const activeCount = () => selected.repo.size + selected.ext.size;
 
 // clearFacets drops every selection at once. Exported so a keyboard
 // shortcut can reach it without going through the button.
@@ -138,6 +138,16 @@ export function clearFacets() {
   if (activeCount() === 0) return;
   selected.repo.clear();
   selected.ext.clear();
+  syncURL();
+  render();
+  onToggle();
+}
+
+// selectOnly narrows a category to exactly one value, for jumping straight
+// to "search in this repo" without unpicking chips one by one.
+export function selectOnly(kind, value) {
+  selected[kind].clear();
+  selected[kind].add(value);
   syncURL();
   render();
   onToggle();

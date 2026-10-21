@@ -150,17 +150,50 @@ function editorUrl(loc, data) {
   return `${data.editorScheme}://file${p}:${loc.line || 1}`;
 }
 
+const pathLabel = (f) => `${f.repo}/${f.path}` + (f.line ? `:${lineLabel(f)}` : '');
+
+// fileCommands lists the showing file's actions for the command palette.
+// Each reads the target when run, so a gutter selection made after the
+// palette was built is still honoured. Empty when no file has loaded.
+export function fileCommands() {
+  const data = currentFileData;
+  if (!currentFile || !data) return [];
+  const cmds = [
+    {
+      title: 'Copy path',
+      detail: pathLabel(currentFile),
+      toast: 'Path copied',
+      run: () => navigator.clipboard.writeText(pathLabel(currentFile)),
+    },
+    {
+      title: 'Copy GitHub permalink',
+      detail: lineLabel(currentFile) || 'whole file',
+      toast: 'Permalink copied',
+      run: () => navigator.clipboard.writeText(githubUrl(currentFile, data)),
+    },
+    {
+      title: 'Open on GitHub',
+      detail: lineLabel(currentFile) || 'whole file',
+      run: () => window.open(githubUrl(currentFile, data), '_blank', 'noopener'),
+    },
+  ];
+  if (data.localPath) {
+    const label = EDITOR_LABELS[data.editorScheme] || data.editorScheme;
+    cmds.push({
+      title: `Open in ${label}`,
+      detail: 'local checkout',
+      run: () => openInEditor(currentFile, data, $('.file-actions .editor', fileEl)),
+    });
+  }
+  return cmds;
+}
+
 // fileActions builds the compact header action group: copy path, GitHub
 // permalink (link + copy), and open-in-editor when a local checkout exists.
 function fileActions(loc, data) {
   const acts = document.createElement('span');
   acts.className = 'file-actions';
-  acts.append(
-    copyBtn(() => {
-      const f = currentFile || loc;
-      return `${f.repo}/${f.path}` + (f.line ? `:${lineLabel(f)}` : '');
-    }, 'Copy path'),
-  );
+  acts.append(copyBtn(() => pathLabel(currentFile || loc), 'Copy path'));
   const gh = document.createElement('a');
   gh.className = 'act gh';
   gh.href = githubUrl(loc, data);
@@ -182,42 +215,45 @@ function editorButton(loc, data) {
   b.className = 'act editor';
   b.textContent = EDITOR_LABELS[data.editorScheme] || data.editorScheme;
   b.title = 'Open in your local checkout — may be on a different commit than the index';
-  b.addEventListener('click', async () => {
-    // Read the target at click time so a gutter-selected line is honoured.
-    const f = currentFile || loc;
-    let res;
-    try {
-      res = await fetch('/api/open', {
-        method: 'POST',
-        // Sec-Fetch-Site is set by the browser; it is a forbidden header
-        // name, so any attempt to set it here would be dropped anyway.
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ repo: f.repo, path: f.path, line: f.line || 1 }),
-      });
-    } catch (e) {
-      showActionError(b, e.message);
-      return;
-    }
-    if (res.status === 204) return;
-
-    // 501 is the one recoverable case: no CLI, or a path --goto cannot
-    // express. The scheme opens the file without its repo, so say so.
-    if (res.status === 501) {
-      b.title =
-        'Opened without the repo loaded — install the editor’s shell command ' +
-        'so muninn can open the workspace folder';
-      location.href = editorUrl(f, data);
-      return;
-    }
-    let msg = res.statusText;
-    try {
-      msg = (await res.json()).error || msg;
-    } catch {
-      /* non-JSON error body */
-    }
-    showActionError(b, msg);
-  });
+  // Read the target at click time so a gutter-selected line is honoured.
+  b.addEventListener('click', () => openInEditor(currentFile || loc, data, b));
   return b;
+}
+
+// openInEditor opens f in the local checkout, reporting failures next to
+// btn (the header's editor button).
+async function openInEditor(f, data, btn) {
+  let res;
+  try {
+    res = await fetch('/api/open', {
+      method: 'POST',
+      // Sec-Fetch-Site is set by the browser; it is a forbidden header
+      // name, so any attempt to set it here would be dropped anyway.
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repo: f.repo, path: f.path, line: f.line || 1 }),
+    });
+  } catch (e) {
+    showActionError(btn, e.message);
+    return;
+  }
+  if (res.status === 204) return;
+
+  // 501 is the one recoverable case: no CLI, or a path --goto cannot
+  // express. The scheme opens the file without its repo, so say so.
+  if (res.status === 501) {
+    btn.title =
+      'Opened without the repo loaded — install the editor’s shell command ' +
+      'so muninn can open the workspace folder';
+    location.href = editorUrl(f, data);
+    return;
+  }
+  let msg = res.statusText;
+  try {
+    msg = (await res.json()).error || msg;
+  } catch {
+    /* non-JSON error body */
+  }
+  showActionError(btn, msg);
 }
 
 // showActionError surfaces an open-in-editor failure next to the button.
