@@ -1,31 +1,37 @@
 # muninn
 
-A single Go binary that indexes your GitHub repos for code search and serves them to agents over MCP. It syncs bare mirrors on a schedule (via launchd), builds [Zoekt](https://github.com/sourcegraph/zoekt) search shards, and exposes grep, glob, file access, symbol lookup, and git history tools (commit search, diff, blame) over stdio. Includes an on-demand local web UI for interactive search.
+**Local code search across all your GitHub repos, for you and your agents.**
 
-Named for Odin's raven that flies out over the world and brings back memory.
+muninn is a single Go binary that mirrors your GitHub repos, indexes them with [Zoekt](https://github.com/sourcegraph/zoekt) and universal-ctags, and serves the index three ways: an MCP server for coding agents, a keyboard-driven web UI, and a terminal search. It runs on your laptop with no database, no Docker and nothing resident: sync is a scheduled job that exits, and the MCP server shuts itself down when no agent is using it.
 
-**WHY?** I really enjoyed using [Sourcebot](https://github.com/sourcebot-dev/sourcebot) for many months. I ran it locally in Docker via compose. But I thought it was using too much memory and I was running pretty hot overall. So muninn has a much lower memory footprint. It doesn't need Redis or Postgres since it's more minimal and built for running locally rather than having to consider enterprise scale. It also gives me the ability to be flexible with the web UI which I'd like to integrate better with tools I use (namely GitHub and Cursor).
+Named for Odin's raven, who flies out over the world and brings back memory.
 
-## Requirements
+## Why muninn
 
-- macOS (launchd scheduling; core is portable)
-- `git`
-- universal-ctags with `+interactive` (`brew install universal-ctags`) — hard requirement for symbol search
+I used [Sourcebot](https://github.com/sourcebot-dev/sourcebot) locally for months and liked it, but running it in Docker Compose alongside Postgres and Redis kept my laptop running hot for an enterprise-ready tool only I was using. muninn keeps the parts I relied on and drops the server stack:
 
-## Install
+| | Sourcebot (local) | muninn |
+|---|---|---|
+| What you run | Docker Compose with Postgres and Redis | One binary |
+| When it's running | Always | Only during a sync, an agent session or a web UI session |
+| Agent access | MCP | MCP, with every session sharing one server (17 sessions in about 127 MB) |
+| Config | Sourcebot schema | A compatible subset; an existing Sourcebot config migrates with small edits |
+| Web UI | General-purpose | Built around my workflow: GitHub permalinks, open in Cursor or VS Code, a ⌘K palette |
+
+If you need shared, multi-user code search for a team, Sourcebot is the better fit. muninn is for one person's machine.
+
+## Quickstart
+
+muninn runs on macOS, since scheduling uses launchd. Homebrew also installs `git` and [universal-ctags](https://github.com/universal-ctags/ctags), which symbol search depends on. The [GitHub CLI](https://cli.github.com) is optional, but it's the most reliable way to authenticate.
 
 ```bash
-brew install broderick-westrope/tap/muninn
-# OR
-go install github.com/broderick-westrope/muninn@latest
-go install github.com/broderick-westrope/muninn/cmd/muninn-mcp-proxy@latest
+brew install broderick-westrope/tap/muninn gh
+gh auth login
 ```
 
-The second `go install` is optional: without `muninn-mcp-proxy` next to `muninn`, MCP sessions still share one server but each costs about 30 MB instead of 3 MB.
+Without Homebrew, `go install github.com/broderick-westrope/muninn@latest` works, given `git` and a universal-ctags built with `+interactive`. Also install `github.com/broderick-westrope/muninn/cmd/muninn-mcp-proxy@latest`, or each agent session costs about 30 MB instead of 3 MB.
 
-## Configure
-
-`~/.config/muninn/config.json` (a compatible subset of Sourcebot's schema — an existing Sourcebot config migrates with trivial edits):
+Tell muninn what to index in `~/.config/muninn/config.json`:
 
 ```json
 {
@@ -33,99 +39,91 @@ The second `go install` is optional: without `muninn-mcp-proxy` next to `muninn`
     "github": {
       "type": "github",
       "orgs": ["your-org"],
-      "repos": ["you/extra-repo"],
-      "token": { "env": "GITHUB_TOKEN" },
-      "exclude": { "archived": true, "repos": ["your-org/skip-me"] }
+      "repos": ["you/side-project"],
+      "exclude": { "archived": true }
     }
-  },
-  "sync": { "intervalMinutes": 60, "retryIntervalMinutes": 10 }
+  }
 }
 ```
 
-Token resolution, per run: `auth.githubToken` in config → the `token.env` env var
-→ `gh auth token`. `gh` is preferred for scheduled syncs because it re-resolves
-every run and so survives token rotation and expiry. muninn never writes a
-token to the config itself; `--install` records the *path* to `gh` (and to
-`ctags`) because launchd's PATH excludes Homebrew.
-
-`--install` warns about the two sources a scheduled run cannot rely on: a token
-reachable only through your shell environment (invisible to a launchd job), and
-one stored in `auth.githubToken` (it takes precedence over `gh` and does not
-rotate, so every sync fails once it expires). If an older muninn baked a token
-into your config, delete that field to get per-run resolution back.
-
-## Usage
+Run the first sync, then let launchd keep the index fresh:
 
 ```bash
-muninn sync              # reconcile repos: fetch mirrors, build index, GC removed
-muninn sync --if-due     # sync only if the index is stale (what the agent runs)
-muninn sync --install    # schedule syncs via launchd (records ctags + gh paths)
-muninn status            # last run, last success, per-repo failures, agent status
-muninn search "sym:NewServer case:yes repo:muninn"   # terminal search (zoekt syntax)
-muninn mcp               # MCP server over stdio
-muninn web               # local web UI at 127.0.0.1:7576 (Ctrl-C to stop)
+muninn sync            # clone mirrors and build the index (the first run takes a while)
+muninn sync --install  # resync in the background every hour
+muninn web             # search in the browser
 ```
 
-### Scheduling
-
-The launchd agent wakes every `sync.retryIntervalMinutes` and runs `sync
---if-due --no-repair`, which decides whether there is work to do:
-
-- Fresh (a success within `sync.intervalMinutes`, default 60): exit immediately.
-- Stale: sync.
-- Stale *and* the last run failed or was interrupted: reattempt every
-  `sync.retryIntervalMinutes` (default 10) instead of waiting out the full
-  interval, so an expired token or a wake with no network costs minutes rather
-  than an hour.
-
-Because the cadence lives in the config rather than the plist, changing it does
-not need a reinstall. Runs are serialized by an advisory lock on
-`~/.local/state/muninn/sync.lock`: a run that finds it held exits without doing
-anything, so two syncs never touch the mirrors or the index at once. (On a
-filesystem that does not support `flock` the run proceeds with a warning
-instead of aborting.)
-
-The plist records the binary path as installed (e.g. `/opt/homebrew/bin/muninn`)
-rather than resolving it through symlinks, so a package upgrade that repoints
-that symlink does not leave launchd spawning a deleted versioned path. If the
-binary the plist names goes missing anyway, an interactive `muninn sync`
-reinstalls the agent — only in that case, so that a `go run` or scratch build
-cannot capture the schedule. `muninn status` reports the agent's real state,
-asking launchd whether the job is loaded rather than trusting the plist on
-disk.
-
-Staleness is per repo, measured from that repo's last successful sync, so one
-unreachable repo does not age the rest of the index. `read_file`, `list_tree`
-and the history tools warn when *the repo you touched* is behind; `list_repos`
-shows an age column for every repo and is the fleet view; `muninn status` is the
-full picture.
-
-A run that fetched everything it could reach is not treated as a broken sync:
-only a total failure (bad credentials, missing ctags, a discovery that returned
-nothing) or a run that died mid-flight switches the scheduler to the retry
-cadence. That distinction is what stops one permanently failing repo from
-refetching the whole fleet every few minutes forever.
-
-A broken sync cannot masquerade as a fresh index: a discovery that returns
-nothing, a clock that has moved backwards, and a run that died mid-flight are
-all reported rather than recorded as success.
-
-### MCP
+To give an agent access, add muninn as an MCP server. For Claude Code that's `claude mcp add muninn -- muninn mcp`; most other clients take this JSON:
 
 ```json
 { "mcpServers": { "muninn": { "command": "muninn", "args": ["mcp"] } } }
 ```
 
-Tools: `grep`, `glob`, `list_repos`, `read_file`, `list_tree`, `find_symbol_definitions`, `find_symbol_references`, `search_commits`, `get_diff`, `blame`. File reads are pinned to the indexed commit so line numbers always match search results. `find_symbol_references` is approximate (text search excluding definition sites). `search_commits` filters commit history (author, date, message, path, pickaxe content-change search); `get_diff` shows one commit or compares two revs with agent-safe truncation; `blame` attributes lines at the indexed commit by default so its line numbers agree with `read_file`.
+See [docs/configuration.md](docs/configuration.md) for every config field, token sources and editor integration.
 
-Every session shares one background server per index, so opening more agent sessions costs about 3 MB each instead of a full copy of the searcher. `muninn mcp` starts that server on demand and hands its stdio to it through `muninn-mcp-proxy`, which ships alongside `muninn`. The server exits after 5 minutes with no sessions and logs to `mcp.log` in the state directory (`~/.local/state/muninn/` by default). If it can't be reached within 5 s, the session is served in-process as before and says why on stderr. `muninn mcp --in-process` always serves in-process, which is useful for ruling out the shared server when debugging; `pkill -f 'muninn mcp --daemon'` stops a running one. That ends every open session, which exits with an error; the next session starts a fresh server.
+## Using it
 
 ### Web UI
 
-Press ⌘K (Ctrl+K off macOS) for the command palette: type a file name to open it (`payments.ts:15` or `payments.ts:10-20` opens at that line or range), `@` for symbol definitions, `:` for a line in the open file, `>` for commands, or `repo:<regex>` to narrow a lookup. ⌘G jumps to a line in the open file, `/` focuses search, Shift+⌫ clears filters, and shift-clicking line numbers selects a range for the GitHub permalink.
+`muninn web` serves the UI at `127.0.0.1:7576` and opens it in your browser. Search uses Zoekt's query syntax (`sym:NewServer case:yes repo:muninn`), the sidebar filters by repo and file type, and every file links to a GitHub permalink pinned to the indexed commit. If you have a checkout of the repo locally, it also opens in Cursor or VS Code.
 
-The UI's JavaScript tests run under `go test` when `node` 20.19+ or 22.7+ is on your PATH, and are skipped otherwise. No workflow runs the tests, so a skip means they didn't run.
+| Key | Does |
+|---|---|
+| ⌘K | Command palette: open a file, jump to a symbol, run any command |
+| ⌘G | Go to a line or range in the open file |
+| `/` | Focus search |
+| Esc | Back to results |
+| Shift+⌫ | Clear filters |
+| Shift-click a line number | Select a range for the permalink |
 
-## Data
+In the palette, type a file name to open it, and add `:15` or `:10-20` to land on a line or range. Start with `@` for symbol definitions, `:` for a line in the open file, or `>` for commands only, and add `repo:<regex>` to narrow a name that many repos share. Off macOS, use Ctrl in place of ⌘.
 
-XDG paths: mirrors + index under `~/.local/share/muninn/`, sync status + logs under `~/.local/state/muninn/`. Nothing stays resident for long: the shared MCP server exits 5 minutes after its last session ends, the web UI runs only until Ctrl-C, and sync is a short-lived scheduled job.
+### MCP
+
+Agents get ten tools: `grep`, `glob`, `list_repos`, `read_file`, `list_tree`, `find_symbol_definitions`, `find_symbol_references`, `search_commits`, `get_diff` and `blame`. Reads are pinned to the indexed commit, so line numbers always agree with search results. [docs/mcp.md](docs/mcp.md) describes each tool and how the shared server works.
+
+### Terminal
+
+```bash
+muninn search "sym:NewServer case:yes repo:muninn"
+muninn search --files-only "file:_test\.go$ repo:muninn"
+muninn status   # last sync, per-repo failures, scheduler state
+```
+
+## How it works
+
+```mermaid
+flowchart LR
+  gh[GitHub] -->|fetch| mirrors[Bare mirrors]
+  mirrors --> ctags[universal-ctags]
+  mirrors --> zoekt[Zoekt shards]
+  ctags --> zoekt
+  launchd[launchd] -->|muninn sync --if-due| mirrors
+  zoekt --> mcp[MCP server]
+  zoekt --> web[Web UI]
+  zoekt --> cli[muninn search]
+```
+
+Each sync fetches bare mirrors, rebuilds Zoekt shards with ctags symbols, and removes repos that are no longer configured. Mirrors and the index live under `~/.local/share/muninn/`, and sync status and logs under `~/.local/state/muninn/`; both honor `XDG_DATA_HOME` and `XDG_STATE_HOME`.
+
+The launchd job wakes every few minutes but only syncs when the index is stale, retries quickly after a failure, and never reports a broken sync as fresh. [docs/scheduling.md](docs/scheduling.md) has the details.
+
+## Troubleshooting
+
+| Symptom | Check |
+|---|---|
+| Results look out of date | `muninn status` shows each repo's age and the last failure. `muninn sync` runs one now. |
+| Scheduled syncs fail on auth | A token that only exists in your shell isn't visible to launchd. Run `gh auth login`, then `muninn sync --install` again. |
+| Symbol search finds nothing | ctags is missing or lacks `+interactive`. Check `ctags --list-features`. |
+| An agent's muninn tools hang or fail | `muninn mcp --in-process` bypasses the shared server. Its log is `~/.local/state/muninn/mcp.log`. |
+| No "Open in Cursor" button | muninn only offers it for repos it finds a checkout of under `editor.roots`. |
+
+## Development
+
+```bash
+go build ./...
+go test ./...
+```
+
+[docs/development.md](docs/development.md) covers the web UI's JavaScript tests and how releases are cut.
