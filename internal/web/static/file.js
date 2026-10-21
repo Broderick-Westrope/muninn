@@ -44,6 +44,8 @@ export function initFile(el) {
 }
 
 export const getCurrentFile = () => currentFile;
+// fileLineCount is the showing file's line count, or 0 before it loads.
+export const fileLineCount = () => currentFileData?.totalLines ?? 0;
 export const setCurrentFile = (loc) => {
   currentFile = loc;
 };
@@ -58,6 +60,7 @@ export function resetFile() {
   fileEl.replaceChildren();
 }
 
+// showFile fetches and renders a file, resolving to whether it loaded.
 export async function showFile(loc) {
   // Abort any in-flight fetch so a slow stale response can never render
   // over a newer navigation (mirrors the search path).
@@ -72,9 +75,9 @@ export async function showFile(loc) {
       fileCtl.signal,
     );
   } catch (e) {
-    if (e.name === 'AbortError') return;
+    if (e.name === 'AbortError') return false;
     fileEl.replaceChildren(fileHeader(loc, null), errorBox(friendlyFileError(e)));
-    return;
+    return false;
   }
   currentFileData = data;
   const body = document.createElement('div');
@@ -92,6 +95,7 @@ export async function showFile(loc) {
   const target = same ? currentFile : loc;
   fileEl.replaceChildren(fileHeader(target, data), body);
   if (target.line) targetLines(target.line, target.endLine, true);
+  return true;
 }
 
 function fileHeader(loc, data) {

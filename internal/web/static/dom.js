@@ -4,6 +4,11 @@ export const $ = (sel, el = document) => el.querySelector(sel);
 
 export const plural = (n, one, many) => (n === 1 ? one : many);
 
+// isMac picks the platform's primary modifier for shortcuts: Cmd on a Mac,
+// Ctrl elsewhere. userAgentData replaces the deprecated navigator.platform
+// where it exists.
+export const isMac = /mac|iphone|ipad/i.test(navigator.userAgentData?.platform ?? navigator.platform);
+
 const COPY_FEEDBACK_MS = 1000;
 
 // ---------------------------------------------------------------------------

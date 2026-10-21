@@ -1,9 +1,11 @@
 'use strict';
 
 import { api } from './api.js';
+import { isMac } from './dom.js';
 import { createLookup } from './palette-lookup.js';
 import {
   fuzzyFilter,
+  PREFIXES,
   keyIntent,
   lookupQuery,
   mergeFiles,
@@ -36,7 +38,6 @@ const RECENT_KEY = 'muninn.recentFiles';
 const RECENT_MAX = 8;
 const TOAST_MS = 1400;
 
-export const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
 
 let opts = null;
 let dlg = null;
@@ -56,15 +57,16 @@ const lookup = createLookup({
     if (!paletteOpen()) return;
     update(false);
     const i = picker.settle({ ok });
-    if (i >= 0) runItem(items[i]);
+    if (i >= 0 && items[i]) runItem(items[i]);
   },
 });
 
 // initPalette builds the dialog. o supplies:
 //   commands()        context-aware command list ({title, detail, keys,
-//                     run, stay, toast}); stay re-opens the palette with
-//                     that prefix instead of running anything
+//                     run, prefix, toast}); prefix re-opens the palette
+//                     with that input instead of running anything
 //   currentFile()     the showing file location, or null
+//   fileLines()       the showing file's line count, or 0 before it loads
 //   search(q)         run a code search
 //   searchRepo(repo)  narrow the search to one repo
 export function initPalette(o) {
@@ -96,9 +98,7 @@ export function initPalette(o) {
     ['↑↓', 'navigate'],
     ['↵', 'run'],
     ['esc', 'close'],
-    ['>', 'commands'],
-    ['@', 'symbols'],
-    [':', 'line'],
+    ...PREFIXES.map((p) => [p.char, p.label]),
   ]) {
     const kbd = document.createElement('kbd');
     kbd.textContent = k;
@@ -119,7 +119,14 @@ export function initPalette(o) {
     update(true);
   });
   input.addEventListener('keydown', onKey);
+  // Only real pointer movement selects: browsers also fire mousemove when
+  // the list scrolls or re-renders under a resting pointer, which would
+  // otherwise take the selection from the keyboard.
+  let lastPointer = '';
   listEl.addEventListener('mousemove', (e) => {
+    const at = `${e.screenX},${e.screenY}`;
+    if (at === lastPointer) return;
+    lastPointer = at;
     const li = e.target.closest('li[data-i]');
     if (li && Number(li.dataset.i) !== picker.active()) {
       showActive(picker.hover(Number(li.dataset.i)), false);
@@ -129,9 +136,15 @@ export function initPalette(o) {
     const li = e.target.closest('li[data-i]');
     if (li) runItem(items[Number(li.dataset.i)]);
   });
-  // A click on the backdrop lands on the dialog element itself.
+  // A click on the backdrop lands on the dialog element itself. It must
+  // also have started there: a text selection dragged out of the input and
+  // released over the backdrop fires the same click.
+  let downOnBackdrop = false;
+  dlg.addEventListener('mousedown', (e) => {
+    downOnBackdrop = e.target === dlg;
+  });
   dlg.addEventListener('click', (e) => {
-    if (e.target === dlg) dlg.close();
+    if (e.target === dlg && downOnBackdrop) dlg.close();
   });
   dlg.addEventListener('close', () => {
     lookup.cancel();
@@ -221,11 +234,14 @@ function update(reset = true) {
       files.stale = files.stale.map(atLine);
       groups.push(files);
     } else {
+      // Files lead: typed text is most often a file, and a command picked
+      // by a short term ("cl" for Clear search) is a worse surprise than a
+      // file. ">" lists commands alone.
+      groups.push(files);
       groups.push({
         label: 'Commands',
         items: fuzzyFilter(opts.commands(), term).slice(0, MAX_COMMANDS_MIXED),
       });
-      groups.push(files);
       groups.push({ label: 'Repositories', items: repoItems(term) });
     }
     groups.push({
@@ -261,6 +277,10 @@ function lineGroup(term) {
   if (!f) return { label: 'Go to line', items: [], note: 'Open a file first.' };
   const t = parseLineRange(term);
   if (!t) return { label: 'Go to line', items: [], note: 'Type a line number, or a range like 10-20.' };
+  const n = opts.fileLines();
+  if (n && Math.max(t.line, t.endLine) > n) {
+    return { label: 'Go to line', items: [], note: `This file has ${n} ${n === 1 ? 'line' : 'lines'}.` };
+  }
   const title = t.endLine ? `Go to lines ${t.line}–${t.endLine}` : `Go to line ${t.line}`;
   return {
     label: 'Go to line',
@@ -504,8 +524,8 @@ function onKey(e) {
 // runItem closes the palette before running, so a command that moves focus
 // (focusing the search box) is not undone by the dialog restoring focus.
 async function runItem(it) {
-  if (it.stay !== undefined) {
-    input.value = it.stay;
+  if (it.prefix !== undefined) {
+    input.value = it.prefix;
     input.focus();
     picker.input();
     update(true);

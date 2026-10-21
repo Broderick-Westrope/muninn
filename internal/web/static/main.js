@@ -1,6 +1,6 @@
 'use strict';
 
-import { $, copyText, note } from './dom.js';
+import { $, copyText, isMac, note } from './dom.js';
 import {
   activeCount,
   clearFacets,
@@ -11,6 +11,7 @@ import {
 } from './facets.js';
 import {
   fileCommands,
+  fileLineCount,
   getCurrentFile,
   initFile,
   refreshFileActions,
@@ -21,7 +22,6 @@ import {
 } from './file.js';
 import {
   initPalette,
-  isMac,
   openPalette,
   paletteOpen,
   rememberFile,
@@ -65,7 +65,9 @@ function route() {
         document.body.dataset.view === 'file'
       ) {
         setCurrentFile(loc);
-        if (loc.line) targetLines(loc.line, loc.endLine, true);
+        // A target-less hash (back to the bare file) clears the highlight,
+        // so it never disagrees with what Copy path reports.
+        targetLines(loc.line, loc.endLine, Boolean(loc.line));
         refreshFileActions();
         showTree(loc);
         return;
@@ -73,8 +75,10 @@ function route() {
       if (document.body.dataset.view === 'results') savedScroll = window.scrollY;
       setCurrentFile(loc);
       document.body.dataset.view = 'file';
-      rememberFile(loc);
-      showFile(loc);
+      // Only a file that actually loaded is worth offering again.
+      showFile(loc).then((ok) => {
+        if (ok) rememberFile(loc);
+      });
       showTree(loc);
       return;
     }
@@ -131,14 +135,18 @@ const inFileView = () => document.body.dataset.view === 'file';
 const inResultsView = () => document.body.dataset.view === 'results';
 const mod = isMac ? '⌘' : 'Ctrl';
 
-// shortcuts are the page's global keys, checked in order. Each command
-// that has a key takes its keycaps from here, and is only listed when its
-// shortcut would work, so the palette never advertises a dead key.
+// shortcuts are the page's global keys, checked in order. available() is
+// the view condition alone; commands() lists a command with a key only when
+// its shortcut is available, so the palette never advertises a dead key.
+// Only the palette chord works while the palette is open: the palette stops
+// its own keys from bubbling, and this guards against one reaching the page
+// another way.
 const shortcuts = {
   palette: {
     keys: [mod, 'K'],
+    whilePaletteOpen: true,
     match: (e) => isPaletteKey(e, isMac),
-    when: () => true,
+    available: () => true,
     run: togglePalette,
   },
   // Only in the file view: elsewhere there is no line to go to, and the
@@ -146,25 +154,23 @@ const shortcuts = {
   goToLine: {
     keys: [mod, 'G'],
     match: (e) => isGoToLineKey(e, isMac),
-    when: () => inFileView() && !paletteOpen(),
+    available: inFileView,
     run: () => openPalette(':'),
   },
-  // The rest never fire while the palette is open. It stops its own keys
-  // from bubbling; this guards against one reaching the page another way.
   // Escape's preventDefault matters: a focused type=search input would
   // otherwise clear itself natively, wiping the query on the way back.
   back: {
     keys: ['esc'],
     match: (e) => e.key === 'Escape',
-    when: () => inFileView() && !paletteOpen(),
+    available: inFileView,
     run: () => {
       location.hash = '#/';
     },
   },
   focusSearch: {
     keys: ['/'],
-    match: (e) => e.key === '/',
-    when: () => document.activeElement !== searchInput && !paletteOpen(),
+    match: (e) => e.key === '/' && document.activeElement !== searchInput,
+    available: () => true,
     run: focusSearch,
   },
   // Shift-modified so it still works with the search input focused, where
@@ -173,14 +179,15 @@ const shortcuts = {
   clearFilters: {
     keys: ['shift', '⌫'],
     match: (e) => e.key === 'Backspace' && e.shiftKey,
-    when: () => inResultsView() && activeCount() > 0 && !paletteOpen(),
+    available: () => inResultsView() && activeCount() > 0,
     run: clearFacets,
   },
 };
 
 document.addEventListener('keydown', (e) => {
   for (const s of Object.values(shortcuts)) {
-    if (s.match(e) && s.when()) {
+    if (!s.whilePaletteOpen && paletteOpen()) continue;
+    if (s.match(e) && s.available()) {
       e.preventDefault();
       s.run();
       return;
@@ -188,21 +195,23 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+const fileInView = () => (inFileView() ? getCurrentFile() : null);
+
 // commands is the palette's command list for the current view; it is
 // rebuilt on every keystroke so it always reflects the live state.
 function commands() {
-  const f = getCurrentFile();
+  const f = fileInView();
   const cmds = [{ title: 'Focus search', keys: shortcuts.focusSearch.keys, run: focusSearch }];
-  if (inFileView() && f) {
+  if (f) {
     cmds.push(...fileCommands());
     cmds.push(
-      { title: 'Go to line…', keys: shortcuts.goToLine.keys, stay: ':' },
+      { title: 'Go to line…', keys: shortcuts.goToLine.keys, prefix: ':' },
       { title: 'Search in this repo', detail: f.repo, run: () => searchInRepo(f.repo) },
       { title: 'Back to results', keys: shortcuts.back.keys, run: shortcuts.back.run },
     );
   }
   // "@" is a palette prefix, not a page shortcut, so it is shown as detail.
-  cmds.push({ title: 'Go to symbol…', detail: 'or type @', stay: '@' });
+  cmds.push({ title: 'Go to symbol…', detail: 'or type @', prefix: '@' });
   if (searchInput.value) {
     cmds.push({
       title: 'Clear search',
@@ -213,9 +222,7 @@ function commands() {
       },
     });
   }
-  // Same condition as the shortcut, minus the palette being open (it is,
-  // while this list is built).
-  if (inResultsView() && activeCount() > 0) {
+  if (shortcuts.clearFilters.available()) {
     cmds.push({ title: 'Clear all filters', keys: shortcuts.clearFilters.keys, run: clearFacets });
   }
   cmds.push({
@@ -239,7 +246,8 @@ initFacets({ facetsEl, onToggle: () => search(false, true) });
 initHints(hintsEl, searchInput);
 initPalette({
   commands,
-  currentFile: () => (document.body.dataset.view === 'file' ? getCurrentFile() : null),
+  currentFile: fileInView,
+  fileLines: fileLineCount,
   search: (q) => {
     // Show results at once: runSearch only leaves the file view after a
     // success, so a failure would otherwise render into the hidden pane.
@@ -249,8 +257,10 @@ initPalette({
   },
   searchRepo: searchInRepo,
 });
-paletteBtn.textContent = shortcuts.palette.keys.join(isMac ? '' : ' ');
-paletteBtn.title = `Command palette (${shortcuts.palette.keys.join('+')})`;
+// "⌘K" on a Mac, "Ctrl+K" elsewhere, the same everywhere it is shown.
+const paletteChord = shortcuts.palette.keys.join(isMac ? '' : '+');
+paletteBtn.textContent = paletteChord;
+paletteBtn.title = `Command palette (${paletteChord})`;
 paletteBtn.setAttribute('aria-label', paletteBtn.title);
 paletteBtn.addEventListener('click', togglePalette);
 
