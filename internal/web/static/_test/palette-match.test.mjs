@@ -8,6 +8,8 @@ import {
   keyIntent,
   lookupQuery,
   mergeFiles,
+  parse,
+  PREFIXES,
   splitLineTarget,
 } from '../palette-match.js';
 
@@ -95,4 +97,17 @@ test('chords tolerate a keydown with no key, as autofill sends', () => {
   assert.equal(keyIntent(bare, true), null);
   assert.equal(isPaletteKey(bare, true), false);
   assert.equal(isGoToLineKey(bare, true), false);
+});
+
+test('splitLineTarget keeps the file while a range is half typed', () => {
+  assert.deepEqual(splitLineTarget('payments.ts:10-'), { base: 'payments.ts', target: { line: 10, endLine: 0 } });
+});
+
+test('splitLineTarget ignores a trailing column, as compilers print', () => {
+  assert.deepEqual(splitLineTarget('foo.go:10:5'), { base: 'foo.go', target: { line: 10, endLine: 0 } });
+});
+
+test('parse reads each prefix in PREFIXES as its mode', () => {
+  for (const p of PREFIXES) assert.deepEqual(parse(`${p.char} x `), { mode: p.mode, term: 'x' });
+  assert.deepEqual(parse(' x '), { mode: 'all', term: 'x' });
 });

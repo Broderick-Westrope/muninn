@@ -5,26 +5,33 @@
 
 import { parseLineRange } from './routes.js';
 
+// PREFIXES are the palette's modes, by leading character. parse reads
+// them and the palette footer lists them, so a new mode is added once.
+export const PREFIXES = [
+  { char: '>', mode: 'commands', label: 'commands' },
+  { char: '@', mode: 'symbols', label: 'symbols' },
+  { char: ':', mode: 'line', label: 'line' },
+];
+
 // parse splits palette input into its mode (by leading prefix) and term.
 export function parse(v) {
-  const c = v[0];
-  if (c === '>') return { mode: 'commands', term: v.slice(1).trim() };
-  if (c === '@') return { mode: 'symbols', term: v.slice(1).trim() };
-  if (c === ':') return { mode: 'line', term: v.slice(1).trim() };
-  return { mode: 'all', term: v.trim() };
+  const p = PREFIXES.find((x) => x.char === v[0]);
+  return p ? { mode: p.mode, term: v.slice(1).trim() } : { mode: 'all', term: v.trim() };
 }
 
 // splitLineTarget separates "payments.ts:15" into the file term and its
-// line target. A bare ":15" is the go-to-line mode, not this. A trailing
-// colon (typed on the way to "main.go:15") is dropped rather than searched.
+// line target. A bare ":15" is the go-to-line mode, not this. Forms met on
+// the way to, or around, a target keep the file term so its lookup is not
+// thrown away: a trailing colon ("main.go:"), a half-typed range
+// ("main.go:10-", read as line 10), and a trailing column as compilers
+// print it ("main.go:10:5").
 export function splitLineTarget(term) {
-  const at = term.lastIndexOf(':');
-  if (at <= 0) return { base: term, target: null };
-  const base = term.slice(0, at).trim();
-  const rest = term.slice(at + 1).trim();
-  if (!rest && base) return { base, target: null };
-  const target = parseLineRange(rest);
-  return target && base ? { base, target } : { base: term, target: null };
+  const m = term.match(/^(.*?):\s*(\d+(?:\s*-\s*\d+)?)?\s*-?\s*(?::\d+)?$/);
+  const base = m ? m[1].trim() : '';
+  if (!m || !base) return { base: term, target: null };
+  if (!m[2]) return { base, target: null };
+  const target = parseLineRange(m[2]);
+  return target ? { base, target } : { base: term, target: null };
 }
 
 // escapeRe makes a typed token match literally: file: and sym: take regexes.
@@ -57,7 +64,6 @@ export function mergeFiles(scoped, global) {
   }
   return out;
 }
-
 
 // fuzzyFilter keeps the items whose title matches term, best first.
 export function fuzzyFilter(list, term) {
