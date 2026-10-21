@@ -64,7 +64,11 @@ func serveOnce(t *testing.T, socket, identity string, g *gate) (<-chan error, <-
 	return errs, conns
 }
 
-func noStart(context.Context) error { return errors.New("no daemon in this test") }
+// errNoStart is what noStart fails with, so a test can tell Dial asked
+// for a daemon from Dial giving up for some other reason.
+var errNoStart = errors.New("no daemon in this test")
+
+func noStart(context.Context) error { return errNoStart }
 
 func TestDialAdmitted(t *testing.T) {
 	socket := shortSocketPath(t)
@@ -91,9 +95,11 @@ func TestDialRefused(t *testing.T) {
 		serverIdentity string
 		open           bool
 		wantAdmitErr   error
+		wantDialErr    error
 	}{
-		"identity mismatch": {serverIdentity: "other", open: true, wantAdmitErr: ErrIdentityMismatch},
-		"draining":          {serverIdentity: "abc", open: false, wantAdmitErr: ErrDraining},
+		"identity mismatch": {serverIdentity: "other", open: true, wantAdmitErr: ErrIdentityMismatch, wantDialErr: ErrIdentityMismatch},
+		// A draining daemon is a reason to start a new one.
+		"draining": {serverIdentity: "abc", open: false, wantAdmitErr: ErrDraining, wantDialErr: errNoStart},
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -103,8 +109,9 @@ func TestDialRefused(t *testing.T) {
 
 			ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 			defer cancel()
-			if _, err := Dial(ctx, socket, "abc", noStart); !errors.Is(err, ErrNotAdmitted) {
-				t.Errorf("Dial err = %v, want ErrNotAdmitted", err)
+			_, err := Dial(ctx, socket, "abc", noStart)
+			if !errors.Is(err, ErrNotAdmitted) || !errors.Is(err, tc.wantDialErr) {
+				t.Errorf("Dial err = %v, want ErrNotAdmitted wrapping %v", err, tc.wantDialErr)
 			}
 			if err := <-errs; !errors.Is(err, tc.wantAdmitErr) {
 				t.Errorf("Admit err = %v, want %v", err, tc.wantAdmitErr)
@@ -134,8 +141,8 @@ func TestDialSilentServerTimesOut(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	start := time.Now()
-	if _, err := Dial(ctx, socket, "abc", noStart); !errors.Is(err, ErrNotAdmitted) {
-		t.Errorf("Dial err = %v, want ErrNotAdmitted", err)
+	if _, err := Dial(ctx, socket, "abc", noStart); !errors.Is(err, ErrNotAdmitted) || !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Errorf("Dial err = %v, want an admission timeout", err)
 	}
 	if elapsed := time.Since(start); elapsed > 2500*time.Millisecond {
 		t.Errorf("Dial took %v, want it bounded by the context", elapsed)
@@ -223,8 +230,8 @@ func TestDialStartError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	start := time.Now()
-	if _, err := Dial(ctx, socket, "abc", noStart); !errors.Is(err, ErrNotAdmitted) {
-		t.Errorf("Dial err = %v, want ErrNotAdmitted", err)
+	if _, err := Dial(ctx, socket, "abc", noStart); !errors.Is(err, ErrNotAdmitted) || !errors.Is(err, errNoStart) {
+		t.Errorf("Dial err = %v, want the start error", err)
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Errorf("Dial took %v after start failed, want an immediate return", elapsed)
@@ -368,8 +375,8 @@ func TestDialGivesUpOnAnUnexpectedReply(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	start := time.Now()
-	if _, err := Dial(ctx, socket, "abc", noStart); !errors.Is(err, ErrNotAdmitted) {
-		t.Errorf("Dial err = %v, want ErrNotAdmitted", err)
+	if _, err := Dial(ctx, socket, "abc", noStart); !errors.Is(err, ErrNotAdmitted) || !errors.Is(err, ErrRefused) {
+		t.Errorf("Dial err = %v, want a refusal", err)
 	}
 	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
 		t.Errorf("Dial took %v, want it to give up at once on a reply it can't use", elapsed)
@@ -438,10 +445,16 @@ func TestConnectStartsNoDaemonWhileOneIsStarting(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	Connect(ctx, spec)
-
+	begin := time.Now()
+	// It waits for the starting daemon until its budget runs out.
+	if _, err := Connect(ctx, spec); !errors.Is(err, ErrNotAdmitted) || !isNoListener(err) {
+		t.Errorf("Connect err = %v, want it still waiting for a listener", err)
+	}
+	if elapsed := time.Since(begin); elapsed < 900*time.Millisecond {
+		t.Errorf("Connect gave up after %v, want it to wait out its budget", elapsed)
+	}
 	if _, err := os.Stat(marker); err == nil {
 		t.Error("Connect started a daemon while another held the lock")
 	}
