@@ -164,8 +164,16 @@ function render(errMsg) {
     return;
   }
   if (!universe) {
-    // Nothing loaded yet: show a placeholder only while actually waiting.
-    facetsEl.replaceChildren(loading ? note('Loading filters…') : document.createDocumentFragment());
+    // Nothing loaded yet, but a selection (from "search in this repo" or a
+    // shared link) still applies to the next search, so show it rather than
+    // leaving it invisible until the user types.
+    if (activeCount() > 0) {
+      facetsEl.replaceChildren(selectionOnly());
+    } else {
+      // Show a placeholder only while actually waiting.
+      facetsEl.replaceChildren(loading ? note('Loading filters…') : document.createDocumentFragment());
+    }
+    facetsEl.classList.toggle('loading', loading);
     return;
   }
   const frag = document.createDocumentFragment();
@@ -188,6 +196,16 @@ function render(errMsg) {
   facetsEl.classList.toggle('loading', loading);
 }
 
+// selectionOnly renders just the selected values, without counts: with no
+// universe loaded there is nothing to count them against.
+function selectionOnly() {
+  const frag = document.createDocumentFragment();
+  frag.append(clearBar());
+  if (selected.repo.size) frag.append(group('Repository', 'repo', [], false));
+  if (selected.ext.size) frag.append(group('File type', 'ext', [], false));
+  return frag;
+}
+
 // clearBar reports how many filters are active and clears them all. Undoing
 // a multi-category selection chip by chip re-runs a search per click, and
 // with the sidebar hidden below the mobile breakpoint the only other way out
@@ -208,7 +226,8 @@ function clearBar() {
   return bar;
 }
 
-function group(title, kind, values) {
+// known is false when there is no universe to count against.
+function group(title, kind, values, known = true) {
   const section = document.createElement('section');
   section.className = 'facet-group';
   const h = document.createElement('h3');
@@ -217,9 +236,10 @@ function group(title, kind, values) {
 
   const counts = new Map((values || []).map((v) => [v.value, v.count]));
   // Union of the universe and the selection, so a selection is always
-  // deselectable even when it matches nothing.
+  // deselectable even when it matches nothing. Without a universe the count
+  // is unknown, not zero.
   for (const v of selected[kind]) {
-    if (!counts.has(v)) counts.set(v, 0);
+    if (!counts.has(v)) counts.set(v, known ? 0 : null);
   }
   if (counts.size === 0) {
     const empty = document.createElement('p');
@@ -245,11 +265,15 @@ function chip(kind, value, count) {
   const label = document.createElement('span');
   label.className = 'facet-value';
   label.textContent = value === NO_EXT && kind === 'ext' ? 'no extension' : value;
-  const n = document.createElement('span');
-  n.className = 'facet-count';
-  n.textContent = count;
-  b.append(label, n);
-  b.title = `${label.textContent} · ${count}`;
+  b.append(label);
+  b.title = label.textContent;
+  if (count !== null) {
+    const n = document.createElement('span');
+    n.className = 'facet-count';
+    n.textContent = count;
+    b.append(n);
+    b.title += ` · ${count}`;
+  }
   b.addEventListener('click', () => toggle(kind, value));
   return b;
 }

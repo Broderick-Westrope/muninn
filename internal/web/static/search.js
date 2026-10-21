@@ -27,7 +27,7 @@ export async function runSearch(q, fromUser, facetParams = '') {
 
   if (searchCtl) searchCtl.abort();
   if (!q) {
-    resultsEl.replaceChildren(note('Type to search across all indexed repos.'));
+    resultsEl.replaceChildren(note(emptyPrompt(facetParams)));
     statsEl.hidden = true;
     return;
   }
@@ -50,6 +50,11 @@ export async function runSearch(q, fromUser, facetParams = '') {
   // would yank a deep-linked file view away).
   if (fromUser && location.hash.startsWith('#/file/')) location.hash = '#/';
 }
+
+// emptyPrompt is the no-query message; it must not promise a search of
+// every repo while filters will narrow it.
+export const emptyPrompt = (facetParams = '') =>
+  facetParams ? 'Type to search within the selected filters.' : 'Type to search across all indexed repos.';
 
 function renderResults(data, tokens) {
   const groups = new Map();

@@ -31,7 +31,7 @@ import {
 import { initHints } from './query.js';
 import { loadRepos } from './repos.js';
 import { parseFileHash } from './routes.js';
-import { initSearch, runSearch } from './search.js';
+import { emptyPrompt, initSearch, runSearch } from './search.js';
 import { initTree, showTree } from './tree.js';
 
 const searchInput = $('#q');
@@ -238,7 +238,9 @@ if (initialQ) {
   runSearch(initialQ, false, facetParams());
   loadFacets(initialQ, true);
 } else {
-  resultsEl.replaceChildren(note('Type to search across all indexed repos.'));
+  resultsEl.replaceChildren(note(emptyPrompt(facetParams())));
+  // Renders a linked selection with no query, which fetches nothing.
+  loadFacets('');
 }
 route();
 window.addEventListener('hashchange', route);
