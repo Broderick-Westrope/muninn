@@ -120,6 +120,12 @@ Tools: `grep`, `glob`, `list_repos`, `read_file`, `list_tree`, `find_symbol_defi
 
 Every session shares one background server per index, so opening more agent sessions costs about 3 MB each instead of a full copy of the searcher. `muninn mcp` starts that server on demand and hands its stdio to it through `muninn-mcp-proxy`, which ships alongside `muninn`. The server exits after 5 minutes with no sessions and logs to `mcp.log` in the state directory (`~/.local/state/muninn/` by default). If it can't be reached within 5 s, the session is served in-process as before and says why on stderr. `muninn mcp --in-process` always serves in-process, which is useful for ruling out the shared server when debugging; `pkill -f 'muninn mcp --daemon'` stops a running one. That ends every open session, which exits with an error; the next session starts a fresh server.
 
+### Web UI
+
+Press ⌘K (Ctrl+K off macOS) for the command palette: type a file name to open it (`payments.ts:15` opens at that line), `@` for symbol definitions, `:` for a line in the open file, `>` for commands, or `repo:<name>` to narrow a lookup. ⌘G jumps to a line in the open file, `/` focuses search, Shift+⌫ clears filters, and shift-clicking line numbers selects a range for the GitHub permalink.
+
+The UI's JavaScript tests run under `go test` when `node` is on your PATH, and are skipped otherwise.
+
 ## Data
 
 XDG paths: mirrors + index under `~/.local/share/muninn/`, sync status + logs under `~/.local/state/muninn/`. Nothing stays resident for long: the shared MCP server exits 5 minutes after its last session ends, the web UI runs only until Ctrl-C, and sync is a short-lived scheduled job.
