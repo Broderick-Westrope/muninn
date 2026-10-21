@@ -6,6 +6,9 @@ import { fileHash } from './routes.js';
 // The command palette (Cmd/Ctrl+K). Plain text mixes commands, recent and
 // matching files, repos, and a code search; a leading ">" narrows to
 // commands, "@" to symbol definitions, and ":" to a line in the open file.
+// A trailing ":<line>" or ":<start>-<end>" on a file lookup
+// ("payments.ts:15") opens the chosen file at that line, as in an editor's
+// quick open.
 //
 // This module owns no app state. main.js injects the context-aware command
 // list and the search actions, so the palette never imports the modules
@@ -58,7 +61,7 @@ export function initPalette(o) {
   input = document.createElement('input');
   input.type = 'text';
   input.className = 'pal-input';
-  input.placeholder = 'Type a command, file, or repo — > commands, @ symbols, : line';
+  input.placeholder = 'Type a command, file[:line], or repo — > commands, @ symbols, : line';
   input.autocomplete = 'off';
   input.spellcheck = false;
   input.setAttribute('autocapitalize', 'off');
@@ -118,6 +121,10 @@ export function initPalette(o) {
 
 export const paletteOpen = () => Boolean(dlg && dlg.open);
 
+// isGoToLineKey is Cmd+G (Ctrl+G off a Mac), the editor go-to-line chord.
+export const isGoToLineKey = (e) =>
+  (isMac ? e.metaKey : e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'g';
+
 export function togglePalette() {
   if (paletteOpen()) dlg.close();
   else openPalette('');
@@ -172,6 +179,30 @@ function parse(v) {
   return { mode: 'all', term: v.trim() };
 }
 
+// parseLines reads "15" or "10-20" as a line target, normalising a
+// reversed range; null when s is not a line target.
+function parseLines(s) {
+  const m = s.match(/^(\d+)(?:\s*-\s*(\d+))?$/);
+  if (!m) return null;
+  let line = Number(m[1]);
+  let endLine = m[2] ? Number(m[2]) : 0;
+  if (endLine && endLine < line) [line, endLine] = [endLine, line];
+  if (endLine === line) endLine = 0;
+  return line > 0 ? { line, endLine } : null;
+}
+
+// splitLineTarget separates "payments.ts:15" into the file term and its
+// line target. A bare ":15" is the go-to-line mode, not this.
+function splitLineTarget(term) {
+  const at = term.lastIndexOf(':');
+  if (at <= 0) return { base: term, target: null };
+  const target = parseLines(term.slice(at + 1).trim());
+  const base = term.slice(0, at).trim();
+  return target && base ? { base, target } : { base: term, target: null };
+}
+
+const lineSuffix = (t) => (t.endLine ? `:${t.line}-${t.endLine}` : `:${t.line}`);
+
 function update() {
   const { mode, term } = parse(input.value);
   const groups = [];
@@ -185,12 +216,25 @@ function update() {
     groups.push({ label: 'Recent files', items: recentItems() });
     groups.push({ label: 'Commands', items: opts.commands() });
   } else {
-    groups.push({
-      label: 'Commands',
-      items: fuzzyFilter(opts.commands(), term).slice(0, MAX_COMMANDS_MIXED),
-    });
-    groups.push(remoteGroup('Files', 'file', term, MAX_FILES));
-    groups.push({ label: 'Repositories', items: repoItems(term) });
+    const { base, target } = splitLineTarget(term);
+    const files = remoteGroup('Files', 'file', base, MAX_FILES);
+    if (target) {
+      // A line target says the user wants a file, so files lead and the
+      // chosen one opens at that line.
+      files.items = files.items.map((it) => ({
+        ...it,
+        title: it.title + lineSuffix(target),
+        run: () => goTo(it.repo, it.path, target.line, target.endLine),
+      }));
+      groups.push(files);
+    } else {
+      groups.push({
+        label: 'Commands',
+        items: fuzzyFilter(opts.commands(), term).slice(0, MAX_COMMANDS_MIXED),
+      });
+      groups.push(files);
+      groups.push({ label: 'Repositories', items: repoItems(term) });
+    }
     groups.push({
       label: 'Search',
       items: [{ title: `Search code for “${term}”`, run: () => opts.search(term) }],
@@ -219,16 +263,12 @@ function repoItems(term) {
 function lineGroup(term) {
   const f = opts.currentFile();
   if (!f) return { label: 'Go to line', items: [], note: 'Open a file first.' };
-  const m = term.match(/^(\d+)(?:\s*-\s*(\d+))?$/);
-  if (!m) return { label: 'Go to line', items: [], note: 'Type a line number, or a range like 10-20.' };
-  let a = Number(m[1]);
-  let b = m[2] ? Number(m[2]) : 0;
-  if (b && b < a) [a, b] = [b, a];
-  if (b === a) b = 0;
-  const title = b ? `Go to lines ${a}–${b}` : `Go to line ${a}`;
+  const t = parseLines(term);
+  if (!t) return { label: 'Go to line', items: [], note: 'Type a line number, or a range like 10-20.' };
+  const title = t.endLine ? `Go to lines ${t.line}–${t.endLine}` : `Go to line ${t.line}`;
   return {
     label: 'Go to line',
-    items: [{ title, detail: f.path, run: () => goTo(f.repo, f.path, a, b) }],
+    items: [{ title, detail: f.path, run: () => goTo(f.repo, f.path, t.line, t.endLine) }],
   };
 }
 
@@ -299,6 +339,8 @@ function fileItems(data, term) {
       title: f.path,
       positions: substringPositions(f.path, term),
       detail: f.repo,
+      repo: f.repo,
+      path: f.path,
       run: () => goTo(f.repo, f.path),
     }));
 }
@@ -500,6 +542,11 @@ function onKey(e) {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
     e.preventDefault();
     dlg.close();
+  } else if (isGoToLineKey(e)) {
+    // Also swallowed without a file open: the browser's find-next would
+    // otherwise fire behind the modal.
+    e.preventDefault();
+    if (opts.currentFile()) openPalette(':');
   } else if (e.key === 'ArrowDown' || (ctrlOnly && e.key === 'n')) {
     e.preventDefault();
     setActive(active + 1, false);

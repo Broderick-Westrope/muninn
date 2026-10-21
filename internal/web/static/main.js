@@ -19,7 +19,15 @@ import {
   showFile,
   targetLines,
 } from './file.js';
-import { initPalette, isMac, paletteOpen, rememberFile, togglePalette } from './palette.js';
+import {
+  initPalette,
+  isGoToLineKey,
+  isMac,
+  openPalette,
+  paletteOpen,
+  rememberFile,
+  togglePalette,
+} from './palette.js';
 import { initHints } from './query.js';
 import { loadRepos } from './repos.js';
 import { parseFileHash } from './routes.js';
@@ -128,7 +136,7 @@ function commands() {
   if (inFile && f) {
     cmds.push(...fileCommands());
     cmds.push(
-      { title: 'Go to line…', keys: [':'], stay: ':' },
+      { title: 'Go to line…', keys: isMac ? ['⌘', 'G'] : ['Ctrl', 'G'], stay: ':' },
       { title: 'Search in this repo', detail: f.repo, run: () => searchInRepo(f.repo) },
       {
         title: 'Back to results',
@@ -165,6 +173,13 @@ document.addEventListener('keydown', (e) => {
   if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'k') {
     e.preventDefault();
     togglePalette();
+    return;
+  }
+  // Only in the file view: elsewhere there is no line to go to, and the
+  // browser's own find-next keeps working.
+  if (isGoToLineKey(e) && document.body.dataset.view === 'file' && !paletteOpen()) {
+    e.preventDefault();
+    openPalette(':');
     return;
   }
   // The palette stops its own keys from bubbling; this guards against a
