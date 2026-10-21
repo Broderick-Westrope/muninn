@@ -805,9 +805,15 @@ dialog.palette::backdrop {
   cursor: pointer;
 }
 
-.facet-clear:hover,
+.facet-clear:enabled:hover,
 .facet-clear:focus-visible {
   border-color: var(--accent);
+}
+
+.facet-clear:disabled {
+  color: var(--muted);
+  opacity: 0.5;
+  cursor: default;
 }
 
 .facet-group {

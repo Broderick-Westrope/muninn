@@ -159,51 +159,37 @@ export function selectOnly(kind, value) {
 // remove it.
 function render(errMsg) {
   if (!facetsEl) return;
-  if (errMsg) {
-    facetsEl.replaceChildren(errorBox(errMsg));
-    return;
-  }
-  if (!universe) {
-    // Nothing loaded yet, but a selection (from "search in this repo" or a
-    // shared link) still applies to the next search, so show it rather than
-    // leaving it invisible until the user types.
-    if (activeCount() > 0) {
-      facetsEl.replaceChildren(selectionOnly());
-    } else {
-      // Show a placeholder only while actually waiting.
-      facetsEl.replaceChildren(loading ? note('Loading filters…') : document.createDocumentFragment());
-    }
-    facetsEl.classList.toggle('loading', loading);
-    return;
-  }
+  // The clear bar is always the first row, disabled when nothing is
+  // selected, so the panel does not jump on the first select or the last
+  // deselect.
   const frag = document.createDocumentFragment();
-  // Only shown when something is selected: with nothing active it would be
-  // a permanently dead control.
-  if (activeCount() > 0) frag.append(clearBar());
-  frag.append(
-    group('Repository', 'repo', universe.repos),
-    group('File type', 'ext', universe.exts),
-  );
-  if (universe.partial) {
-    const p = document.createElement('p');
-    p.className = 'facet-note';
-    p.textContent = 'Too many matches to count them all — some counts are missing.';
-    frag.append(p);
+  frag.append(clearBar());
+  if (errMsg) {
+    frag.append(errorBox(errMsg));
+  } else if (!universe) {
+    // Nothing loaded yet, but a selection (from "search in this repo" or a
+    // shared link) still applies to the next search, so show it, without
+    // counts: there is nothing to count it against yet.
+    if (selected.repo.size) frag.append(group('Repository', 'repo', [], false));
+    if (selected.ext.size) frag.append(group('File type', 'ext', [], false));
+    // Show a placeholder only while actually waiting.
+    if (loading && activeCount() === 0) frag.append(note('Loading filters…'));
+  } else {
+    frag.append(
+      group('Repository', 'repo', universe.repos),
+      group('File type', 'ext', universe.exts),
+    );
+    if (universe.partial) {
+      const p = document.createElement('p');
+      p.className = 'facet-note';
+      p.textContent = 'Too many matches to count them all — some counts are missing.';
+      frag.append(p);
+    }
   }
   facetsEl.replaceChildren(frag);
   // Dim rather than blank while refreshing: the old values stay readable and
   // clickable, so the panel does not flicker on every keystroke.
-  facetsEl.classList.toggle('loading', loading);
-}
-
-// selectionOnly renders just the selected values, without counts: with no
-// universe loaded there is nothing to count them against.
-function selectionOnly() {
-  const frag = document.createDocumentFragment();
-  frag.append(clearBar());
-  if (selected.repo.size) frag.append(group('Repository', 'repo', [], false));
-  if (selected.ext.size) frag.append(group('File type', 'ext', [], false));
-  return frag;
+  facetsEl.classList.toggle('loading', loading && !errMsg);
 }
 
 // clearBar reports how many filters are active and clears them all. Undoing
@@ -215,12 +201,13 @@ function clearBar() {
   bar.className = 'facet-clear-bar';
   const n = activeCount();
   const count = document.createElement('span');
-  count.textContent = `${n} ${n === 1 ? 'filter' : 'filters'}`;
+  count.textContent = n === 0 ? 'No filters' : `${n} ${n === 1 ? 'filter' : 'filters'}`;
   const b = document.createElement('button');
   b.type = 'button';
   b.className = 'facet-clear';
   b.textContent = 'Clear';
   b.title = 'Clear all filters (Shift+Backspace)';
+  b.disabled = n === 0;
   b.addEventListener('click', clearFacets);
   bar.append(count, b);
   return bar;
