@@ -51,7 +51,10 @@ func serve(ctx context.Context, ln net.Listener, srv *sdk.Server, identity strin
 			// every session for them wouldn't. Back off like net/http.
 			backoff = min(max(2*backoff, 5*time.Millisecond), time.Second)
 			log.Printf("accepting a connection: %v; retrying in %v", err, backoff)
-			time.Sleep(backoff)
+			select {
+			case <-ctx.Done():
+			case <-time.After(backoff):
+			}
 			continue
 		}
 		backoff = 0
