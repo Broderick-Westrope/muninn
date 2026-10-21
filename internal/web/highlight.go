@@ -21,13 +21,14 @@ const (
 	maxHighlightLines = 10_000
 )
 
-// Chroma style names for the generated stylesheet. Both are emitted by
-// /chroma.css — the dark one scoped under a prefers-color-scheme media
-// query — so the viewer follows the system theme with class-based CSS
-// only (no inline styles in the highlighted HTML).
-const (
-	lightStyleName = "github"
-	darkStyleName  = "github-dark"
+// Chroma styles for the generated stylesheet. Both are emitted by
+// /chroma.css — each scoped under a prefers-color-scheme media query — so
+// the viewer follows the system theme with class-based CSS only (no inline
+// styles in the highlighted HTML). The light style is Tokyo Night's own
+// day variant so both modes share one palette.
+var (
+	lightStyle = styles.Get("tokyonight-day")
+	darkStyle  = anvilNight
 )
 
 // htmlFormatter emits class-based HTML (WithClasses: no inline styles)
@@ -60,14 +61,14 @@ func highlight(path, content string, totalLines int) string {
 	var b strings.Builder
 	// With classes enabled the style only matters for CSS generation, but
 	// Format still requires one; pass the light style for consistency.
-	if err := htmlFormatter.Format(&b, styles.Get(lightStyleName), iterator); err != nil {
+	if err := htmlFormatter.Format(&b, lightStyle, iterator); err != nil {
 		return ""
 	}
 	return b.String()
 }
 
 // chromaCSS is generated once on first request: the stylesheet content is
-// a pure function of the pinned chroma version and the two style names.
+// a pure function of the pinned chroma version and the two styles.
 var (
 	chromaCSSOnce sync.Once
 	chromaCSS     []byte
@@ -82,9 +83,9 @@ func (s *Server) handleChromaCSS(w http.ResponseWriter, _ *http.Request) {
 		var b bytes.Buffer
 		// WriteCSS only fails on writer errors; bytes.Buffer cannot fail.
 		b.WriteString("@media (prefers-color-scheme: light) {\n")
-		_ = htmlFormatter.WriteCSS(&b, styles.Get(lightStyleName))
+		_ = htmlFormatter.WriteCSS(&b, lightStyle)
 		b.WriteString("}\n@media (prefers-color-scheme: dark) {\n")
-		_ = htmlFormatter.WriteCSS(&b, styles.Get(darkStyleName))
+		_ = htmlFormatter.WriteCSS(&b, darkStyle)
 		b.WriteString("}\n")
 		chromaCSS = b.Bytes()
 	})
