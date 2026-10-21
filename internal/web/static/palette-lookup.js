@@ -24,9 +24,11 @@ export function createLookup({ fetch, debounceMs, onSettle }) {
 
   function cancel() {
     abortPending();
-    // A failure is kept only while its palette session lasts: re-rendering
-    // must not retry it in a loop, but the next session should.
-    if (done.error) done = { key: '', items: [], truncated: false, error: '' };
+    // Results last until no lookup is wanted (the palette closed, or the
+    // input left lookup mode): until then re-renders reuse them and a
+    // failure is not retried in a loop, but the index can change between
+    // uses, moving files and symbol lines.
+    done = { key: '', items: [], truncated: false, error: '' };
   }
 
   function start(key, args) {

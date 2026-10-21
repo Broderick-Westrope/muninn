@@ -138,3 +138,20 @@ test('a failed lookup is retried after cancel', async () => {
   assert.equal(v.pending, true);
   assert.equal(f.calls.length, 2);
 });
+
+test('cancel forgets successful results so the next session refetches', async () => {
+  const f = deferredFetch();
+  const lookup = createLookup({ fetch: f.fetch, debounceMs: 0, onSettle: () => {} });
+  lookup.view('a', 'a');
+  await tick();
+  f.calls[0].resolve({ items: ['a.ts'], truncated: false });
+  await tick();
+
+  lookup.cancel();
+  const v = lookup.view('a', 'a');
+  await tick();
+
+  assert.equal(v.fresh, false);
+  assert.deepEqual(v.stale, []);
+  assert.equal(f.calls.length, 2);
+});

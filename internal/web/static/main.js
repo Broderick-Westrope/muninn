@@ -220,6 +220,9 @@ initPalette({
   commands,
   currentFile: () => (document.body.dataset.view === 'file' ? getCurrentFile() : null),
   search: (q) => {
+    // Show results at once: runSearch only leaves the file view after a
+    // success, so a failure would otherwise render into the hidden pane.
+    location.hash = '#/';
     searchInput.value = q;
     search(true);
   },
