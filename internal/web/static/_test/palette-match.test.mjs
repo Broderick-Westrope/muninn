@@ -3,6 +3,8 @@ import { test } from 'node:test';
 
 import {
   fuzzy,
+  isGoToLineKey,
+  isPaletteKey,
   keyIntent,
   lookupQuery,
   mergeFiles,
@@ -69,4 +71,28 @@ test('lookupQuery passes repo: atoms through to scope a lookup', () => {
 
 test('splitLineTarget drops a trailing colon typed before the line number', () => {
   assert.deepEqual(splitLineTarget('main.go:'), { base: 'main.go', target: null });
+});
+
+test('isPaletteKey is Cmd+K on a Mac and Ctrl+K elsewhere, with no other modifiers', () => {
+  assert.equal(isPaletteKey(key('k', { metaKey: true }), true), true);
+  assert.equal(isPaletteKey(key('k', { ctrlKey: true }), true), false);
+  assert.equal(isPaletteKey(key('k', { ctrlKey: true }), false), true);
+  assert.equal(isPaletteKey(key('k', { metaKey: true, shiftKey: true }), true), false);
+});
+
+test('keyIntent closes only on the palette chord, not its variants', () => {
+  assert.equal(keyIntent(key('k', { ctrlKey: true }), true), null);
+  assert.equal(keyIntent(key('k', { metaKey: true, shiftKey: true }), true), null);
+});
+
+test('Ctrl+N and Ctrl+P navigate only on a Mac, where they are not browser shortcuts', () => {
+  assert.equal(keyIntent(key('n', { ctrlKey: true }), false), null);
+  assert.equal(keyIntent(key('p', { ctrlKey: true }), false), null);
+});
+
+test('chords tolerate a keydown with no key, as autofill sends', () => {
+  const bare = key(undefined);
+  assert.equal(keyIntent(bare, true), null);
+  assert.equal(isPaletteKey(bare, true), false);
+  assert.equal(isGoToLineKey(bare, true), false);
 });

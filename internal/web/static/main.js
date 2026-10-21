@@ -21,13 +21,13 @@ import {
 } from './file.js';
 import {
   initPalette,
-  isGoToLineKey,
   isMac,
   openPalette,
   paletteOpen,
   rememberFile,
   togglePalette,
 } from './palette.js';
+import { isGoToLineKey, isPaletteKey } from './palette-match.js';
 import { initHints } from './query.js';
 import { loadRepos } from './repos.js';
 import { parseFileHash } from './routes.js';
@@ -127,27 +127,82 @@ function searchInRepo(repo) {
   focusSearch();
 }
 
+const inFileView = () => document.body.dataset.view === 'file';
+const inResultsView = () => document.body.dataset.view === 'results';
+const mod = isMac ? '⌘' : 'Ctrl';
+
+// shortcuts are the page's global keys, checked in order. Each command
+// that has a key takes its keycaps from here, and is only listed when its
+// shortcut would work, so the palette never advertises a dead key.
+const shortcuts = {
+  palette: {
+    keys: [mod, 'K'],
+    match: (e) => isPaletteKey(e, isMac),
+    when: () => true,
+    run: togglePalette,
+  },
+  // Only in the file view: elsewhere there is no line to go to, and the
+  // browser's own find-next keeps working.
+  goToLine: {
+    keys: [mod, 'G'],
+    match: (e) => isGoToLineKey(e, isMac),
+    when: () => inFileView() && !paletteOpen(),
+    run: () => openPalette(':'),
+  },
+  // The rest never fire while the palette is open. It stops its own keys
+  // from bubbling; this guards against one reaching the page another way.
+  // Escape's preventDefault matters: a focused type=search input would
+  // otherwise clear itself natively, wiping the query on the way back.
+  back: {
+    keys: ['esc'],
+    match: (e) => e.key === 'Escape',
+    when: () => inFileView() && !paletteOpen(),
+    run: () => {
+      location.hash = '#/';
+    },
+  },
+  focusSearch: {
+    keys: ['/'],
+    match: (e) => e.key === '/',
+    when: () => document.activeElement !== searchInput && !paletteOpen(),
+    run: focusSearch,
+  },
+  // Shift-modified so it still works with the search input focused, where
+  // a bare Backspace has to keep editing the query. Results view only:
+  // from the file view it would act on a sidebar the user cannot see.
+  clearFilters: {
+    keys: ['shift', '⌫'],
+    match: (e) => e.key === 'Backspace' && e.shiftKey,
+    when: () => inResultsView() && activeCount() > 0 && !paletteOpen(),
+    run: clearFacets,
+  },
+};
+
+document.addEventListener('keydown', (e) => {
+  for (const s of Object.values(shortcuts)) {
+    if (s.match(e) && s.when()) {
+      e.preventDefault();
+      s.run();
+      return;
+    }
+  }
+});
+
 // commands is the palette's command list for the current view; it is
 // rebuilt on every keystroke so it always reflects the live state.
 function commands() {
-  const inFile = document.body.dataset.view === 'file';
   const f = getCurrentFile();
-  const cmds = [{ title: 'Focus search', keys: ['/'], run: focusSearch }];
-  if (inFile && f) {
+  const cmds = [{ title: 'Focus search', keys: shortcuts.focusSearch.keys, run: focusSearch }];
+  if (inFileView() && f) {
     cmds.push(...fileCommands());
     cmds.push(
-      { title: 'Go to line…', keys: isMac ? ['⌘', 'G'] : ['Ctrl', 'G'], stay: ':' },
+      { title: 'Go to line…', keys: shortcuts.goToLine.keys, stay: ':' },
       { title: 'Search in this repo', detail: f.repo, run: () => searchInRepo(f.repo) },
-      {
-        title: 'Back to results',
-        keys: ['esc'],
-        run: () => {
-          location.hash = '#/';
-        },
-      },
+      { title: 'Back to results', keys: shortcuts.back.keys, run: shortcuts.back.run },
     );
   }
-  cmds.push({ title: 'Go to symbol…', keys: ['@'], stay: '@' });
+  // "@" is a palette prefix, not a page shortcut, so it is shown as detail.
+  cmds.push({ title: 'Go to symbol…', detail: 'or type @', stay: '@' });
   if (searchInput.value) {
     cmds.push({
       title: 'Clear search',
@@ -158,8 +213,10 @@ function commands() {
       },
     });
   }
-  if (activeCount() > 0) {
-    cmds.push({ title: 'Clear all filters', keys: ['shift', '⌫'], run: clearFacets });
+  // Same condition as the shortcut, minus the palette being open (it is,
+  // while this list is built).
+  if (inResultsView() && activeCount() > 0) {
+    cmds.push({ title: 'Clear all filters', keys: shortcuts.clearFilters.keys, run: clearFacets });
   }
   cmds.push({
     title: 'Copy link to this page',
@@ -168,42 +225,6 @@ function commands() {
   });
   return cmds;
 }
-
-document.addEventListener('keydown', (e) => {
-  if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'k') {
-    e.preventDefault();
-    togglePalette();
-    return;
-  }
-  // Only in the file view: elsewhere there is no line to go to, and the
-  // browser's own find-next keeps working.
-  if (isGoToLineKey(e) && document.body.dataset.view === 'file' && !paletteOpen()) {
-    e.preventDefault();
-    openPalette(':');
-    return;
-  }
-  // The palette stops its own keys from bubbling; this guards against a
-  // key that reaches the page while it is open some other way.
-  if (paletteOpen()) return;
-  if (e.key === 'Escape' && document.body.dataset.view === 'file') {
-    // preventDefault: a focused type=search input would otherwise clear
-    // itself natively, wiping the query on the way back to results.
-    e.preventDefault();
-    location.hash = '#/';
-  } else if (e.key === '/' && document.activeElement !== searchInput) {
-    e.preventDefault();
-    searchInput.focus();
-    searchInput.select();
-  } else if (e.key === 'Backspace' && e.shiftKey) {
-    // Shift-modified so it still works with the search input focused,
-    // where a bare Backspace has to keep editing the query. Esc is already
-    // taken by the file view, and clearing filters from there would act on
-    // a sidebar the user cannot see.
-    if (document.body.dataset.view !== 'results') return;
-    e.preventDefault();
-    clearFacets();
-  }
-});
 
 // ---------------------------------------------------------------------------
 // Init
@@ -228,8 +249,9 @@ initPalette({
   },
   searchRepo: searchInRepo,
 });
-paletteBtn.textContent = isMac ? '⌘K' : 'Ctrl K';
-paletteBtn.title = `Command palette (${isMac ? '⌘K' : 'Ctrl+K'})`;
+paletteBtn.textContent = shortcuts.palette.keys.join(isMac ? '' : ' ');
+paletteBtn.title = `Command palette (${shortcuts.palette.keys.join('+')})`;
+paletteBtn.setAttribute('aria-label', paletteBtn.title);
 paletteBtn.addEventListener('click', togglePalette);
 
 const initialQ = new URLSearchParams(location.search).get('q') || '';

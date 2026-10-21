@@ -121,23 +121,33 @@ export function substringPositions(text, term) {
   return out;
 }
 
-// isGoToLineKey is Cmd+G on a Mac and Ctrl+G elsewhere, the editor
-// go-to-line chord.
-export const isGoToLineKey = (e, mac) =>
-  (mac ? e.metaKey : e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'g';
+// chord reports whether e is the app's primary modifier plus letter: Cmd on
+// a Mac, Ctrl elsewhere, with no other modifiers. On a Mac, Ctrl+letter
+// stays free for the text-editing bindings inputs give it there.
+const chord = (e, mac, letter) =>
+  (mac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey) &&
+  !e.altKey &&
+  !e.shiftKey &&
+  (e.key || '').toLowerCase() === letter;
+
+// isPaletteKey is the open/close chord, Cmd+K or Ctrl+K.
+export const isPaletteKey = (e, mac) => chord(e, mac, 'k');
+
+// isGoToLineKey is the editor go-to-line chord, Cmd+G or Ctrl+G.
+export const isGoToLineKey = (e, mac) => chord(e, mac, 'g');
 
 // keyIntent maps a keydown in the palette input to an action, or null to
 // let the key type. Keys during IME composition always type: their Enter
-// and arrows confirm or move within the composed text.
+// and arrows confirm or move within the composed text. Ctrl+N/P navigate
+// only on a Mac; elsewhere they are new-window and print.
 export function keyIntent(e, mac) {
   if (e.isComposing || e.keyCode === 229) return null;
-  const ctrlOnly = e.ctrlKey && !e.metaKey && !e.altKey;
-  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') return 'close';
+  if (isPaletteKey(e, mac)) return 'close';
   if (isGoToLineKey(e, mac)) return 'goToLine';
-  if (e.key === 'ArrowDown' || (ctrlOnly && e.key === 'n')) return 'down';
-  if (e.key === 'ArrowUp' || (ctrlOnly && e.key === 'p')) return 'up';
+  const emacs = mac && e.ctrlKey && !e.metaKey && !e.altKey;
+  if (e.key === 'ArrowDown' || (emacs && e.key === 'n')) return 'down';
+  if (e.key === 'ArrowUp' || (emacs && e.key === 'p')) return 'up';
   if (e.key === 'Enter') return 'run';
   if (e.key === 'Escape') return 'close';
   return null;
 }
-

@@ -4,7 +4,6 @@ import { api } from './api.js';
 import { createLookup } from './palette-lookup.js';
 import {
   fuzzyFilter,
-  isGoToLineKey as isGoToLineKeyFor,
   keyIntent,
   lookupQuery,
   mergeFiles,
@@ -140,9 +139,6 @@ export function initPalette(o) {
 }
 
 export const paletteOpen = () => Boolean(dlg && dlg.open);
-
-// isGoToLineKey is Cmd+G (Ctrl+G off a Mac), the editor go-to-line chord.
-export const isGoToLineKey = (e) => isGoToLineKeyFor(e, isMac);
 
 export function togglePalette() {
   if (paletteOpen()) dlg.close();
