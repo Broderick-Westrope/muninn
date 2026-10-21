@@ -59,13 +59,14 @@ let enterQueued = false;
 const lookup = createLookup({
   fetch: fetchLookup,
   debounceMs: REMOTE_DEBOUNCE_MS,
-  onSettle: () => {
+  onSettle: ({ ok }) => {
     if (!paletteOpen()) return;
     update(!navigated);
-    if (enterQueued) {
-      enterQueued = false;
-      if (items[active]) runItem(items[active]);
-    }
+    if (!enterQueued) return;
+    enterQueued = false;
+    // On failure the fallback on top is not what Enter was waiting for;
+    // stay open with the error showing instead.
+    if (ok && items[active]) runItem(items[active]);
   },
 });
 

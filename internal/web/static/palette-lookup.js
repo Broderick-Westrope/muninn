@@ -6,23 +6,31 @@
 // for display only, so a fast Enter can never open a file from an older
 // query.
 //
-// fetch(args, signal) resolves to {items, truncated}. onSettle runs when a
-// still-wanted lookup finishes, so the caller can re-render.
+// fetch(args, signal) resolves to {items, truncated}. onSettle({ok}) runs
+// when a still-wanted lookup finishes, so the caller can re-render; ok is
+// false when it failed.
 export function createLookup({ fetch, debounceMs, onSettle }) {
   let done = { key: '', items: [], truncated: false, error: '' };
   let pendingKey = '';
   let timer = 0;
   let ctl = null;
 
-  function cancel() {
+  function abortPending() {
     clearTimeout(timer);
     if (ctl) ctl.abort();
     ctl = null;
     pendingKey = '';
   }
 
+  function cancel() {
+    abortPending();
+    // A failure is kept only while its palette session lasts: re-rendering
+    // must not retry it in a loop, but the next session should.
+    if (done.error) done = { key: '', items: [], truncated: false, error: '' };
+  }
+
   function start(key, args) {
-    cancel();
+    abortPending();
     pendingKey = key;
     timer = setTimeout(async () => {
       const mine = new AbortController();
@@ -40,7 +48,7 @@ export function createLookup({ fetch, debounceMs, onSettle }) {
       ctl = null;
       pendingKey = '';
       done = next;
-      onSettle();
+      onSettle({ ok: !next.error });
     }, debounceMs);
   }
 
@@ -53,8 +61,14 @@ export function createLookup({ fetch, debounceMs, onSettle }) {
         cancel();
         return { fresh: false, pending: false, items: [], stale: [], staleKey: '', truncated: false, error: '' };
       }
-      if (done.key !== key && pendingKey !== key) start(key, args);
       const fresh = done.key === key;
+      if (fresh && pendingKey) {
+        // Back to a loaded key: a newer request in flight is no longer
+        // wanted and must not replace these results.
+        abortPending();
+      } else if (!fresh && pendingKey !== key) {
+        start(key, args);
+      }
       return {
         fresh,
         pending: !fresh,

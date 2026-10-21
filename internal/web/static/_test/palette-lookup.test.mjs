@@ -91,3 +91,50 @@ test('a failed lookup is fresh with its error', async () => {
   assert.equal(v.error, 'bad query');
   assert.deepEqual(v.items, []);
 });
+
+test('returning to a loaded key cancels the newer pending request', async () => {
+  const f = deferredFetch();
+  const lookup = createLookup({ fetch: f.fetch, debounceMs: 0, onSettle: () => {} });
+  lookup.view('a', 'a');
+  await tick();
+  f.calls[0].resolve({ items: ['a.ts'], truncated: false });
+  await tick();
+  lookup.view('b', 'b');
+  await tick();
+
+  const back = lookup.view('a', 'a');
+  f.calls[1].resolve({ items: ['b.ts'], truncated: false });
+  await tick();
+
+  assert.equal(back.pending, false);
+  assert.equal(lookup.pending(), false);
+  assert.deepEqual(lookup.view('a', 'a').items, ['a.ts']);
+});
+
+test('onSettle reports whether the lookup failed', async () => {
+  const f = deferredFetch();
+  const settled = [];
+  const lookup = createLookup({ fetch: f.fetch, debounceMs: 0, onSettle: (r) => settled.push(r.ok) });
+  lookup.view('a', 'a');
+  await tick();
+  f.calls[0].reject(new Error('boom'));
+  await tick();
+
+  assert.deepEqual(settled, [false]);
+});
+
+test('a failed lookup is retried after cancel', async () => {
+  const f = deferredFetch();
+  const lookup = createLookup({ fetch: f.fetch, debounceMs: 0, onSettle: () => {} });
+  lookup.view('a', 'a');
+  await tick();
+  f.calls[0].reject(new Error('boom'));
+  await tick();
+
+  lookup.cancel();
+  const v = lookup.view('a', 'a');
+  await tick();
+
+  assert.equal(v.pending, true);
+  assert.equal(f.calls.length, 2);
+});
