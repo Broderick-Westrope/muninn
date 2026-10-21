@@ -139,7 +139,7 @@ sequenceDiagram
 | Startup budget, first dial to admission, including running `--daemon-start` | 5 s | forwarder | serve in-process |
 | Between daemon starts while waiting | 1.5 s | forwarder | start another daemon |
 | Admission exchange | 500 ms | both | not admitted; forwarder retries within its budget |
-| Wait to be reparented, then lock retry | 1 s each | daemon | exit; forwarders fall back |
+| Wait to be reparented, then lock retry | 1 s each | daemon | exit; forwarders start another daemon after 1.5 s, or fall back when their budget runs out |
 | Idle before exit | 5 min | daemon | drain and exit |
 | Each response write | 30 s | daemon | end that session |
 | Each call | 5 min | daemon | cancel the call |
@@ -251,11 +251,15 @@ with a 16-character hash. If the socket path exceeds macOS's
 Holding the lock for the daemon's life is what makes the socket file
 trustworthy: lock free means no live daemon, so a leftover socket is
 stale and safe to delete. `internal/lock` opens the file close-on-exec,
-so `git` subprocesses don't inherit the lock. Forwarders never touch the
-lock; several racing forwarders each start a daemon, one wins, and the
-rest exit within a second. A forwarder usually reaches the winner within
-its budget; one that doesn't serves in-process, which costs memory but
-nothing else.
+so `git` subprocesses don't inherit the lock.
+
+Forwarders only probe the lock, never hold it. A daemon takes the lock
+before it opens the index and listens, so "lock held, nothing listening"
+means a daemon is starting, and a forwarder starts another only when the
+lock is free. Several forwarders racing to start one may still each
+launch a daemon; one wins, and the rest exit within a second. A
+forwarder usually reaches the winner within its budget; one that doesn't
+serves in-process, which costs memory but nothing else.
 
 **Detaching.** The forwarder runs `muninn mcp --daemon-start` and waits
 for it. That process starts the real daemon in a new session (`Setsid`),
@@ -353,7 +357,7 @@ missing (a `go install` build, say), `muninn mcp` behaves as in phase 2.
 | Exec handoff only works on Unix | Fine while scheduling is macOS-only |
 | The 30 s write bound ends a session whose client is paused (say, suspended with Ctrl-Z) while a response larger than the socket and pipe buffers is being written | Accepted; responses are kilobytes, so this needs an unusually large one |
 | A session that falls back in-process says so only on stderr, which most MCP clients hide | Accepted for now; surfacing it in `muninn status` is a follow-up |
-| `go install` users update `muninn` and `muninn-mcp-proxy` separately | Handled: the proxy passes the spec on verbatim, so an older proxy doesn't drop fields a newer muninn added |
+| `go install` users update `muninn` and `muninn-mcp-proxy` separately | Partly handled: the proxy passes the spec on verbatim, so an older proxy doesn't drop fields a newer muninn added. A proxy speaking another admission version is refused and serves every session in-process until it's updated |
 
 ## Testing
 
@@ -373,8 +377,9 @@ Status after the build. Covered by automated tests unless marked.
 - Daemon killed mid-session: the session exits non-zero and doesn't fall
   back.
 - No daemon possible (state directory unusable or open to others, the
-  daemon can't open its log): the session is served in-process, with and
-  without the proxy. Not covered: locking unsupported, socket path too
+  daemon can't open its log): the session is served in-process. Only the
+  log case reaches the proxy and exercises it handing the session back;
+  the state-directory cases fail in muninn before it execs the proxy. Not covered: locking unsupported, socket path too
   long end to end (the path check is unit-tested).
 - A handler panic returns a tool error (unit test of `textHandler`).
 - A client that stops reading has its session ended by the write bound.

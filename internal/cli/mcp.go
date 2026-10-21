@@ -22,8 +22,8 @@ import (
 
 // mcpMemoryLimit is the soft heap limit for the MCP server. Measured on a
 // 316-repo index, the default GC let one process sit at about 88 MB after
-// a burst of greps; 64 MiB brought that to about 67 MB for 0.35 s of CPU against 0.31 s,
-// while 48 and 32 MiB saved more but took 0.75 s and 1.1 s.
+// a burst of greps using 0.31 s of CPU. 64 MiB brought that to about
+// 67 MB for 0.35 s; 48 and 32 MiB saved more but took 0.75 s and 1.1 s.
 const mcpMemoryLimit = 64 << 20
 
 // applyMemoryLimit sets mcpMemoryLimit unless the user chose their own
@@ -105,10 +105,11 @@ func (e fallbackError) Error() string { return e.reason.Error() }
 func (e fallbackError) Unwrap() error { return e.reason }
 
 // forwardToMCPDaemon hands this session's stdio to the shared daemon for
-// its spec, starting one if needed. It returns a fallbackError
-// error if no daemon admitted the session; nothing has been
-// read from stdin then, so the caller can still serve in-process. After
-// admission it never falls back.
+// its spec, starting one if needed. Any failure before admission returns
+// a fallbackError, and the caller serves in-process; nothing has been read
+// from stdin then. The exception is a missing index, which fails the
+// session as serving in-process would. After admission it never falls
+// back.
 func forwardToMCPDaemon(ctx context.Context) error {
 	exe, err := os.Executable()
 	if err != nil {
@@ -135,7 +136,7 @@ func forwardToMCPDaemon(ctx context.Context) error {
 	execProxy(spec)
 	conn, err := mcpsock.Connect(ctx, spec)
 	if err != nil {
-		return fallbackError{err}
+		return fallbackError{fmt.Errorf("%w (the shared server logs to %s)", err, spec.Log())}
 	}
 	defer conn.Close()
 	return mcpsock.Forward(conn, os.Stdin, os.Stdout)

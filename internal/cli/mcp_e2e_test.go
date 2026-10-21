@@ -240,7 +240,8 @@ func TestMCPSessionsShareOneDaemon(t *testing.T) {
 
 func TestMCPFallsBackInProcess(t *testing.T) {
 	causes := map[string]func(t *testing.T, state string){
-		// A file where the state directory should be: no daemon can start.
+		// A file where the state directory should be: muninn refuses
+		// before dialing, so the proxy never runs.
 		"state dir is a file": func(t *testing.T, state string) {
 			if err := os.WriteFile(state, nil, 0o600); err != nil {
 				t.Fatal(err)
@@ -253,8 +254,8 @@ func TestMCPFallsBackInProcess(t *testing.T) {
 				t.Fatal(err)
 			}
 		},
-		// Other users could reach a socket in it, so the daemon refuses to
-		// listen there.
+		// Other users could reach a socket in it, so muninn refuses before
+		// dialing, and the proxy never runs.
 		"state dir readable by others": func(t *testing.T, state string) {
 			if err := os.Mkdir(state, 0o755); err != nil {
 				t.Fatal(err)
@@ -447,9 +448,9 @@ func TestMCPDoesNotTrustASocketInAnOpenStateDir(t *testing.T) {
 	}
 }
 
-// Before the first sync there's no index. That used to fail at once, and
-// must still: not after the startup budget, with a pile of daemons
-// started along the way.
+// Before the first sync there's no index. The session fails at once with
+// the in-process error, rather than waiting out the startup budget and
+// starting daemons along the way.
 func TestMCPWithNoIndexFailsFast(t *testing.T) {
 	e := newE2E(t, true)
 	if err := os.RemoveAll(filepath.Join(e.root, "data", "muninn", "index")); err != nil {

@@ -510,7 +510,7 @@ func TestServeLogsSessionsReadably(t *testing.T) {
 	}
 }
 
-// safeBuffer is a bytes.Buffer safe for the log package and the test to
+// safeBuffer is a strings.Builder safe for the log package and the test to
 // share.
 type safeBuffer struct {
 	mu sync.Mutex
