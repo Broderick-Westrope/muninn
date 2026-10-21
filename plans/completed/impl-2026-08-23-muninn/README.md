@@ -2,7 +2,7 @@
 
 > **Status:** COMPLETED
 
-**Spec:** `plans/design-2026-08-23-muninn.md` — read it before executing any phase.
+**Spec:** `plans/completed/design-2026-08-23-muninn.md` — read it before executing any phase.
 
 ## Overview
 

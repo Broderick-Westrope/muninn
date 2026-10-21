@@ -4,7 +4,7 @@
 
 ## Overview
 
-Adds three history MCP tools (`search_commits`, `get_diff`, `blame`) to muninn, backed by system git over the bare mirrors, plus the pinning/maintenance work the tools depend on. Spec: `plans/design-2026-08-29-git-history.md`.
+Adds three history MCP tools (`search_commits`, `get_diff`, `blame`) to muninn, backed by system git over the bare mirrors, plus the pinning/maintenance work the tools depend on. Spec: `plans/completed/design-2026-08-29-git-history.md`.
 
 **Problem:** Agents cannot answer history questions ("when/why did this change", "who wrote this line", "when was this string introduced") — Sourcebot, Sourcegraph, and GitHub's MCP servers all treat these as core, and zoekt indexes zero history.
 

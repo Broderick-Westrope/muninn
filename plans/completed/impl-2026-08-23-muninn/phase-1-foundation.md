@@ -1,7 +1,7 @@
 # Phase 1: Foundation
 
 > **Status:** COMPLETED
-> **Spec:** `plans/design-2026-08-23-muninn.md`
+> **Spec:** `plans/completed/design-2026-08-23-muninn.md`
 
 Delivers the module scaffold and the primitives every other phase builds on: config loading (Sourcebot-compatible subset), XDG path resolution, the sync status file with atomic writes, and universal-ctags detection/validation.
 
@@ -21,7 +21,7 @@ Delivers the module scaffold and the primitives every other phase builds on: con
 _Run before starting:_
 
 ```bash
-read /Users/broderick.westrope/dev/helse/muninn/plans/design-2026-08-23-muninn.md
+read /Users/broderick.westrope/dev/helse/muninn/plans/completed/design-2026-08-23-muninn.md
 read /Users/broderick.westrope/dev/helse/sourcebot/config.json   # schema to stay compatible with
 ```
 

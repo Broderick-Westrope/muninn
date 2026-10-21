@@ -1,7 +1,7 @@
 # Phase 4: Web UI
 
 > **Status:** COMPLETED
-> **Spec:** `plans/design-2026-08-23-muninn.md`
+> **Spec:** `plans/completed/design-2026-08-23-muninn.md`
 > **Depends on:** Phase 3 merged (search core + gitfile)
 
 Delivers `muninn web`: an on-demand local server with a search page (zoekt query syntax, highlighted snippets) and a capped file viewer. **Scope discipline:** search-only — no tree browsing, no saved searches, no branch pickers (spec exclusions).
@@ -22,7 +22,7 @@ Delivers `muninn web`: an on-demand local server with a search page (zoekt query
 _Run before starting:_
 
 ```bash
-read /Users/broderick.westrope/dev/helse/muninn/plans/design-2026-08-23-muninn.md
+read /Users/broderick.westrope/dev/helse/muninn/plans/completed/design-2026-08-23-muninn.md
 read /Users/broderick.westrope/dev/helse/muninn/internal/search/search.go
 read /Users/broderick.westrope/dev/helse/muninn/internal/gitfile/gitfile.go
 read /Users/broderick.westrope/dev/helse/muninn/internal/mcp/tools_search.go   # reuse result shaping where sensible

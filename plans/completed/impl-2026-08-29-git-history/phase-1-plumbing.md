@@ -1,7 +1,7 @@
 # Phase 1: Git Plumbing & Pinning Completion
 
 > **Status:** COMPLETED
-> Part of `plans/impl-2026-08-29-git-history/` — see README for phase overview.
+> Part of `plans/completed/impl-2026-08-29-git-history/` — see README for phase overview.
 
 ## Specification
 
@@ -33,7 +33,7 @@ read internal/sync/sync.go              # Mirror interface, syncRepo flow
 read internal/ctags/ctags.go            # validation precedent to mirror for git
 read internal/cli/mcp.go                # MCP server startup (where git validation hooks in)
 read internal/cli/sync.go
-read plans/design-2026-08-29-git-history.md
+read plans/completed/design-2026-08-29-git-history.md
 ```
 
 ## Git Runner Tasks

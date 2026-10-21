@@ -1,7 +1,7 @@
 # Phase 3: Search Core + MCP + CLI Search
 
 > **Status:** COMPLETED
-> **Spec:** `plans/design-2026-08-23-muninn.md`
+> **Spec:** `plans/completed/design-2026-08-23-muninn.md`
 > **Depends on:** Phase 2 merged (real shards + indexed-commit refs on disk)
 
 Delivers the search core (Zoekt wrapped behind muninn types), the stdio MCP server with all 7 v1 tools, and `muninn search` for the terminal.
@@ -24,7 +24,7 @@ Delivers the search core (Zoekt wrapped behind muninn types), the stdio MCP serv
 _Run before starting:_
 
 ```bash
-read /Users/broderick.westrope/dev/helse/muninn/plans/design-2026-08-23-muninn.md
+read /Users/broderick.westrope/dev/helse/muninn/plans/completed/design-2026-08-23-muninn.md
 read /Users/broderick.westrope/dev/helse/muninn/internal/index/indexer.go
 read /Users/broderick.westrope/dev/helse/muninn/internal/status/status.go
 read /Users/broderick.westrope/dev/helse/muninn/internal/mirror/mirror.go

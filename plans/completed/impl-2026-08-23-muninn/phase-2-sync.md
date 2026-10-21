@@ -1,7 +1,7 @@
 # Phase 2: Sync Engine
 
 > **Status:** COMPLETED
-> **Spec:** `plans/design-2026-08-23-muninn.md`
+> **Spec:** `plans/completed/design-2026-08-23-muninn.md`
 > **Depends on:** Phase 1 merged
 
 Delivers `muninn sync` (GitHub discovery → mirror reconciliation → Zoekt indexing → status), `muninn status`, and launchd install/uninstall.
@@ -23,7 +23,7 @@ Delivers `muninn sync` (GitHub discovery → mirror reconciliation → Zoekt ind
 _Run before starting:_
 
 ```bash
-read /Users/broderick.westrope/dev/helse/muninn/plans/design-2026-08-23-muninn.md
+read /Users/broderick.westrope/dev/helse/muninn/plans/completed/design-2026-08-23-muninn.md
 read /Users/broderick.westrope/dev/helse/muninn/internal/config/config.go
 read /Users/broderick.westrope/dev/helse/muninn/internal/status/status.go
 read /Users/broderick.westrope/dev/helse/muninn/internal/xdg/xdg.go

@@ -1,13 +1,13 @@
 # Phase 2: History Tools (`internal/githistory` + MCP)
 
 > **Status:** COMPLETED
-> Part of `plans/impl-2026-08-29-git-history/` — see README. Requires phase 1 merged (`internal/gitcmd` with partial output + exit codes + `RunStdin`, `ResolveRev`/`ErrUnknownRev`/`ErrUnknownPath`, two-gen pins).
+> Part of `plans/completed/impl-2026-08-29-git-history/` — see README. Requires phase 1 merged (`internal/gitcmd` with partial output + exit codes + `RunStdin`, `ResolveRev`/`ErrUnknownRev`/`ErrUnknownPath`, two-gen pins).
 
 ## Specification
 
 **Problem:** Agents cannot answer "when/why did this change", "what did this commit do", "who wrote this line" over the indexed estate.
 
-**Goal:** Three MCP tools — `search_commits`, `get_diff`, `blame` — per the spec (`plans/design-2026-08-29-git-history.md`), with agent-safe defaults and hard output caps.
+**Goal:** Three MCP tools — `search_commits`, `get_diff`, `blame` — per the spec (`plans/completed/design-2026-08-29-git-history.md`), with agent-safe defaults and hard output caps.
 
 **Scope:** In: `internal/githistory` core package, three MCP tool handlers, server registration, instructions update. Out: cross-repo search, CLI commands, matched-hunk pickaxe output, symbol-graph tools.
 
@@ -28,7 +28,7 @@
 _Run before starting:_
 
 ```bash
-read plans/design-2026-08-29-git-history.md   # authoritative tool contracts
+read plans/completed/design-2026-08-29-git-history.md   # authoritative tool contracts
 read internal/gitcmd/gitcmd.go                # Runner, Error{ExitCode}, ErrTimeout, RunStdin (phase 1)
 read internal/gitfile/gitfile.go              # ResolveRev, ErrUnknownRev, ErrUnknownPath, checkCommit, shortSHA
 read internal/mcp/server.go                   # registration, textHandler, instructions

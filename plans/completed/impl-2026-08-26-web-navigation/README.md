@@ -40,7 +40,7 @@ Each phase is run independently and ends with a PR for human review. Do not merg
 Before starting any phase:
 
 ```bash
-cat plans/design-2026-08-26-web-navigation.md
+cat plans/completed/design-2026-08-26-web-navigation.md
 go build ./... && go test ./...
 ```
 
