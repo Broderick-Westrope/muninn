@@ -1,6 +1,18 @@
 'use strict';
 
 import { api } from './api.js';
+import { createLookup } from './palette-lookup.js';
+import {
+  fuzzyFilter,
+  keepActive,
+  lineSuffix,
+  lookupQuery,
+  mergeFiles,
+  parse,
+  parseLines,
+  splitLineTarget,
+  substringPositions,
+} from './palette-match.js';
 import { fileHash } from './routes.js';
 
 // The command palette (Cmd/Ctrl+K). Plain text mixes commands, recent and
@@ -38,12 +50,24 @@ let items = []; // selectable items in render order
 let active = 0;
 let repoNames = null; // cached /api/repos names, loaded on first open
 
-// The last remote (file or symbol) lookup. Its items stay on screen while a
-// newer lookup is in flight, so typing does not flicker the list.
-let remote = { key: '', kind: '', items: [], error: '' };
-let remoteCtl = null;
-let remoteTimer = 0;
-let pendingKey = ''; // lookup scheduled or in flight; re-renders must not restart it
+// navigated is set once the user moves the selection after typing; an
+// Enter before that, while a lookup is in flight, waits for its results
+// instead of running whatever happens to be on top.
+let navigated = false;
+let enterQueued = false;
+
+const lookup = createLookup({
+  fetch: fetchLookup,
+  debounceMs: REMOTE_DEBOUNCE_MS,
+  onSettle: () => {
+    if (!paletteOpen()) return;
+    update(!navigated);
+    if (enterQueued) {
+      enterQueued = false;
+      if (items[active]) runItem(items[active]);
+    }
+  },
+});
 
 // initPalette builds the dialog. o supplies:
 //   commands()        context-aware command list ({title, detail, keys,
@@ -98,11 +122,18 @@ export function initPalette(o) {
   toastEl.hidden = true;
   document.body.append(toastEl);
 
-  input.addEventListener('input', update);
+  input.addEventListener('input', () => {
+    navigated = false;
+    enterQueued = false;
+    update(true);
+  });
   input.addEventListener('keydown', onKey);
   listEl.addEventListener('mousemove', (e) => {
     const li = e.target.closest('li[data-i]');
-    if (li && Number(li.dataset.i) !== active) setActive(Number(li.dataset.i), false);
+    if (li && Number(li.dataset.i) !== active) {
+      navigated = true;
+      setActive(Number(li.dataset.i), false);
+    }
   });
   listEl.addEventListener('click', (e) => {
     const li = e.target.closest('li[data-i]');
@@ -113,9 +144,8 @@ export function initPalette(o) {
     if (e.target === dlg) dlg.close();
   });
   dlg.addEventListener('close', () => {
-    clearTimeout(remoteTimer);
-    if (remoteCtl) remoteCtl.abort();
-    pendingKey = '';
+    lookup.cancel();
+    enterQueued = false;
   });
 }
 
@@ -134,7 +164,9 @@ export function openPalette(prefix) {
   if (!dlg.open) dlg.showModal();
   input.value = prefix;
   input.focus();
-  update();
+  navigated = false;
+  enterQueued = false;
+  update(true);
   if (!repoNames) loadRepoNames();
 }
 
@@ -165,50 +197,24 @@ async function loadRepoNames() {
     repoNames = null; // retried on the next open
     return;
   }
-  if (paletteOpen()) update();
+  if (paletteOpen()) update(!navigated);
 }
 
 // ---------------------------------------------------------------------------
 // Building the list
 
-function parse(v) {
-  const c = v[0];
-  if (c === '>') return { mode: 'commands', term: v.slice(1).trim() };
-  if (c === '@') return { mode: 'symbols', term: v.slice(1).trim() };
-  if (c === ':') return { mode: 'line', term: v.slice(1).trim() };
-  return { mode: 'all', term: v.trim() };
-}
-
-// parseLines reads "15" or "10-20" as a line target, normalising a
-// reversed range; null when s is not a line target.
-function parseLines(s) {
-  const m = s.match(/^(\d+)(?:\s*-\s*(\d+))?$/);
-  if (!m) return null;
-  let line = Number(m[1]);
-  let endLine = m[2] ? Number(m[2]) : 0;
-  if (endLine && endLine < line) [line, endLine] = [endLine, line];
-  if (endLine === line) endLine = 0;
-  return line > 0 ? { line, endLine } : null;
-}
-
-// splitLineTarget separates "payments.ts:15" into the file term and its
-// line target. A bare ":15" is the go-to-line mode, not this.
-function splitLineTarget(term) {
-  const at = term.lastIndexOf(':');
-  if (at <= 0) return { base: term, target: null };
-  const target = parseLines(term.slice(at + 1).trim());
-  const base = term.slice(0, at).trim();
-  return target && base ? { base, target } : { base: term, target: null };
-}
-
-const lineSuffix = (t) => (t.endLine ? `:${t.line}-${t.endLine}` : `:${t.line}`);
-
-function update() {
+// update rebuilds the list. reset moves the selection to the top. Async
+// re-renders (results arriving) pass reset only until the user has moved
+// the selection: after that they keep it, so Enter still runs what the
+// user picked.
+function update(reset = true) {
   const { mode, term } = parse(input.value);
   const groups = [];
+  let wantsLookup = false;
   if (mode === 'line') {
     groups.push(lineGroup(term));
   } else if (mode === 'symbols') {
+    wantsLookup = true;
     groups.push(remoteGroup('Symbols', 'sym', term, MAX_SYMBOLS));
   } else if (mode === 'commands') {
     groups.push({ label: 'Commands', items: fuzzyFilter(opts.commands(), term) });
@@ -216,16 +222,19 @@ function update() {
     groups.push({ label: 'Recent files', items: recentItems() });
     groups.push({ label: 'Commands', items: opts.commands() });
   } else {
+    wantsLookup = true;
     const { base, target } = splitLineTarget(term);
     const files = remoteGroup('Files', 'file', base, MAX_FILES);
     if (target) {
       // A line target says the user wants a file, so files lead and the
       // chosen one opens at that line.
-      files.items = files.items.map((it) => ({
+      const atLine = (it) => ({
         ...it,
         title: it.title + lineSuffix(target),
         run: () => goTo(it.repo, it.path, target.line, target.endLine),
-      }));
+      });
+      files.items = files.items.map(atLine);
+      files.stale = files.stale.map(atLine);
       groups.push(files);
     } else {
       groups.push({
@@ -240,7 +249,10 @@ function update() {
       items: [{ title: `Search code for “${term}”`, run: () => opts.search(term) }],
     });
   }
-  render(groups);
+  // A mode without a lookup must not leave an older one able to fire a
+  // queued Enter or re-render the list.
+  if (!wantsLookup) lookup.view('', null);
+  render(groups, reset);
 }
 
 function recentItems() {
@@ -276,66 +288,54 @@ function goTo(repo, path, line, endLine) {
   location.hash = fileHash(repo, path, line, endLine);
 }
 
-// remoteGroup returns what is known for a file or symbol lookup right now,
-// scheduling the request when the term has changed.
+// remoteGroup returns what the lookup knows for a file or symbol term right
+// now. Results from an older term are passed as stale: shown, dimmed, so
+// the list does not flicker, but never selectable.
 function remoteGroup(label, kind, term, max) {
   if (term.length < REMOTE_MIN_CHARS) {
-    return { label, items: [], note: kind === 'sym' ? 'Type a symbol name.' : '' };
+    lookup.view('', null);
+    return { label, items: [], stale: [], note: kind === 'sym' ? 'Type a symbol name.' : '' };
   }
-  const key = `${kind}\u0000${term}`;
-  if (remote.key !== key && pendingKey !== key) scheduleRemote(kind, term, key);
-  const fresh = remote.key === key;
-  const shown = remote.kind === kind ? remote.items.slice(0, max) : [];
-  let note = '';
-  if (fresh && remote.error) note = remote.error;
-  else if (fresh && shown.length === 0) note = 'No matches.';
-  else if (!fresh && shown.length === 0) note = 'Searching…';
-  return { label, items: shown, note };
+  // The current repo is part of the key: its scoped results differ per repo.
+  const repo = opts.currentFile()?.repo || '';
+  const v = lookup.view(`${kind}\u0000${repo}\u0000${term}`, { kind, term, repo });
+  const sameKind = v.staleKey.startsWith(`${kind}\u0000`);
+  const group = {
+    label,
+    items: v.items.slice(0, max),
+    stale: sameKind ? v.stale.slice(0, max) : [],
+    note: '',
+  };
+  if (v.error) group.note = v.error;
+  else if (v.pending) group.note = 'Searching…';
+  else if (!group.items.length) group.note = 'No matches.';
+  else if (v.truncated || v.items.length > max) group.note = 'More matches — keep typing to narrow.';
+  return group;
 }
 
-function scheduleRemote(kind, term, key) {
-  clearTimeout(remoteTimer);
-  if (remoteCtl) remoteCtl.abort();
-  pendingKey = key;
-  remoteTimer = setTimeout(async () => {
-    remoteCtl = new AbortController();
-    const tokens = term.split(/\s+/).map(escapeRe);
-    const q =
-      kind === 'file'
-        ? tokens.map((t) => `file:${t}`).join(' ') + ' type:file'
-        : tokens.map((t) => `sym:${t}`).join(' ');
-    let next;
-    try {
-      const data = await api(
-        `/api/search?q=${encodeURIComponent(q)}&limit=${REMOTE_LIMIT}`,
-        remoteCtl.signal,
-      );
-      next = { key, kind, items: kind === 'file' ? fileItems(data, term) : symbolItems(data, term), error: '' };
-    } catch (e) {
-      if (e.name === 'AbortError') return;
-      next = { key, kind, items: [], error: e.message };
-    }
-    pendingKey = '';
-    remote = next;
-    if (paletteOpen()) update();
-  }, REMOTE_DEBOUNCE_MS);
+// fetchLookup runs a file or symbol lookup. In the file view it also asks
+// for the current repo alone: the global request is capped, so a common
+// name (index.ts) could otherwise crowd the current repo out entirely.
+async function fetchLookup({ kind, term, repo }, signal) {
+  const q = `/api/search?q=${encodeURIComponent(lookupQuery(kind, term))}&limit=${REMOTE_LIMIT}`;
+  const [global, scoped] = await Promise.all([
+    api(q, signal),
+    repo ? api(`${q}&repo=${encodeURIComponent(repo)}`, signal) : null,
+  ]);
+  const files = mergeFiles(scoped ? scoped.files : [], global.files);
+  return {
+    items: kind === 'file' ? fileItems(files, term, repo) : symbolItems(files, term),
+    truncated: global.truncated || Boolean(scoped && scoped.truncated),
+  };
 }
 
-// escapeRe makes a typed token match literally: file: and sym: take regexes.
-const escapeRe = (s) => s.replace(/[\\^$.|?*+()[\]{}"]/g, '\\$&');
-
-// The current repo sorts first: a lookup while reading code is most often
-// for a neighbour.
-function byCurrentRepo(a, b) {
-  const repo = opts.currentFile()?.repo;
-  return (b.repo === repo) - (a.repo === repo);
-}
-
-function fileItems(data, term) {
-  return data.files
-    .map((f) => ({ repo: f.repo, path: f.path }))
-    .sort((a, b) => byCurrentRepo(a, b) || a.path.length - b.path.length)
-    .map((f) => ({
+function fileItems(files, term, repo) {
+  return files
+    .map((f, i) => ({ f, i }))
+    // Within the current repo and within the rest, shorter paths first;
+    // the merge already put the current repo ahead.
+    .sort((a, b) => (b.f.repo === repo) - (a.f.repo === repo) || a.f.path.length - b.f.path.length)
+    .map(({ f }) => ({
       title: f.path,
       positions: substringPositions(f.path, term),
       detail: f.repo,
@@ -345,9 +345,9 @@ function fileItems(data, term) {
     }));
 }
 
-function symbolItems(data, term) {
+function symbolItems(files, term) {
   const out = [];
-  for (const f of [...data.files].sort(byCurrentRepo)) {
+  for (const f of files) {
     for (const l of f.lines) {
       if (!l.isSymbolDef) continue;
       const text = l.line.trim();
@@ -363,82 +363,25 @@ function symbolItems(data, term) {
 }
 
 // ---------------------------------------------------------------------------
-// Matching
-
-// fuzzyFilter keeps the items whose title matches term, best first.
-function fuzzyFilter(list, term) {
-  if (!term) return list;
-  const scored = [];
-  for (const it of list) {
-    const m = fuzzy(it.title, term);
-    if (m) scored.push({ ...it, positions: m.positions, score: m.score });
-  }
-  return scored.sort((a, b) => b.score - a.score);
-}
-
-// fuzzy matches term case-insensitively as a substring of text, or else as
-// a run of word prefixes ("gts" for "Go to symbol"): every character must
-// continue the previous match or start a word. Letters scattered mid-word
-// would match nearly every long repo name, so they do not count. A
-// substring outranks word prefixes, and earlier matches outrank later ones.
-function fuzzy(text, term) {
-  const t = text.toLowerCase();
-  const q = term.toLowerCase().replace(/\s+/g, ' ');
-  const at = t.indexOf(q);
-  if (at !== -1) {
-    const positions = [];
-    for (let i = at; i < at + q.length; i++) positions.push(i);
-    return { score: 1000 + (isWordStart(t, at) ? 100 : 0) - at, positions };
-  }
-  const positions = [];
-  let score = 0;
-  let from = 0;
-  for (const ch of q) {
-    if (ch === ' ') continue;
-    let j = -1;
-    // Continue the current word if possible, else jump to the next word
-    // that starts with ch.
-    if (positions.length && t[from] === ch) {
-      j = from;
-    } else {
-      for (let k = from; k < t.length && j === -1; k++) {
-        if (t[k] === ch && isWordStart(t, k)) j = k;
-      }
-    }
-    if (j === -1) return null;
-    score += j === from && positions.length ? 5 : 8;
-    positions.push(j);
-    from = j + 1;
-  }
-  return { score: score - (positions[positions.length - 1] - positions[0]), positions };
-}
-
-const isWordStart = (t, i) => i === 0 || /[\s/._\-:]/.test(t[i - 1]);
-
-function substringPositions(text, term) {
-  const t = text.toLowerCase();
-  const out = [];
-  for (const tok of term.toLowerCase().split(/\s+/)) {
-    const at = tok ? t.indexOf(tok) : -1;
-    for (let i = at; at !== -1 && i < at + tok.length; i++) out.push(i);
-  }
-  return out;
-}
-
-// ---------------------------------------------------------------------------
 // Rendering and keys
 
-function render(groups) {
+function render(groups, reset) {
+  const prevKey = items[active]?.key;
   items = [];
   const frag = document.createDocumentFragment();
   for (const g of groups) {
-    if (!g.items.length && !g.note) continue;
+    const stale = g.stale || [];
+    if (!g.items.length && !stale.length && !g.note) continue;
     const head = document.createElement('li');
     head.className = 'pal-group';
     head.setAttribute('role', 'presentation');
     head.textContent = g.label;
     frag.append(head);
-    for (const it of g.items) frag.append(itemEl(it, items.push(it) - 1));
+    for (const it of g.items) {
+      const keyed = { ...it, key: `${g.label}\u0000${it.title}\u0000${it.detail || ''}` };
+      frag.append(itemEl(keyed, items.push(keyed) - 1));
+    }
+    for (const it of stale) frag.append(itemEl(it, -1));
     if (g.note) {
       const n = document.createElement('li');
       n.className = 'pal-note';
@@ -450,19 +393,28 @@ function render(groups) {
   if (!frag.childNodes.length) {
     const n = document.createElement('li');
     n.className = 'pal-note';
+    n.setAttribute('role', 'presentation');
     n.textContent = 'Nothing matches.';
     frag.append(n);
   }
   listEl.replaceChildren(frag);
-  setActive(0, true);
+  active = keepActive(prevKey, items.map((it) => it.key), reset);
+  setActive(active, reset);
 }
 
+// itemEl renders one row; i is its index among selectable items, or -1 for
+// a stale row that is shown but cannot be chosen.
 function itemEl(it, i) {
   const li = document.createElement('li');
-  li.className = 'pal-item';
-  li.id = `pal-${i}`;
-  li.dataset.i = i;
-  li.setAttribute('role', 'option');
+  if (i < 0) {
+    li.className = 'pal-item stale';
+    li.setAttribute('role', 'presentation');
+  } else {
+    li.className = 'pal-item';
+    li.id = `pal-${i}`;
+    li.dataset.i = i;
+    li.setAttribute('role', 'option');
+  }
   const title = document.createElement('span');
   title.className = 'pal-title';
   highlight(title, it.title, it.positions);
@@ -519,7 +471,9 @@ function highlight(el, text, positions) {
 }
 
 function setActive(i, reset) {
-  $item(active)?.setAttribute('aria-selected', 'false');
+  for (const el of listEl.querySelectorAll('[aria-selected="true"]')) {
+    el.setAttribute('aria-selected', 'false');
+  }
   active = items.length ? (i + items.length) % items.length : 0;
   const el = $item(active);
   if (!el) {
@@ -549,13 +503,18 @@ function onKey(e) {
     if (opts.currentFile()) openPalette(':');
   } else if (e.key === 'ArrowDown' || (ctrlOnly && e.key === 'n')) {
     e.preventDefault();
+    navigated = true;
     setActive(active + 1, false);
   } else if (e.key === 'ArrowUp' || (ctrlOnly && e.key === 'p')) {
     e.preventDefault();
+    navigated = true;
     setActive(active - 1, false);
   } else if (e.key === 'Enter') {
     e.preventDefault();
-    if (items[active]) runItem(items[active]);
+    // Typed fast and hit Enter: wait for the lookup the input asked for
+    // rather than run a row from before it arrived.
+    if (lookup.pending() && !navigated) enterQueued = true;
+    else if (items[active]) runItem(items[active]);
   } else if (e.key === 'Escape') {
     e.preventDefault();
     dlg.close();
@@ -568,7 +527,8 @@ async function runItem(it) {
   if (it.stay !== undefined) {
     input.value = it.stay;
     input.focus();
-    update();
+    navigated = false;
+    update(true);
     return;
   }
   dlg.close();

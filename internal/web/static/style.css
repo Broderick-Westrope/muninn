@@ -663,6 +663,11 @@ dialog.palette::backdrop {
   cursor: pointer;
 }
 
+.pal-item.stale {
+  opacity: 0.45;
+  cursor: default;
+}
+
 .pal-item[aria-selected="true"] {
   background: color-mix(in srgb, var(--accent) 14%, transparent);
   box-shadow: inset 2px 0 var(--accent);
