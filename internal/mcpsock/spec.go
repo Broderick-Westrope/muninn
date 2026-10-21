@@ -117,7 +117,9 @@ func (s Spec) stateFile(ext string) string {
 	return filepath.Join(s.StateDir, "mcp-"+s.Identity+ext)
 }
 
-// Encode renders s for passing to another process as one argument.
+// Encode renders s for passing to another process as one argument. A
+// decoded Spec encodes as the exact text it was decoded from, so treat its
+// fields as read-only.
 func (s Spec) Encode() string {
 	if s.encoded != "" {
 		return s.encoded
@@ -132,12 +134,12 @@ func DecodeSpec(encoded string) (Spec, error) {
 	if err := json.Unmarshal([]byte(encoded), &s); err != nil {
 		return Spec{}, fmt.Errorf("decoding spec: %w", err)
 	}
-	for name, v := range map[string]string{
-		"muninn": s.Muninn, "index_dir": s.IndexDir, "status_path": s.StatusPath,
-		"mirrors_dir": s.MirrorsDir, "state_dir": s.StateDir, "identity": s.Identity,
+	for _, f := range []struct{ name, value string }{
+		{"muninn", s.Muninn}, {"index_dir", s.IndexDir}, {"status_path", s.StatusPath},
+		{"mirrors_dir", s.MirrorsDir}, {"state_dir", s.StateDir}, {"identity", s.Identity},
 	} {
-		if v == "" {
-			return Spec{}, fmt.Errorf("decoding spec: %s is missing", name)
+		if f.value == "" {
+			return Spec{}, fmt.Errorf("decoding spec: %s is missing", f.name)
 		}
 	}
 	s.encoded = encoded

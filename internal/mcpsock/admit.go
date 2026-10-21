@@ -137,6 +137,7 @@ func Dial(ctx context.Context, socket, identity string, start func(context.Conte
 		if needDaemon && ctx.Err() == nil && (lastStart.IsZero() || time.Since(lastStart) >= restartAfter) {
 			switch err := start(ctx); {
 			case errors.Is(err, errDaemonStarting):
+				// Nothing launched; keep polling.
 			case err != nil:
 				return nil, fmt.Errorf("%w: starting it: %w", ErrNotAdmitted, err)
 			default:
@@ -160,8 +161,8 @@ func admit(ctx context.Context, socket, identity string) (*net.UnixConn, error) 
 	}
 	conn := c.(*net.UnixConn)
 	deadline := time.Now().Add(admissionTimeout)
-	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
-		deadline = d
+	if limit, ok := ctx.Deadline(); ok && limit.Before(deadline) {
+		deadline = limit
 	}
 	if err := conn.SetDeadline(deadline); err != nil {
 		conn.Close()
@@ -258,16 +259,20 @@ func Connect(ctx context.Context, spec Spec) (*net.UnixConn, error) {
 		cmd := exec.CommandContext(ctx, spec.Muninn, "mcp", "--"+DaemonStartFlag, "--"+SpecFlag, spec.Encode())
 		cmd.WaitDelay = 100 * time.Millisecond
 		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("%w: %s", err, bytes.TrimSpace(out))
+			if out = bytes.TrimSpace(out); len(out) > 0 {
+				return fmt.Errorf("%w: %s", err, out)
+			}
+			return err
 		}
 		return nil
 	})
 }
 
-// lockHeld reports whether some process holds the daemon lock at path. It
-// probes with flock directly rather than through internal/lock, which would
-// link more than the standard library into the proxy, and never creates
-// the file. A daemon that collides with the probe retries for a second.
+// lockHeld reports whether some process holds the daemon lock at path,
+// using the same flock as internal/lock. It doesn't use lock.TryAcquire
+// because that creates the file and its directory, and a probe shouldn't;
+// it keeps this package's imports to the standard library. A daemon that
+// collides with the probe retries for a second.
 func lockHeld(path string) bool {
 	f, err := os.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
