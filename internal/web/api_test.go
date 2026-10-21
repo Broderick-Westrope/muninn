@@ -480,6 +480,7 @@ func TestUIStaticAssets(t *testing.T) {
 		{"/", "text/html", "<title>muninn"},
 		{"/main.js", "javascript", "initSearch"},
 		{"/search.js", "javascript", "runSearch"},
+		{"/palette.js", "javascript", "initPalette"},
 		{"/style.css", "text/css", "prefers-color-scheme"},
 		{"/chroma.css", "text/css", "@media (prefers-color-scheme: dark)"},
 	}
@@ -492,6 +493,11 @@ func TestUIStaticAssets(t *testing.T) {
 		}
 		if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, tt.wantType) {
 			t.Errorf("GET %s: Content-Type = %q, want it to contain %q", tt.path, ct, tt.wantType)
+		}
+		if tt.path != "/chroma.css" {
+			if cc := rec.Header().Get("Cache-Control"); cc != "no-cache" {
+				t.Errorf("GET %s: Cache-Control = %q, want %q", tt.path, cc, "no-cache")
+			}
 		}
 		if !strings.Contains(rec.Body.String(), tt.wantBody) {
 			t.Errorf("GET %s: body does not contain %q", tt.path, tt.wantBody)
