@@ -85,8 +85,13 @@ export async function showFile(loc) {
   } else {
     body.append(plainPre(data.content));
   }
-  fileEl.replaceChildren(fileHeader(loc, data), body);
-  if (loc.line) targetLines(loc.line, loc.endLine, true);
+  // A go-to-line, gutter click or back/forward within this file while it
+  // loaded has already moved currentFile on; honour that over the location
+  // the fetch started with.
+  const same = currentFile && currentFile.repo === loc.repo && currentFile.path === loc.path;
+  const target = same ? currentFile : loc;
+  fileEl.replaceChildren(fileHeader(target, data), body);
+  if (target.line) targetLines(target.line, target.endLine, true);
 }
 
 function fileHeader(loc, data) {

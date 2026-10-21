@@ -4,7 +4,9 @@ import { api } from './api.js';
 import { createLookup } from './palette-lookup.js';
 import {
   fuzzyFilter,
+  isGoToLineKey as isGoToLineKeyFor,
   keepActive,
+  keyIntent,
   lineSuffix,
   lookupQuery,
   mergeFiles,
@@ -133,6 +135,7 @@ export function initPalette(o) {
     const li = e.target.closest('li[data-i]');
     if (li && Number(li.dataset.i) !== active) {
       navigated = true;
+      enterQueued = false;
       setActive(Number(li.dataset.i), false);
     }
   });
@@ -153,8 +156,7 @@ export function initPalette(o) {
 export const paletteOpen = () => Boolean(dlg && dlg.open);
 
 // isGoToLineKey is Cmd+G (Ctrl+G off a Mac), the editor go-to-line chord.
-export const isGoToLineKey = (e) =>
-  (isMac ? e.metaKey : e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'g';
+export const isGoToLineKey = (e) => isGoToLineKeyFor(e, isMac);
 
 export function togglePalette() {
   if (paletteOpen()) dlg.close();
@@ -493,32 +495,26 @@ function onKey(e) {
   // Keys typed here must never reach the page's global shortcuts ("/",
   // Esc back to results, Shift+Backspace clearing filters).
   e.stopPropagation();
-  const ctrlOnly = e.ctrlKey && !e.metaKey && !e.altKey;
-  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
-    e.preventDefault();
+  const intent = keyIntent(e, isMac);
+  if (!intent) return;
+  e.preventDefault();
+  if (intent === 'close') {
     dlg.close();
-  } else if (isGoToLineKey(e)) {
+  } else if (intent === 'goToLine') {
     // Also swallowed without a file open: the browser's find-next would
     // otherwise fire behind the modal.
-    e.preventDefault();
     if (opts.currentFile()) openPalette(':');
-  } else if (e.key === 'ArrowDown' || (ctrlOnly && e.key === 'n')) {
-    e.preventDefault();
+  } else if (intent === 'down' || intent === 'up') {
+    // Moving the selection is a new choice: a queued Enter was for the old
+    // one and must not fire on whatever is selected when results land.
     navigated = true;
-    setActive(active + 1, false);
-  } else if (e.key === 'ArrowUp' || (ctrlOnly && e.key === 'p')) {
-    e.preventDefault();
-    navigated = true;
-    setActive(active - 1, false);
-  } else if (e.key === 'Enter') {
-    e.preventDefault();
+    enterQueued = false;
+    setActive(active + (intent === 'down' ? 1 : -1), false);
+  } else if (intent === 'run') {
     // Typed fast and hit Enter: wait for the lookup the input asked for
     // rather than run a row from before it arrived.
     if (lookup.pending() && !navigated) enterQueued = true;
     else if (items[active]) runItem(items[active]);
-  } else if (e.key === 'Escape') {
-    e.preventDefault();
-    dlg.close();
   }
 }
 

@@ -133,3 +133,23 @@ export function substringPositions(text, term) {
   }
   return out;
 }
+
+// isGoToLineKey is Cmd+G on a Mac and Ctrl+G elsewhere, the editor
+// go-to-line chord.
+export const isGoToLineKey = (e, mac) =>
+  (mac ? e.metaKey : e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'g';
+
+// keyIntent maps a keydown in the palette input to an action, or null to
+// let the key type. Keys during IME composition always type: their Enter
+// and arrows confirm or move within the composed text.
+export function keyIntent(e, mac) {
+  if (e.isComposing || e.keyCode === 229) return null;
+  const ctrlOnly = e.ctrlKey && !e.metaKey && !e.altKey;
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') return 'close';
+  if (isGoToLineKey(e, mac)) return 'goToLine';
+  if (e.key === 'ArrowDown' || (ctrlOnly && e.key === 'n')) return 'down';
+  if (e.key === 'ArrowUp' || (ctrlOnly && e.key === 'p')) return 'up';
+  if (e.key === 'Enter') return 'run';
+  if (e.key === 'Escape') return 'close';
+  return null;
+}
