@@ -6,6 +6,9 @@ import "github.com/alecthomas/chroma/v2"
 // Night on a near-black #050014 background) so highlighted files match the
 // editor and terminal. Chroma's bundled tokyonight-night differs in enough
 // places (comments, types, operators) to look noticeably off beside them.
+// Files in Shiki's languages are coloured client-side by the Shiki port of
+// the same theme in tools/shiki/build.mjs, and the page chrome by the
+// variables in static/style.css; change them together.
 var anvilNight = chroma.MustNewStyle("anvil-night", chroma.StyleEntries{
 	chroma.Background:       "bg:#050014 #c0caf5",
 	chroma.LineNumbers:      "#3b4261",

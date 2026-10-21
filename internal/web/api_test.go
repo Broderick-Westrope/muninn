@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -450,6 +451,27 @@ func TestAPIFileHighlighted(t *testing.T) {
 	if !strings.Contains(res.Highlighted, `id="L3"`) {
 		t.Errorf("highlighted = %q, want linkable line-number anchors (id=\"L3\")", res.Highlighted)
 	}
+	if !res.Highlightable {
+		t.Error("highlightable = false for a small file, want true")
+	}
+}
+
+func TestAPIFileHighlightOptOut(t *testing.T) {
+	srv, _ := newFixture(t)
+	var res fileResponse
+	rec := get(t, srv, `/api/file?repo=acme/widget&path=other.go&highlight=0`, &res)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if res.Highlighted != "" {
+		t.Errorf("highlighted = %q, want empty with highlight=0", res.Highlighted)
+	}
+	if res.Content == "" {
+		t.Error("content is empty, want the file content with highlight=0")
+	}
+	if !res.Highlightable {
+		t.Error("highlightable = false for a small file, want true so the UI highlights it")
+	}
 }
 
 func TestAPIFileHighlightCap(t *testing.T) {
@@ -462,6 +484,9 @@ func TestAPIFileHighlightCap(t *testing.T) {
 	if res.Highlighted != "" {
 		t.Errorf("highlighted is non-empty for %d lines, want plain-view fallback past %d",
 			res.TotalLines, maxHighlightLines)
+	}
+	if res.Highlightable {
+		t.Errorf("highlightable = true for %d lines, want false past %d", res.TotalLines, maxHighlightLines)
 	}
 	if res.Content != hugeText {
 		t.Error("content missing or wrong, want the full file even when highlighting is skipped")
@@ -481,6 +506,11 @@ func TestUIStaticAssets(t *testing.T) {
 		{"/main.js", "javascript", "initSearch"},
 		{"/search.js", "javascript", "runSearch"},
 		{"/palette.js", "javascript", "initPalette"},
+		{"/highlight.js", "javascript", "highlightPre"},
+		{"/highlight-worker.js", "javascript", "getHighlighter"},
+		{"/languages.js", "javascript", "languageFor"},
+		{"/highlight-markup.js", "javascript", "highlightFile"},
+		{"/vendor/shiki/shiki.js", "javascript", "getHighlighter"},
 		{"/style.css", "text/css", "prefers-color-scheme"},
 		{"/chroma.css", "text/css", "@media (prefers-color-scheme: dark)"},
 	}
@@ -499,6 +529,32 @@ func TestUIStaticAssets(t *testing.T) {
 		}
 		if !strings.Contains(rec.Body.String(), tt.wantBody) {
 			t.Errorf("GET %s: body does not contain %q", tt.path, tt.wantBody)
+		}
+	}
+}
+
+// TestUIVendorChunks checks every chunk of the vendored Shiki bundle is
+// embedded and served as JavaScript: the worker imports them lazily, so a
+// missing one only fails when a file in that language is opened.
+func TestUIVendorChunks(t *testing.T) {
+	chunks, err := fs.Glob(staticFiles, "static/vendor/shiki/chunks/*.js")
+	if err != nil {
+		t.Fatalf("glob vendored chunks: %v", err)
+	}
+	if len(chunks) == 0 {
+		t.Fatal("no vendored Shiki chunks embedded, want the grammar chunks under static/vendor/shiki/chunks")
+	}
+	handler := (&Server{}).Handler()
+	for _, chunk := range chunks {
+		path := strings.TrimPrefix(chunk, "static")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusOK {
+			t.Errorf("GET %s: status = %d, want 200", path, rec.Code)
+			continue
+		}
+		if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "javascript") {
+			t.Errorf("GET %s: Content-Type = %q, want javascript", path, ct)
 		}
 	}
 }

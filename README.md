@@ -71,7 +71,7 @@ See [docs/configuration.md](docs/configuration.md) for every config field, token
 
 ### Web UI
 
-`muninn web` serves the UI at `127.0.0.1:7576` until you press Ctrl-C, and opens it in your browser (`--open=false` skips that, and `--addr` picks another port). Search uses Zoekt's query syntax (`sym:NewServer case:yes repo:muninn`), the sidebar filters by repo and file type, and every file links to a GitHub permalink pinned to the indexed commit. If you have a checkout of the repo locally, it also opens in Cursor or VS Code.
+`muninn web` serves the UI at `127.0.0.1:7576` until you press Ctrl-C, and opens it in your browser (`--open=false` skips that, and `--addr` picks another port). Search uses Zoekt's query syntax (`sym:NewServer case:yes repo:muninn`), the sidebar filters by repo and file type, and files open with VS Code-quality syntax highlighting for common languages. Every file links to a GitHub permalink pinned to the indexed commit. If you have a checkout of the repo locally, it also opens in Cursor or VS Code.
 
 | Key | Does |
 |---|---|

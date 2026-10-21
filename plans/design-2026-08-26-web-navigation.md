@@ -35,6 +35,8 @@
 
 ## Constraints
 
+> **Relaxed by `design-2026-10-21-shiki-highlighting.md`:** the vendored Shiki bundle is built with Node in `tools/shiki` (output committed, `go build` stays Node-free), worker output joins the `innerHTML` allow-list, and DOM-free JS modules have Node tests.
+
 - **No build step.** Assets are embedded via `static.go` and served directly. Native ES modules only; no bundler, no transpiler, no npm.
 - **Line numbers must stay pinned to the indexed commit.** Tree listings read from the bare mirror at the repo's indexed commit, exactly as `handleFile` does via `resolveIndexedCommit`. The status file is never cached (server.go:30-35).
 - **Loopback-only, unauthenticated.** The server serves an unauthenticated index of private code. The new write-ish endpoint must not widen this surface (see Design Decisions → CSRF).

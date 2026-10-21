@@ -1,0 +1,20 @@
+{
+  "name": "muninn-shiki-vendor",
+  "private": true,
+  "description": "Builds the Shiki bundle vendored in internal/web/static/vendor/shiki",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "devDependencies": {
+    "@shikijs/langs": "4.5.0",
+    "@shikijs/themes": "4.5.0",
+    "esbuild": "0.28.2",
+    "shiki": "4.5.0",
+    "tm-grammars": "1.32.22",
+    "tm-themes": "1.12.12"
+  },
+  "engines": {
+    "node": ">=20.10"
+  }
+}

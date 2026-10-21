@@ -2,6 +2,7 @@
 
 import { api } from './api.js';
 import { $, copyBtn, copyText, errorBox, note, plural } from './dom.js';
+import { highlightPre, preloadGrammar, shikiAvailable, warmHighlighter } from './highlight.js';
 import { fileHash } from './routes.js';
 
 let fileEl = null;
@@ -11,6 +12,7 @@ let currentFileData = null; // /api/file response for the showing file
 
 export function initFile(el) {
   fileEl = el;
+  warmHighlighter();
   // Clicking a gutter line number selects that line, and shift-clicking
   // extends the selection to a range from the first selected line, as on
   // GitHub. The URL is updated (shareable deep link) without adding a
@@ -65,21 +67,25 @@ export async function showFile(loc) {
   // Abort any in-flight fetch so a slow stale response can never render
   // over a newer navigation (mirrors the search path).
   if (fileCtl) fileCtl.abort();
-  fileCtl = new AbortController();
+  const ctl = new AbortController();
+  fileCtl = ctl;
   currentFileData = null;
   fileEl.replaceChildren(fileHeader(loc, null), note('Loading…'));
+  // Shiki renders its languages here, so the server skips chroma for them.
+  const serverHighlight = !shikiAvailable(loc.path);
+  preloadGrammar(loc.path);
   let data;
   try {
-    data = await api(
-      `/api/file?repo=${encodeURIComponent(loc.repo)}&path=${encodeURIComponent(loc.path)}`,
-      fileCtl.signal,
-    );
+    data = await fetchFile(loc, serverHighlight, ctl.signal);
   } catch (e) {
     if (e.name === 'AbortError') return false;
     fileEl.replaceChildren(fileHeader(loc, null), errorBox(friendlyFileError(e)));
     return false;
   }
   currentFileData = data;
+  // Shiki tokenizes in a worker while the plain text is put on screen; its
+  // colours replace the plain view when ready.
+  const shiki = data.highlighted ? null : highlightPre(loc.path, data, ctl.signal);
   const body = document.createElement('div');
   body.className = 'file-body';
   if (data.highlighted) {
@@ -95,7 +101,66 @@ export async function showFile(loc) {
   const target = same ? currentFile : loc;
   fileEl.replaceChildren(fileHeader(target, data), body);
   if (target.line) targetLines(target.line, target.endLine, true);
+  if (shiki) colourIn(loc, data, body, shiki, serverHighlight, ctl.signal);
   return true;
+}
+
+// colourIn swaps Shiki's colours into the plain view once shiki settles. If
+// Shiki should have coloured the file and couldn't, and the server skipped
+// chroma for it, it asks for chroma after all.
+async function colourIn(loc, data, body, shiki, serverHighlight, signal) {
+  let { pre, failed } = await shiki;
+  if (failed && !serverHighlight && !signal.aborted) {
+    pre = await chromaPre(loc, data.indexedCommit, signal);
+  }
+  if (!pre || signal.aborted) return;
+  swapIn(body, pre);
+}
+
+function fetchFile(loc, serverHighlight, signal) {
+  const opt = serverHighlight ? '' : '&highlight=0';
+  return api(
+    `/api/file?repo=${encodeURIComponent(loc.repo)}&path=${encodeURIComponent(loc.path)}${opt}`,
+    signal,
+  );
+}
+
+// chromaPre fetches the server-highlighted view of loc, or resolves to null.
+// It also resolves to null if the index moved past commit since the plain
+// view was fetched, so the colours never describe different lines from the
+// header and links on screen.
+async function chromaPre(loc, commit, signal) {
+  try {
+    const { highlighted, indexedCommit } = await fetchFile(loc, true, signal);
+    if (!highlighted || indexedCommit !== commit) return null;
+    const holder = document.createElement('div');
+    // Chroma output: all source text escaped by construction.
+    holder.innerHTML = highlighted;
+    return holder.firstElementChild;
+  } catch (e) {
+    if (e.name !== 'AbortError') console.warn('chroma fallback failed; showing plain text', e);
+    return null;
+  }
+}
+
+// swapIn replaces the plain view in body with a highlighted pre of the same
+// DOM shape, keeping vertical scroll and the gutter selection; the pre owns
+// horizontal scroll, so that is carried over explicitly. Replacing the DOM
+// would drop a text selection the reader has made in the file, so in that
+// case the file stays plain.
+function swapIn(body, pre) {
+  const sel = document.getSelection();
+  if (sel && !sel.isCollapsed && sel.containsNode(body, true)) return;
+  const scrollLeft = body.firstElementChild?.scrollLeft ?? 0;
+  // A focused gutter link is replaced too; refocus its twin.
+  const focusedLine = body.contains(document.activeElement)
+    ? document.activeElement.closest('.ln')?.id
+    : null;
+  body.replaceChildren(pre);
+  pre.scrollLeft = scrollLeft;
+  if (focusedLine) pre.querySelector(`#${focusedLine} a`)?.focus({ preventScroll: true });
+  // currentFile, not loc: a gutter click may have moved the selection since.
+  if (currentFile?.line) targetLines(currentFile.line, currentFile.endLine, false);
 }
 
 function fileHeader(loc, data) {

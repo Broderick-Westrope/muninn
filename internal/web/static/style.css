@@ -3,7 +3,8 @@
 :root {
   color-scheme: light dark;
   /* Tokyo Night Day; the dark block below is Anvil Night, matching the
-     editor and terminal themes and the chroma styles in highlight.go. */
+     editor and terminal themes. Token colours are set separately by the
+     chroma style in theme.go and the Shiki theme in tools/shiki/build.mjs. */
   --bg: #e1e2e7;
   --fg: #3760bf;
   --muted: #6172b0;

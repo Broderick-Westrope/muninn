@@ -95,8 +95,13 @@ type fileResponse struct {
 	Content string `json:"content"`
 	// Highlighted is the whole file as chroma-generated HTML (class-based,
 	// escaped by construction). It is empty when the file exceeds the
-	// highlighting caps, signalling the UI to fall back to a plain view.
-	Highlighted   string `json:"highlighted"`
+	// highlighting caps, the request passed highlight=0, or chroma fails to
+	// tokenize it.
+	Highlighted string `json:"highlighted"`
+	// Highlightable reports whether the file is within the highlighting
+	// caps, so the UI knows whether to highlight it client-side when it
+	// passed highlight=0.
+	Highlightable bool   `json:"highlightable"`
 	IndexedCommit string `json:"indexedCommit"`
 	TotalLines    int    `json:"totalLines"`
 	LocalPath     string `json:"localPath,omitempty"`    // abs path in a local checkout, when found
@@ -290,7 +295,10 @@ func toFacetsJSON(f *search.Facets) facetsJSON {
 
 // handleFile serves GET /api/file?repo=<owner/name>&path=<p>, returning
 // the whole file pinned to the repo's indexed commit (the viewer needs
-// complete content for scroll-to-line).
+// complete content for scroll-to-line). highlight=0 skips chroma: the UI
+// sets it for languages it highlights itself, where server-rendered HTML
+// would cost several times the file size in CPU, allocations and payload
+// only to be discarded.
 func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 	repo := r.URL.Query().Get("repo")
 	filePath := r.URL.Query().Get("path")
@@ -325,10 +333,15 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	localPath, scheme := s.localFile(repo, filePath)
+	var highlighted string
+	if r.URL.Query().Get("highlight") != "0" {
+		highlighted = highlight(filePath, content, totalLines)
+	}
 
 	writeJSON(w, http.StatusOK, fileResponse{
 		Content:       content,
-		Highlighted:   highlight(filePath, content, totalLines),
+		Highlighted:   highlighted,
+		Highlightable: withinHighlightCaps(content, totalLines),
 		IndexedCommit: commit,
 		TotalLines:    totalLines,
 		LocalPath:     localPath,

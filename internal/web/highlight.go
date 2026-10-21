@@ -13,9 +13,10 @@ import (
 )
 
 // Highlighting caps: past either bound the file API returns an empty
-// highlighted field and the UI falls back to a plain <pre> view. Chroma
-// tokenizes the whole file in memory, so unbounded input would make the
-// worst-case /api/file response CPU- and allocation-heavy.
+// highlighted field and highlightable=false, and the UI shows a plain <pre>
+// view. Chroma tokenizes the whole file in memory, so unbounded input would
+// make the worst-case /api/file response CPU- and allocation-heavy; the
+// UI's Shiki worker honours the same bounds through highlightable.
 const (
 	maxHighlightBytes = 1 << 20 // 1 MiB
 	maxHighlightLines = 10_000
@@ -41,13 +42,18 @@ var htmlFormatter = chromahtml.New(
 	chromahtml.WithLinkableLineNumbers(true, "L"),
 )
 
+// withinHighlightCaps reports whether content is small enough to highlight.
+func withinHighlightCaps(content string, totalLines int) bool {
+	return len(content) <= maxHighlightBytes && totalLines <= maxHighlightLines
+}
+
 // highlight returns content rendered as chroma-highlighted HTML, choosing
 // the lexer by file name with a plaintext fallback. It returns "" (the
 // plain-view fallback signal) for oversized content or on tokenizer
 // errors. Chroma escapes all source text, so the result is safe to inject
 // into the page by construction.
 func highlight(path, content string, totalLines int) string {
-	if len(content) > maxHighlightBytes || totalLines > maxHighlightLines {
+	if !withinHighlightCaps(content, totalLines) {
 		return ""
 	}
 	lexer := lexers.Match(path)

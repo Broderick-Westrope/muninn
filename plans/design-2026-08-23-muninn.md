@@ -33,7 +33,7 @@ In (v1):
   - launchd stdout/stderr redirected to a log under `~/.local/state/muninn/`.
   - The MCP server checks index age at startup and includes a staleness warning in `list_repos` output when the last successful sync is older than a threshold.
   - `muninn status` prints last sync result and per-repo failures.
-- **Web UI**: `muninn web` starts a local server on demand (Ctrl-C to stop). Search box supporting Zoekt query syntax (`repo:`, `file:`, `sym:`, regex), results with highlighted snippets, click-through file viewer with syntax highlighting. Embedded assets, no Node.
+- **Web UI**: `muninn web` starts a local server on demand (Ctrl-C to stop). Search box supporting Zoekt query syntax (`repo:`, `file:`, `sym:`, regex), results with highlighted snippets, click-through file viewer with syntax highlighting. Embedded assets, no Node (relaxed for the vendored Shiki bundle by `design-2026-10-21-shiki-highlighting.md`).
 - **CLI search**: `muninn search "pattern"` for terminal use and index debugging.
 - **Config**: JSON file modeled on Sourcebot's v3 connection schema subset — GitHub `orgs`, `exclude` (archived via API flag + repo list), explicit `repos` for ad-hoc additions.
 - **Auth**: GitHub token resolved at `--install` time and stored in the config file with `0600` perms (launchd jobs don't inherit shell env; `gh auth token` may hit keychain prompts non-interactively). Fetches use HTTPS with the token. Interactive runs may still fall back to env/`gh`.
