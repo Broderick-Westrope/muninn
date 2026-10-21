@@ -86,19 +86,29 @@ func checkPrivateDir(dir string) error {
 // identity, listens on the spec's socket, and serves sessions until it
 // has been idle for defaultMCPIdle. Its stderr is the daemon log.
 func runMCPDaemon(ctx context.Context, encoded string) error {
+	log.SetOutput(dropInfo{os.Stderr})
+	log.SetPrefix(fmt.Sprintf("mcp daemon %d: ", os.Getpid()))
+	if err := serveMCPDaemon(ctx, encoded); err != nil {
+		// Its stderr is the log, so report it once there, timestamped,
+		// rather than again through main's unprefixed "Error:" line.
+		log.Printf("exiting: %v", err)
+		return &ExitError{Code: 1}
+	}
+	log.Printf("exiting")
+	return nil
+}
+
+func serveMCPDaemon(ctx context.Context, encoded string) error {
 	spec, err := mcpsock.DecodeSpec(encoded)
 	if err != nil {
 		return err
 	}
-	log.SetOutput(dropInfo{os.Stderr})
-	log.SetPrefix(fmt.Sprintf("mcp daemon %d: ", os.Getpid()))
 
 	// Wait until reparented so no session is admitted while the daemon is
 	// still inside the process tree of the client that started it.
 	for deadline := time.Now().Add(daemonSetupTimeout); os.Getppid() != 1; time.Sleep(10 * time.Millisecond) {
 		if time.Now().After(deadline) {
-			log.Printf("not reparented to launchd (parent %d); exiting", os.Getppid())
-			return fmt.Errorf("not reparented after %v", daemonSetupTimeout)
+			return fmt.Errorf("not reparented to launchd after %v (parent %d)", daemonSetupTimeout, os.Getppid())
 		}
 	}
 
@@ -111,12 +121,12 @@ func runMCPDaemon(ctx context.Context, encoded string) error {
 		}
 	}
 	if errors.Is(err, lock.ErrLocked) {
-		log.Printf("another shared MCP server owns this index; exiting")
+		log.Printf("another shared MCP server owns this index")
 		return nil
 	}
 	if err != nil {
+		// TryAcquire returns a usable lock alongside ErrUnsupported.
 		lk.Release()
-		log.Printf("can't own %s: %v", spec.Lock(), err)
 		return err
 	}
 	defer lk.Release()
@@ -126,7 +136,6 @@ func runMCPDaemon(ctx context.Context, encoded string) error {
 	applyMemoryLimit()
 	searcher, err := search.Open(spec.IndexDir)
 	if err != nil {
-		log.Printf("opening index: %v", err)
 		return err
 	}
 	defer searcher.Close()
@@ -138,7 +147,6 @@ func runMCPDaemon(ctx context.Context, encoded string) error {
 	}
 	ln, err := net.Listen("unix", spec.Socket())
 	if err != nil {
-		log.Printf("listening: %v", err)
 		return fmt.Errorf("listening on %s: %w", spec.Socket(), err)
 	}
 
@@ -146,12 +154,7 @@ func runMCPDaemon(ctx context.Context, encoded string) error {
 	defer stop()
 	log.Printf("serving %s", spec.Socket())
 	srv := muninnmcp.New(searcher, spec.StatusPath, spec.MirrorsDir)
-	if err := srv.Serve(ctx, ln, spec.Identity, defaultMCPIdle); err != nil {
-		log.Printf("exiting: %v", err)
-		return err
-	}
-	log.Printf("exiting")
-	return nil
+	return srv.Serve(ctx, ln, spec.Identity, defaultMCPIdle)
 }
 
 // dropInfo discards Zoekt's informational shard-loading lines and passes
