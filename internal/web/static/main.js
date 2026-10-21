@@ -1,6 +1,6 @@
 'use strict';
 
-import { $, note } from './dom.js';
+import { $, copyText, note } from './dom.js';
 import {
   activeCount,
   clearFacets,
@@ -221,7 +221,7 @@ function commands() {
   cmds.push({
     title: 'Copy link to this page',
     toast: 'Link copied',
-    run: () => navigator.clipboard.writeText(location.href),
+    run: () => copyText(location.href),
   });
   return cmds;
 }

@@ -62,6 +62,14 @@ export function icon(name) {
   return svg;
 }
 
+// copyText writes text to the clipboard. The Clipboard API only exists in a
+// secure context, which a non-loopback --unsafe-listen address is not, so
+// its absence is reported in words rather than as a TypeError.
+export async function copyText(text) {
+  if (!navigator.clipboard) throw new Error('Clipboard unavailable on this address');
+  await navigator.clipboard.writeText(text);
+}
+
 // copyBtn returns an icon button that copies text (a string, or a function
 // evaluated at click time) and briefly swaps to a checkmark to confirm.
 export function copyBtn(text, title, iconName = 'copy') {
@@ -77,7 +85,7 @@ export function copyBtn(text, title, iconName = 'copy') {
     e.preventDefault();
     e.stopPropagation();
     try {
-      await navigator.clipboard.writeText(typeof text === 'function' ? text() : text);
+      await copyText(typeof text === 'function' ? text() : text);
     } catch {
       return; // clipboard unavailable — leave the button inert
     }

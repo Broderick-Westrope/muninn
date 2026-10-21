@@ -1,7 +1,7 @@
 'use strict';
 
 import { api } from './api.js';
-import { $, copyBtn, errorBox, note, plural } from './dom.js';
+import { $, copyBtn, copyText, errorBox, note, plural } from './dom.js';
 import { fileHash } from './routes.js';
 
 let fileEl = null;
@@ -168,13 +168,13 @@ export function fileCommands() {
       title: 'Copy path',
       detail: pathLabel(currentFile),
       toast: 'Path copied',
-      run: () => navigator.clipboard.writeText(pathLabel(currentFile)),
+      run: () => copyText(pathLabel(currentFile)),
     },
     {
       title: 'Copy GitHub permalink',
       detail: lineLabel(currentFile) || 'whole file',
       toast: 'Permalink copied',
-      run: () => navigator.clipboard.writeText(githubUrl(currentFile, data)),
+      run: () => copyText(githubUrl(currentFile, data)),
     },
     {
       title: 'Open on GitHub',
