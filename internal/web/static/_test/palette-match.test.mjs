@@ -1,7 +1,15 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { fuzzy, keepActive, keyIntent, lookupQuery, mergeFiles, splitLineTarget } from '../palette-match.js';
+import {
+  fuzzy,
+  keepActive,
+  keyIntent,
+  lookupQuery,
+  mergeFiles,
+  shouldQueueEnter,
+  splitLineTarget,
+} from '../palette-match.js';
 
 test('keepActive keeps the selected item when an async update re-renders', () => {
   assert.equal(keepActive('cmd:permalink', ['cmd:focus', 'cmd:permalink', 'file:a'], false), 1);
@@ -69,4 +77,18 @@ test('keyIntent leaves keys alone while an IME is composing', () => {
   // Safari reports the composition-ending keydown with keyCode 229 only.
   assert.equal(keyIntent(key('Enter', { keyCode: 229 }), true), null);
   assert.equal(keyIntent(key('Escape', { isComposing: true }), true), null);
+});
+
+test('lookupQuery passes repo: atoms through to scope a lookup', () => {
+  assert.equal(lookupQuery('file', 'repo:pilot payments.ts'), 'repo:pilot file:payments\\.ts type:file');
+});
+
+test('shouldQueueEnter waits only when the lookup supplies the selected row', () => {
+  // Files are pending and lead the list: Enter waits for them.
+  assert.equal(shouldQueueEnter({ pending: true, navigated: false, active: 0, lookupStart: 0 }), true);
+  // A command sits above the pending files: run it now.
+  assert.equal(shouldQueueEnter({ pending: true, navigated: false, active: 0, lookupStart: 2 }), false);
+  // The user picked a row themselves.
+  assert.equal(shouldQueueEnter({ pending: true, navigated: true, active: 3, lookupStart: 0 }), false);
+  assert.equal(shouldQueueEnter({ pending: false, navigated: false, active: 0, lookupStart: 0 }), false);
 });

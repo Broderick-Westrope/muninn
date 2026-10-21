@@ -12,6 +12,7 @@ import {
   mergeFiles,
   parse,
   parseLines,
+  shouldQueueEnter,
   splitLineTarget,
   substringPositions,
 } from './palette-match.js';
@@ -57,6 +58,7 @@ let repoNames = null; // cached /api/repos names, loaded on first open
 // instead of running whatever happens to be on top.
 let navigated = false;
 let enterQueued = false;
+let lookupStart = Infinity; // index where the lookup's rows begin in items
 
 const lookup = createLookup({
   fetch: fetchLookup,
@@ -288,7 +290,11 @@ function lineGroup(term) {
 }
 
 function goTo(repo, path, line, endLine) {
-  location.hash = fileHash(repo, path, line, endLine);
+  const hash = fileHash(repo, path, line, endLine);
+  // Re-choosing the current target fires no hashchange, but the user may
+  // have scrolled away from it: route anyway so it scrolls back.
+  if (location.hash === hash) window.dispatchEvent(new HashChangeEvent('hashchange'));
+  else location.hash = hash;
 }
 
 // remoteGroup returns what the lookup knows for a file or symbol term right
@@ -305,6 +311,7 @@ function remoteGroup(label, kind, term, max) {
   const sameKind = v.staleKey.startsWith(`${kind}\u0000`);
   const group = {
     label,
+    lookup: true,
     items: v.items.slice(0, max),
     stale: sameKind ? v.stale.slice(0, max) : [],
     note: '',
@@ -312,7 +319,7 @@ function remoteGroup(label, kind, term, max) {
   if (v.error) group.note = v.error;
   else if (v.pending) group.note = 'Searching…';
   else if (!group.items.length) group.note = 'No matches.';
-  else if (v.truncated || v.items.length > max) group.note = 'More matches — keep typing to narrow.';
+  else if (v.truncated || v.items.length > max) group.note = 'More matches — keep typing, or add repo:<name>.';
   return group;
 }
 
@@ -371,6 +378,7 @@ function symbolItems(files, term) {
 function render(groups, reset) {
   const prevKey = items[active]?.key;
   items = [];
+  lookupStart = Infinity;
   const frag = document.createDocumentFragment();
   for (const g of groups) {
     const stale = g.stale || [];
@@ -380,6 +388,7 @@ function render(groups, reset) {
     head.setAttribute('role', 'presentation');
     head.textContent = g.label;
     frag.append(head);
+    if (g.lookup) lookupStart = items.length;
     for (const it of g.items) {
       const keyed = { ...it, key: `${g.label}\u0000${it.title}\u0000${it.detail || ''}` };
       frag.append(itemEl(keyed, items.push(keyed) - 1));
@@ -513,8 +522,11 @@ function onKey(e) {
   } else if (intent === 'run') {
     // Typed fast and hit Enter: wait for the lookup the input asked for
     // rather than run a row from before it arrived.
-    if (lookup.pending() && !navigated) enterQueued = true;
-    else if (items[active]) runItem(items[active]);
+    if (shouldQueueEnter({ pending: lookup.pending(), navigated, active, lookupStart })) {
+      enterQueued = true;
+    } else if (items[active]) {
+      runItem(items[active]);
+    }
   }
 }
 

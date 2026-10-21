@@ -40,12 +40,16 @@ export const lineSuffix = (t) => (t.endLine ? `:${t.line}-${t.endLine}` : `:${t.
 const escapeRe = (s) => s.replace(/[\\^$.|?*+()[\]{}"]/g, '\\$&');
 
 // lookupQuery builds the zoekt query for a file-name or symbol lookup, each
-// whitespace-separated token an ANDed literal.
+// whitespace-separated token an ANDed literal. A repo:<regex> token passes
+// through as zoekt's repo atom, so a name shared by many repos can be
+// narrowed to one ("repo:pilot payments.ts").
 export function lookupQuery(kind, term) {
-  const tokens = term.split(/\s+/).filter(Boolean).map(escapeRe);
-  return kind === 'file'
-    ? tokens.map((t) => `file:${t}`).join(' ') + ' type:file'
-    : tokens.map((t) => `sym:${t}`).join(' ');
+  const atom = kind === 'file' ? 'file' : 'sym';
+  const parts = term
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((t) => (/^repo:./.test(t) ? t : `${atom}:${escapeRe(t)}`));
+  return kind === 'file' ? `${parts.join(' ')} type:file` : parts.join(' ');
 }
 
 // mergeFiles puts the current repo's matches ahead of the global ones,
@@ -152,4 +156,12 @@ export function keyIntent(e, mac) {
   if (e.key === 'Enter') return 'run';
   if (e.key === 'Escape') return 'close';
   return null;
+}
+
+// shouldQueueEnter decides whether an Enter waits for the pending lookup.
+// It waits only when the selected row is at or below where the lookup's
+// rows will land (lookupStart): those rows could displace it. A command
+// listed above the lookup, or a row the user picked, runs at once.
+export function shouldQueueEnter({ pending, navigated, active, lookupStart }) {
+  return pending && !navigated && active >= lookupStart;
 }
