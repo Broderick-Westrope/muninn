@@ -14,6 +14,8 @@
   --target: rgba(46, 125, 233, 0.1);
   --selection: #b6bfe2;
   --scrollbar: #a8aecb;
+  --shadow: rgba(55, 96, 191, 0.25);
+  --backdrop: rgba(30, 32, 48, 0.25);
   --warn: #8c6c3e;
   --warn-bg: rgba(140, 108, 62, 0.12);
   --warn-border: rgba(140, 108, 62, 0.45);
@@ -45,6 +47,8 @@ body[data-view="file"] {
     --target: rgba(61, 89, 161, 0.18);
     --selection: rgba(51, 70, 124, 0.8);
     --scrollbar: #3b4261;
+    --shadow: rgba(0, 0, 0, 0.5);
+    --backdrop: rgba(5, 0, 20, 0.6);
     --warn: #e0af68;
     --warn-bg: rgba(224, 175, 104, 0.1);
     --warn-border: rgba(224, 175, 104, 0.35);
@@ -616,7 +620,7 @@ dialog.palette {
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 10px;
-  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.28);
+  box-shadow: 0 16px 48px var(--shadow);
   overflow: hidden;
 }
 
@@ -625,7 +629,7 @@ dialog.palette[open] {
 }
 
 dialog.palette::backdrop {
-  background: rgba(0, 0, 0, 0.32);
+  background: var(--backdrop);
 }
 
 .pal-input {

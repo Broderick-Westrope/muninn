@@ -1,7 +1,7 @@
 'use strict';
 
 import { api } from './api.js';
-import { errorBox, note } from './dom.js';
+import { errorBox, note, plural } from './dom.js';
 
 // Facet state lives in its own URL params, never in ?q= — the search input
 // is never rewritten behind the user's back, and a hand-typed repo: atom
@@ -13,6 +13,7 @@ import { errorBox, note } from './dom.js';
 
 let facetsEl = null;
 let onToggle = () => {};
+let clearKeys = ''; // the clear-all shortcut, for the button's tooltip
 
 // The facet universe, kept across loads so the panel never blanks while a
 // slower aggregation is in flight, and the query it was loaded for.
@@ -36,6 +37,7 @@ const NO_EXT = '';
 export function initFacets(opts) {
   facetsEl = opts.facetsEl;
   onToggle = opts.onToggle;
+  clearKeys = opts.clearKeys;
   readFacetsFromURL();
 }
 
@@ -201,12 +203,12 @@ function clearBar() {
   bar.className = 'facet-clear-bar';
   const n = activeCount();
   const count = document.createElement('span');
-  count.textContent = n === 0 ? 'No filters' : `${n} ${n === 1 ? 'filter' : 'filters'}`;
+  count.textContent = n === 0 ? 'No filters' : `${n} ${plural(n, 'filter', 'filters')}`;
   const b = document.createElement('button');
   b.type = 'button';
   b.className = 'facet-clear';
   b.textContent = 'Clear';
-  b.title = 'Clear all filters (Shift+Backspace)';
+  b.title = `Clear all filters (${clearKeys})`;
   b.disabled = n === 0;
   b.addEventListener('click', clearFacets);
   bar.append(count, b);

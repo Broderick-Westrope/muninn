@@ -1,17 +1,16 @@
 'use strict';
 
 import { api } from './api.js';
-import { isMac } from './dom.js';
+import { isMac, markMatches, plural } from './dom.js';
 import { createLookup } from './palette-lookup.js';
 import {
   fuzzyFilter,
-  PREFIXES,
   keyIntent,
   lookupQuery,
   mergeFiles,
   parse,
+  PREFIXES,
   splitLineTarget,
-  substringPositions,
 } from './palette-match.js';
 import { createPicker } from './palette-picker.js';
 import { fileHash, lineSuffix, parseLineRange } from './routes.js';
@@ -23,8 +22,8 @@ import { fileHash, lineSuffix, parseLineRange } from './routes.js';
 // ("payments.ts:15") opens the chosen file at that line, as in an editor's
 // quick open.
 //
-// This module owns no app state. main.js injects the context-aware command
-// list and the search actions, so the palette never imports the modules
+// The palette imports no app modules: main.js injects the context-aware
+// command list and the search actions, so it never imports the modules
 // whose commands it shows.
 
 const REMOTE_LIMIT = 30;
@@ -37,7 +36,6 @@ const MAX_SYMBOLS = 25;
 const RECENT_KEY = 'muninn.recentFiles';
 const RECENT_MAX = 8;
 const TOAST_MS = 1400;
-
 
 let opts = null;
 let dlg = null;
@@ -279,7 +277,7 @@ function lineGroup(term) {
   if (!t) return { label: 'Go to line', items: [], note: 'Type a line number, or a range like 10-20.' };
   const n = opts.fileLines();
   if (n && Math.max(t.line, t.endLine) > n) {
-    return { label: 'Go to line', items: [], note: `This file has ${n} ${n === 1 ? 'line' : 'lines'}.` };
+    return { label: 'Go to line', items: [], note: `This file has ${n} ${plural(n, 'line', 'lines')}.` };
   }
   const title = t.endLine ? `Go to lines ${t.line}–${t.endLine}` : `Go to line ${t.line}`;
   return {
@@ -338,6 +336,10 @@ async function fetchLookup({ kind, term, repo }, signal) {
   };
 }
 
+// highlightTokens are the lookup's literal tokens; repo: atoms narrow the
+// search but never appear in a path or symbol.
+const highlightTokens = (term) => term.split(/\s+/).filter((t) => t && !t.startsWith('repo:'));
+
 function fileItems(files, term, repo) {
   return files
     .map((f, i) => ({ f, i }))
@@ -346,7 +348,7 @@ function fileItems(files, term, repo) {
     .sort((a, b) => (b.f.repo === repo) - (a.f.repo === repo) || a.f.path.length - b.f.path.length)
     .map(({ f }) => ({
       title: f.path,
-      positions: substringPositions(f.path, term),
+      tokens: highlightTokens(term),
       detail: f.repo,
       repo: f.repo,
       path: f.path,
@@ -362,7 +364,7 @@ function symbolItems(files, term) {
       const text = l.line.trim();
       out.push({
         title: text,
-        positions: substringPositions(text, term),
+        tokens: highlightTokens(term),
         detail: `${f.repo}/${f.path}:${l.lineNumber}`,
         run: () => goTo(f.repo, f.path, l.lineNumber),
       });
@@ -431,7 +433,10 @@ function itemEl(it, i) {
   }
   const title = document.createElement('span');
   title.className = 'pal-title';
-  highlight(title, it.title, it.positions);
+  // Server-matched rows mark their tokens wherever they occur, as search
+  // results do; fuzzy-matched rows mark the exact characters that matched.
+  if (it.tokens) markMatches(title, it.title, it.tokens);
+  else highlight(title, it.title, it.positions);
   li.append(title);
   if (it.detail) {
     const d = document.createElement('span');

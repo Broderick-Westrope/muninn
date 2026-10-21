@@ -136,8 +136,9 @@ const inResultsView = () => document.body.dataset.view === 'results';
 const mod = isMac ? '⌘' : 'Ctrl';
 
 // shortcuts are the page's global keys, checked in order. available() is
-// the view condition alone; commands() lists a command with a key only when
-// its shortcut is available, so the palette never advertises a dead key.
+// whether the key would do anything right now, ignoring the palette;
+// commands() lists a command with a key only when its shortcut is
+// available, so the palette never advertises a dead key.
 // Only the palette chord works while the palette is open: the palette stops
 // its own keys from bubbling, and this guards against one reaching the page
 // another way.
@@ -242,7 +243,11 @@ initTree(treeEl);
 // A facet toggle re-searches immediately: it is a click, not typing, so it
 // must not wait out the input debounce. The universe does not depend on the
 // selection, so its refetch is immediate and cheap (same query).
-initFacets({ facetsEl, onToggle: () => search(false, true) });
+initFacets({
+  facetsEl,
+  onToggle: () => search(false, true),
+  clearKeys: shortcuts.clearFilters.keys.join('+'),
+});
 initHints(hintsEl, searchInput);
 initPalette({
   commands,
