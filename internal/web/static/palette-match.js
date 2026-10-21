@@ -3,6 +3,8 @@
 // Pure input parsing, matching and ordering for the command palette. No DOM
 // and no state, so it can be tested under node.
 
+import { parseLineRange } from './routes.js';
+
 // parse splits palette input into its mode (by leading prefix) and term.
 export function parse(v) {
   const c = v[0];
@@ -12,29 +14,18 @@ export function parse(v) {
   return { mode: 'all', term: v.trim() };
 }
 
-// parseLines reads "15" or "10-20" as a line target, normalising a
-// reversed range; null when s is not a line target.
-export function parseLines(s) {
-  const m = s.match(/^(\d+)(?:\s*-\s*(\d+))?$/);
-  if (!m) return null;
-  let line = Number(m[1]);
-  let endLine = m[2] ? Number(m[2]) : 0;
-  if (endLine && endLine < line) [line, endLine] = [endLine, line];
-  if (endLine === line) endLine = 0;
-  return line > 0 ? { line, endLine } : null;
-}
-
 // splitLineTarget separates "payments.ts:15" into the file term and its
-// line target. A bare ":15" is the go-to-line mode, not this.
+// line target. A bare ":15" is the go-to-line mode, not this. A trailing
+// colon (typed on the way to "main.go:15") is dropped rather than searched.
 export function splitLineTarget(term) {
   const at = term.lastIndexOf(':');
   if (at <= 0) return { base: term, target: null };
-  const target = parseLines(term.slice(at + 1).trim());
   const base = term.slice(0, at).trim();
+  const rest = term.slice(at + 1).trim();
+  if (!rest && base) return { base, target: null };
+  const target = parseLineRange(rest);
   return target && base ? { base, target } : { base: term, target: null };
 }
-
-export const lineSuffix = (t) => (t.endLine ? `:${t.line}-${t.endLine}` : `:${t.line}`);
 
 // escapeRe makes a typed token match literally: file: and sym: take regexes.
 const escapeRe = (s) => s.replace(/[\\^$.|?*+()[\]{}"]/g, '\\$&');

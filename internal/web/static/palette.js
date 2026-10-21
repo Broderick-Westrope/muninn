@@ -7,16 +7,14 @@ import {
   isGoToLineKey as isGoToLineKeyFor,
   keepActive,
   keyIntent,
-  lineSuffix,
   lookupQuery,
   mergeFiles,
   parse,
-  parseLines,
   shouldQueueEnter,
   splitLineTarget,
   substringPositions,
 } from './palette-match.js';
-import { fileHash } from './routes.js';
+import { fileHash, lineSuffix, parseLineRange } from './routes.js';
 
 // The command palette (Cmd/Ctrl+K). Plain text mixes commands, recent and
 // matching files, repos, and a code search; a leading ">" narrows to
@@ -235,7 +233,7 @@ function update(reset = true) {
       // chosen one opens at that line.
       const atLine = (it) => ({
         ...it,
-        title: it.title + lineSuffix(target),
+        title: it.title + lineSuffix(target.line, target.endLine),
         run: () => goTo(it.repo, it.path, target.line, target.endLine),
       });
       files.items = files.items.map(atLine);
@@ -280,7 +278,7 @@ function repoItems(term) {
 function lineGroup(term) {
   const f = opts.currentFile();
   if (!f) return { label: 'Go to line', items: [], note: 'Open a file first.' };
-  const t = parseLines(term);
+  const t = parseLineRange(term);
   if (!t) return { label: 'Go to line', items: [], note: 'Type a line number, or a range like 10-20.' };
   const title = t.endLine ? `Go to lines ${t.line}–${t.endLine}` : `Go to line ${t.line}`;
   return {

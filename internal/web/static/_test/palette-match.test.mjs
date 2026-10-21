@@ -91,3 +91,7 @@ test('shouldQueueEnter waits only when the lookup supplies the selected row', ()
   assert.equal(shouldQueueEnter({ pending: true, navigated: true, active: 3, lookupStart: 0 }), false);
   assert.equal(shouldQueueEnter({ pending: false, navigated: false, active: 0, lookupStart: 0 }), false);
 });
+
+test('splitLineTarget drops a trailing colon typed before the line number', () => {
+  assert.deepEqual(splitLineTarget('main.go:'), { base: 'main.go', target: null });
+});
