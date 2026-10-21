@@ -238,7 +238,8 @@ with a 16-character hash. If the socket path exceeds macOS's
    daemon owns this identity. If locking is unsupported, exit non-zero;
    the forwarder's admission then fails and, after its 5 s budget, it
    serves in-process.
-3. Holding the lock, remove any stale socket file and listen.
+3. Holding the lock, open the searcher, then remove any stale socket
+   file and listen, so a socket that answers can serve.
 4. Register all tools, then accept connections. Tool-list changes are
    broadcast to every session, so the tool set must be fixed before the
    first one connects.
@@ -354,7 +355,11 @@ missing (a `go install` build, say), `muninn mcp` behaves as in phase 2.
 | Every rebuild or upgrade leaves an `mcp-<identity>.lock` behind, and `mcp.log` is never rotated | Accepted for now; both are small; sweeping stale state is a follow-up |
 | A shard that fails to load during a sync is never retried: Zoekt records the new file identity before loading it (`search/watcher.go`, `scan`), so the searcher keeps the old shard until the file changes again | Pre-existing in every long-lived `muninn mcp`; a daemon serves every session from the one stale searcher. Logged to `mcp.log`; fixing it is out of scope |
 | During a sync, search results and `read_file` can disagree, because the status file and the searcher's shard watcher update independently. Normally that lasts until the watcher catches up; after a failed shard load (row above) it lasts until the next sync rewrites that shard | Pre-existing and unchanged |
-| Exec handoff only works on Unix | Fine while scheduling is macOS-only |
+| Exec handoff only works on Unix, and the daemon waits to be reparented to pid 1, which happens on macOS but not under a Linux subreaper (there every daemon gives up and sessions fall back after the 5 s budget) | Fine while scheduling is macOS-only |
+| A daemon that takes the lock and then hangs opening the index stops every forwarder starting another, so each new session waits 5 s and serves in-process until it's killed (see the README's `pkill`) | Accepted; opening the index has not been seen to hang |
+| A daemon that can't start after detaching (locking unsupported, index unreadable) makes every session wait the 5 s budget and restart it a few times; the reason is in `mcp.log`, which the fallback message names | Accepted; a missing index, the common case, fails at once |
+| In-process serving now prints Zoekt's errors and recovered tool panics on stderr, where it used to discard all of Zoekt's logging | Intended; informational lines are still dropped |
+| `--in-process` and `MUNINN_MCP_IN_PROCESS` both force in-process serving | Kept on purpose: the variable is the proxy's hand-back, the flag is the documented escape hatch |
 | The 30 s write bound ends a session whose client is paused (say, suspended with Ctrl-Z) while a response larger than the socket and pipe buffers is being written | Accepted; responses are kilobytes, so this needs an unusually large one |
 | A session that falls back in-process says so only on stderr, which most MCP clients hide | Accepted for now; surfacing it in `muninn status` is a follow-up |
 | `go install` users update `muninn` and `muninn-mcp-proxy` separately | Partly handled: the proxy passes the spec on verbatim, so an older proxy doesn't drop fields a newer muninn added. A proxy speaking another admission version is refused and serves every session in-process until it's updated |
