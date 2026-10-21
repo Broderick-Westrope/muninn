@@ -1,6 +1,6 @@
 # Muninn Design: One Shared MCP Server for Every Client
 
-**Status:** Built on `feat/shared-mcp-daemon` (all three phases); see
+**Status:** Built (all three phases); see
 [Implementation Notes](#implementation-notes) for where it differs from
 this design. Numbers marked "measured" were taken on 2026-10-20 on one
 machine (316 repos, 875 MB index, macOS `footprint`); everything else is
@@ -200,9 +200,9 @@ Today each `muninn mcp` resolves its own paths from its own environment.
 A shared daemon keeps the environment of whichever session started it,
 so the forwarder resolves everything once into a startup spec and the
 daemon never re-resolves from its own environment or working directory.
-The spec holds absolute paths for the index, status file, mirrors,
-socket, lock, and log, plus the real path of the `muninn` binary and
-the identity. The XDG helpers accept relative overrides, so every path
+The spec holds absolute paths for the index, status file, mirrors and
+state directory (the socket, lock and log are derived from it), plus the
+real path of the `muninn` binary and the identity. The XDG helpers accept relative overrides, so every path
 is made absolute against the forwarder's working directory.
 
 Only sessions that would have resolved the same things may share a
@@ -236,7 +236,8 @@ with a 16-character hash. If the socket path exceeds macOS's
 2. Take the lock with `internal/lock`, retrying for up to 1 s (an
    exiting daemon may still hold it). If it's held, exit 0: another
    daemon owns this identity. If locking is unsupported, exit non-zero;
-   the forwarder's admission then fails and it serves in-process.
+   the forwarder's admission then fails and, after its 5 s budget, it
+   serves in-process.
 3. Holding the lock, remove any stale socket file and listen.
 4. Register all tools, then accept connections. Tool-list changes are
    broadcast to every session, so the tool set must be fixed before the
@@ -316,7 +317,7 @@ the end of the session.
   bound, searches have no wall-time limit, and `git` output isn't
   capped. All of that is true today; the daemon concentrates it in one
   process rather than adding to it, and this design doesn't change it.
-- **Logging.** The daemon logs admissions, session ends, panics, and
+- **Logging.** The daemon logs refusals, sessions opening and ending, panics, and
   Zoekt's shard-load errors to `mcp.log`. Zoekt's informational shard
   loading lines stay discarded.
 
@@ -388,9 +389,6 @@ the burst, against the projections above. Phase 3's target is under
 
 ## Open Questions
 
-- **Budget.** Is about 500 MB after phase 2 acceptable, or is phase 3's
-  near-flat cost per session wanted? This decides whether the second
-  binary gets built.
 - **Idle timeout.** 5 minutes is a guess. Opening the searcher took
   68 ms warm (measured), which suggests a short timeout costs little,
   but a cold daemon start (process start, page cache cold, first
@@ -462,5 +460,9 @@ The daemon uses the same value; with 17 concurrent sessions it stayed at
   closest precedents are `internal/lock` (flock), `internal/launchd`
   (background jobs), and `internal/web` (a long-lived listener). They're
   justified by the measurements above.
-- `MUNINN_MCP_IDLE` (a Go duration) overrides the 5 minute idle timeout;
-  the end-to-end tests use it.
+- The idle timeout is a constant. The end-to-end tests stop their daemons
+  with SIGTERM instead, and idle exit is tested in `internal/mcp`.
+- With no index yet (before the first sync), `muninn mcp` fails at once
+  with the same error as before, rather than starting a daemon that can
+  only fail after detaching. The daemon also opens the searcher before it
+  listens, so a socket that answers can serve.

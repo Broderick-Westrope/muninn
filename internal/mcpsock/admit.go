@@ -100,9 +100,9 @@ func Admit(conn net.Conn, identity string, reserve func() bool, release func()) 
 const retryInterval = 25 * time.Millisecond
 
 // restartAfter is how long Dial waits after starting a daemon before it
-// starts another. It is longer than a new daemon waits for the lock, so a
-// daemon that is still taking over from a draining one isn't duplicated,
-// but one that lost the race and exited gets replaced.
+// starts another, so a daemon that lost the lock race and exited gets
+// replaced. On a busy machine a daemon can take longer than this to start,
+// so a spare is sometimes launched; it loses the lock race and exits.
 const restartAfter = 1500 * time.Millisecond
 
 // Dial connects to the daemon at socket and asks it to admit a session
