@@ -2,6 +2,8 @@
 
 **Local code search across all your GitHub repos, for you and your agents.**
 
+![The muninn web UI showing a file with the repo tree in the sidebar](assets/readme-demo.png)
+
 muninn is a single Go binary that mirrors your GitHub repos, indexes them with [Zoekt](https://github.com/sourcegraph/zoekt) and universal-ctags, and serves the index three ways: an MCP server for coding agents, a keyboard-driven web UI, and a terminal search. It runs on your laptop with no database, no Docker and nothing resident: sync is a scheduled job that exits, and the MCP server shuts itself down when no agent is using it.
 
 Named for Odin's raven, who flies out over the world and brings back memory.
