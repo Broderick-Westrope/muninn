@@ -9,6 +9,10 @@ export const plural = (n, one, many) => (n === 1 ? one : many);
 // where it exists.
 export const isMac = /mac|iphone|ipad/i.test(navigator.userAgentData?.platform ?? navigator.platform);
 
+// keyLabel writes a shortcut's keys the way the platform does: "⌘K" on a
+// Mac, "Ctrl+K" elsewhere.
+export const keyLabel = (keys) => keys.join(isMac ? '' : '+');
+
 const COPY_FEEDBACK_MS = 1000;
 
 // ---------------------------------------------------------------------------

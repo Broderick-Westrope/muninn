@@ -22,9 +22,9 @@ import { fileHash, lineSuffix, parseLineRange } from './routes.js';
 // ("payments.ts:15") opens the chosen file at that line, as in an editor's
 // quick open.
 //
-// The palette imports no app modules: main.js injects the context-aware
-// command list and the search actions, so it never imports the modules
-// whose commands it shows.
+// The palette never imports the modules whose commands it shows (file.js,
+// facets.js, search.js): main.js injects the context-aware command list
+// and the search actions.
 
 const REMOTE_LIMIT = 30;
 const REMOTE_DEBOUNCE_MS = 120;
@@ -83,6 +83,7 @@ export function initPalette(o) {
   input.setAttribute('role', 'combobox');
   input.setAttribute('aria-expanded', 'true');
   input.setAttribute('aria-autocomplete', 'list');
+  input.setAttribute('aria-label', 'Search files, commands, repos');
   input.setAttribute('aria-controls', 'pal-list');
 
   listEl = document.createElement('ul');
@@ -140,6 +141,10 @@ export function initPalette(o) {
   let downOnBackdrop = false;
   dlg.addEventListener('mousedown', (e) => {
     downOnBackdrop = e.target === dlg;
+    // Headers, notes and stale rows can't take focus, so a click on one
+    // would blur the input and strand the keyboard on the page, where the
+    // open palette disables every shortcut. Keep focus in the input.
+    if (e.target !== dlg && e.target !== input) e.preventDefault();
   });
   dlg.addEventListener('click', (e) => {
     if (e.target === dlg && downOnBackdrop) dlg.close();
@@ -219,6 +224,8 @@ function update(reset = true) {
   } else {
     wantsLookup = true;
     const { base, target } = splitLineTarget(term);
+    // A line target belongs to the file lookup, not to a code search.
+    const query = target ? base : term;
     const files = remoteGroup('Files', 'file', base, MAX_FILES);
     if (target) {
       // A line target says the user wants a file, so files lead and the
@@ -244,7 +251,7 @@ function update(reset = true) {
     }
     groups.push({
       label: 'Search',
-      items: [{ title: `Search code for “${term}”`, run: () => opts.search(term) }],
+      items: [{ title: `Search code for “${query}”`, run: () => opts.search(query) }],
     });
   }
   // A mode without a lookup must not leave an older one able to fire a
@@ -341,12 +348,11 @@ async function fetchLookup({ kind, term, repo }, signal) {
 const highlightTokens = (term) => term.split(/\s+/).filter((t) => t && !t.startsWith('repo:'));
 
 function fileItems(files, term, repo) {
-  return files
-    .map((f, i) => ({ f, i }))
-    // Within the current repo and within the rest, shorter paths first;
-    // the merge already put the current repo ahead.
-    .sort((a, b) => (b.f.repo === repo) - (a.f.repo === repo) || a.f.path.length - b.f.path.length)
-    .map(({ f }) => ({
+  // Within the current repo and within the rest, shorter paths first; the
+  // merge already put the current repo ahead.
+  return [...files]
+    .sort((a, b) => (b.repo === repo) - (a.repo === repo) || a.path.length - b.path.length)
+    .map((f) => ({
       title: f.path,
       tokens: highlightTokens(term),
       detail: f.repo,

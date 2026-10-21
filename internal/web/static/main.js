@@ -1,6 +1,6 @@
 'use strict';
 
-import { $, copyText, isMac, note } from './dom.js';
+import { $, copyText, isMac, keyLabel, note } from './dom.js';
 import {
   activeCount,
   clearFacets,
@@ -178,7 +178,7 @@ const shortcuts = {
   // a bare Backspace has to keep editing the query. Results view only:
   // from the file view it would act on a sidebar the user cannot see.
   clearFilters: {
-    keys: ['shift', '⌫'],
+    keys: isMac ? ['⇧', '⌫'] : ['Shift', 'Backspace'],
     match: (e) => e.key === 'Backspace' && e.shiftKey,
     available: () => inResultsView() && activeCount() > 0,
     run: clearFacets,
@@ -246,7 +246,7 @@ initTree(treeEl);
 initFacets({
   facetsEl,
   onToggle: () => search(false, true),
-  clearKeys: shortcuts.clearFilters.keys.join('+'),
+  clearKeys: keyLabel(shortcuts.clearFilters.keys),
 });
 initHints(hintsEl, searchInput);
 initPalette({
@@ -262,8 +262,7 @@ initPalette({
   },
   searchRepo: searchInRepo,
 });
-// "⌘K" on a Mac, "Ctrl+K" elsewhere, the same everywhere it is shown.
-const paletteChord = shortcuts.palette.keys.join(isMac ? '' : '+');
+const paletteChord = keyLabel(shortcuts.palette.keys);
 paletteBtn.textContent = paletteChord;
 paletteBtn.title = `Command palette (${paletteChord})`;
 paletteBtn.setAttribute('aria-label', paletteBtn.title);
