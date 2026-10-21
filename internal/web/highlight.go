@@ -90,5 +90,8 @@ func (s *Server) handleChromaCSS(w http.ResponseWriter, _ *http.Request) {
 		chromaCSS = b.Bytes()
 	})
 	w.Header().Set("Content-Type", "text/css; charset=utf-8")
+	// Generated from the theme compiled into the binary, so like the
+	// embedded UI it changes on upgrade and must not be served stale.
+	w.Header().Set("Cache-Control", "no-cache")
 	_, _ = w.Write(chromaCSS)
 }
