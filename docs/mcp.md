@@ -3,14 +3,14 @@
 `muninn mcp` serves the index to coding agents over stdio.
 
 ```json
-{ "mcpServers": { "muninn": { "command": "muninn", "args": ["mcp"] } } }
+{ "mcpServers": { "muninn": { "command": "/opt/homebrew/bin/muninn", "args": ["mcp"] } } }
 ```
 
-For Claude Code: `claude mcp add muninn -- muninn mcp`.
+Use the full path from `which muninn`: GUI clients such as Cursor and Claude Desktop don't see your shell's `PATH`. For Claude Code: `claude mcp add muninn -- muninn mcp`.
 
 ## Tools
 
-Every read is pinned to the commit the repo was indexed at, so line numbers from `grep`, `read_file` and `blame` always agree. Content can lag a repo's latest commit until the next sync, and tools that read a repo warn when it hasn't synced recently.
+`grep`, `read_file`, `list_tree` and `blame` work at the commit each repo was indexed at, so their line numbers always agree. That content can lag a repo's latest commit until the next sync, and tools warn when the repo they touched hasn't synced recently. `search_commits` and `get_diff` see the mirror's full fetched history.
 
 | Tool | What it does |
 |---|---|
@@ -27,7 +27,7 @@ Every read is pinned to the commit the repo was indexed at, so line numbers from
 
 ## The shared server
 
-Every session shares one background server per index, so each extra agent session costs about 3 MB instead of a full copy of the searcher. 17 sessions measured about 127 MB, down from about 1 GB when each loaded its own.
+Every session shares one background server per index, so each extra agent session costs about 3 MB instead of a full copy of the searcher. With a 316-repo index, 17 sessions measured about 127 MB, down from about 1 GB when each session loaded its own.
 
 `muninn mcp` starts the server on demand and hands its stdio over to it through `muninn-mcp-proxy`, a small standard-library-only binary that ships alongside `muninn`. Without the proxy next to `muninn`, sessions still share the server but each costs about 30 MB.
 
@@ -37,6 +37,6 @@ Every session shares one background server per index, so each extra agent sessio
 
 ## Debugging
 
-`muninn mcp --in-process` always serves in-process, which rules the shared server out when something goes wrong.
+`muninn mcp --in-process` always serves in-process, which rules the shared server out when something goes wrong. To try it from an agent, set the MCP args to `["mcp", "--in-process"]`.
 
 `pkill -f 'muninn mcp --daemon'` stops a running server. That ends every open session with an error, and the next session starts a fresh server.

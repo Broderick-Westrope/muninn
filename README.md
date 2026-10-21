@@ -10,30 +10,32 @@ Named for Odin's raven, who flies out over the world and brings back memory.
 
 I used [Sourcebot](https://github.com/sourcebot-dev/sourcebot) locally for months and liked it, but running it in Docker Compose alongside Postgres and Redis kept my laptop running hot for an enterprise-ready tool only I was using. muninn keeps the parts I relied on and drops the server stack:
 
-| | Sourcebot (local) | muninn |
+| | Sourcebot, as I ran it | muninn |
 |---|---|---|
 | What you run | Docker Compose with Postgres and Redis | One binary |
 | When it's running | Always | Only during a sync, an agent session or a web UI session |
-| Agent access | MCP | MCP, with every session sharing one server (17 sessions in about 127 MB) |
-| Config | Sourcebot schema | A compatible subset; an existing Sourcebot config migrates with small edits |
+| Agent access | MCP | MCP, with every session sharing one server (17 sessions use about 127 MB). Or the CLI, if you prefer |
+| Config | Sourcebot's schema | A subset of it (see [what carries over](docs/configuration.md#coming-from-sourcebot)) |
 | Web UI | General-purpose | Built around my workflow: GitHub permalinks, open in Cursor or VS Code, a ⌘K palette |
 
 If you need shared, multi-user code search for a team, Sourcebot is the better fit. muninn is for one person's machine.
 
 ## Quickstart
 
-muninn runs on macOS, since scheduling uses launchd. Homebrew also installs `git` and [universal-ctags](https://github.com/universal-ctags/ctags), which symbol search depends on. The [GitHub CLI](https://cli.github.com) is optional, but it's the most reliable way to authenticate.
+muninn runs on macOS, since scheduling uses launchd. The Homebrew formula also installs `git` and [universal-ctags](https://github.com/universal-ctags/ctags), which symbol search depends on. The [GitHub CLI](https://cli.github.com) is how muninn authenticates unless you give it a token yourself (see [Tokens](docs/configuration.md#tokens)).
 
 ```bash
 brew install broderick-westrope/tap/muninn gh
 gh auth login
 ```
 
-Without Homebrew, `go install github.com/broderick-westrope/muninn@latest` works, given `git` and a universal-ctags built with `+interactive`. Also install `github.com/broderick-westrope/muninn/cmd/muninn-mcp-proxy@latest`, or each agent session costs about 30 MB instead of 3 MB.
+> If you prefer not to use Homebrew, `go install github.com/broderick-westrope/muninn@latest` works (Go 1.25+), given git 2.32+ and a universal-ctags built with `+interactive`. Also install `github.com/broderick-westrope/muninn/cmd/muninn-mcp-proxy@latest`, which keeps each agent session's connection to the shared server light. Without it, each agent session costs about 30 MB of memory instead of 3 MB.
 
-Tell muninn what to index in `~/.config/muninn/config.json`:
+Then tell muninn what to index. `orgs` takes GitHub organizations; repos under a personal account go in `repos`.
 
-```json
+```bash
+mkdir -p ~/.config/muninn
+cat > ~/.config/muninn/config.json <<'EOF'
 {
   "connections": {
     "github": {
@@ -44,6 +46,7 @@ Tell muninn what to index in `~/.config/muninn/config.json`:
     }
   }
 }
+EOF
 ```
 
 Run the first sync, then let launchd keep the index fresh:
@@ -54,10 +57,10 @@ muninn sync --install  # resync in the background every hour
 muninn web             # search in the browser
 ```
 
-To give an agent access, add muninn as an MCP server. For Claude Code that's `claude mcp add muninn -- muninn mcp`; most other clients take this JSON:
+To give an agent access, add muninn as an MCP server. For Claude Code that's `claude mcp add muninn -- muninn mcp`. Most other clients take JSON like this; use the full path from `which muninn`, because GUI apps such as Cursor and Claude Desktop don't see your shell's `PATH`:
 
 ```json
-{ "mcpServers": { "muninn": { "command": "muninn", "args": ["mcp"] } } }
+{ "mcpServers": { "muninn": { "command": "/opt/homebrew/bin/muninn", "args": ["mcp"] } } }
 ```
 
 See [docs/configuration.md](docs/configuration.md) for every config field, token sources and editor integration.
@@ -66,7 +69,7 @@ See [docs/configuration.md](docs/configuration.md) for every config field, token
 
 ### Web UI
 
-`muninn web` serves the UI at `127.0.0.1:7576` and opens it in your browser. Search uses Zoekt's query syntax (`sym:NewServer case:yes repo:muninn`), the sidebar filters by repo and file type, and every file links to a GitHub permalink pinned to the indexed commit. If you have a checkout of the repo locally, it also opens in Cursor or VS Code.
+`muninn web` serves the UI at `127.0.0.1:7576` until you press Ctrl-C, and opens it in your browser (`--open=false` skips that, and `--addr` picks another port). Search uses Zoekt's query syntax (`sym:NewServer case:yes repo:muninn`), the sidebar filters by repo and file type, and every file links to a GitHub permalink pinned to the indexed commit. If you have a checkout of the repo locally, it also opens in Cursor or VS Code.
 
 | Key | Does |
 |---|---|
@@ -77,18 +80,18 @@ See [docs/configuration.md](docs/configuration.md) for every config field, token
 | Shift+⌫ | Clear filters |
 | Shift-click a line number | Select a range for the permalink |
 
-In the palette, type a file name to open it, and add `:15` or `:10-20` to land on a line or range. Start with `@` for symbol definitions, `:` for a line in the open file, or `>` for commands only, and add `repo:<regex>` to narrow a name that many repos share. Off macOS, use Ctrl in place of ⌘.
+In the palette, type a file name to open it, and add `:15` or `:10-20` to land on a line or range. Start with `@` for symbol definitions, `:` for a line in the open file, or `>` for commands only, and add `repo:<regex>` to narrow a name that many repos share.
 
 ### MCP
 
-Agents get ten tools: `grep`, `glob`, `list_repos`, `read_file`, `list_tree`, `find_symbol_definitions`, `find_symbol_references`, `search_commits`, `get_diff` and `blame`. Reads are pinned to the indexed commit, so line numbers always agree with search results. [docs/mcp.md](docs/mcp.md) describes each tool and how the shared server works.
+Agents get ten tools: `grep`, `glob`, `list_repos`, `read_file`, `list_tree`, `find_symbol_definitions`, `find_symbol_references`, `search_commits`, `get_diff` and `blame`. File reads and `blame` work at the indexed commit, so their line numbers always agree with search results. [docs/mcp.md](docs/mcp.md) describes each tool and how the shared server works.
 
 ### Terminal
 
 ```bash
 muninn search "sym:NewServer case:yes repo:muninn"
 muninn search --files-only "file:_test\.go$ repo:muninn"
-muninn status   # last sync, per-repo failures, scheduler state
+muninn status   # last sync, failures, stale repos, scheduler state
 ```
 
 ## How it works
@@ -99,7 +102,7 @@ flowchart LR
   mirrors --> ctags[universal-ctags]
   mirrors --> zoekt[Zoekt shards]
   ctags --> zoekt
-  launchd[launchd] -->|muninn sync --if-due| mirrors
+  launchd[launchd] -->|"muninn sync --if-due"| mirrors
   zoekt --> mcp[MCP server]
   zoekt --> web[Web UI]
   zoekt --> cli[muninn search]
@@ -107,16 +110,17 @@ flowchart LR
 
 Each sync fetches bare mirrors, rebuilds Zoekt shards with ctags symbols, and removes repos that are no longer configured. Mirrors and the index live under `~/.local/share/muninn/`, and sync status and logs under `~/.local/state/muninn/`; both honor `XDG_DATA_HOME` and `XDG_STATE_HOME`.
 
-The launchd job wakes every few minutes but only syncs when the index is stale, retries quickly after a failure, and never reports a broken sync as fresh. [docs/scheduling.md](docs/scheduling.md) has the details.
+The launchd job wakes regularly but only syncs when one is due, retries quickly after a failure, and never reports a broken sync as fresh. [docs/scheduling.md](docs/scheduling.md) has the details.
 
 ## Troubleshooting
 
 | Symptom | Check |
 |---|---|
-| Results look out of date | `muninn status` shows each repo's age and the last failure. `muninn sync` runs one now. |
-| Scheduled syncs fail on auth | A token that only exists in your shell isn't visible to launchd. Run `gh auth login`, then `muninn sync --install` again. |
-| Symbol search finds nothing | ctags is missing or lacks `+interactive`. Check `ctags --list-features`. |
-| An agent's muninn tools hang or fail | `muninn mcp --in-process` bypasses the shared server. Its log is `~/.local/state/muninn/mcp.log`. |
+| Results look out of date | `muninn status` shows the last run, its failures, and repos with no successful sync in 24 hours. `muninn sync` runs one now. |
+| Scheduled syncs fail | Their output is in `~/.local/state/muninn/sync.log`. |
+| Scheduled syncs fail on auth | A token that only exists in your shell isn't visible to launchd. See [Tokens](docs/configuration.md#tokens). |
+| Sync fails with `validating ctags` | muninn found a ctags that isn't universal-ctags with `+interactive`, often macOS's own. Run `brew install universal-ctags`, then `muninn sync --install` to record its path. |
+| An agent's muninn tools hang or fail | The shared server's log is `~/.local/state/muninn/mcp.log`. Setting the MCP args to `["mcp", "--in-process"]` bypasses the shared server. |
 | No "Open in Cursor" button | muninn only offers it for repos it finds a checkout of under `editor.roots`. |
 
 ## Development

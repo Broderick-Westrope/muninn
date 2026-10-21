@@ -30,8 +30,8 @@ Pushing a `v*` tag runs `.github/workflows/release.yaml`, which uses GoReleaser 
 - update the formula in [Broderick-Westrope/homebrew-tap](https://github.com/Broderick-Westrope/homebrew-tap)
 
 ```bash
-git tag v0.9.0
-git push origin v0.9.0
+git tag vX.Y.Z
+git push origin vX.Y.Z
 ```
 
-Tags follow semver: bump the minor version for new features and the patch version for fixes.
+Tags follow semver: bump the minor version for new features and the patch version for fixes. The workflow needs a `GH_PAT` secret with write access to this repo and the tap, since the default token can't push to another repo.

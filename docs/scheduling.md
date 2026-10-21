@@ -4,19 +4,20 @@
 
 ## When a sync runs
 
-The agent wakes every `sync.retryIntervalMinutes` and runs `muninn sync --if-due --no-repair`. Most wakes exit immediately; the check decides whether there is work:
+The agent wakes every `sync.retryIntervalMinutes` and runs `muninn sync --if-due --no-repair`. Most wakes exit immediately; the check decides whether there is work, timing from when the last run finished:
 
-| Index state | What happens |
+| Last run | Next sync is due |
 |---|---|
-| Fresh (a success within `sync.intervalMinutes`, default 60) | Exit. |
-| Stale | Sync. |
-| Stale, and the last run failed or was interrupted | Sync on every wake, every `sync.retryIntervalMinutes` (default 10). |
+| Worked | `sync.intervalMinutes` later (default 60) |
+| Broke or was interrupted | `sync.retryIntervalMinutes` later (default 10) |
 
-The quick retry means an expired token or a wake with no network costs minutes, not an hour. The cadence lives in the config rather than the plist, so changing it doesn't need a reinstall.
+The quick retry means an expired token or a wake with no network costs minutes, not an hour.
 
-## What counts as a failure
+Each run reads both values from the config, but the wake interval is written into the plist at install time. Raising either value works straight away. Lowering one needs `muninn sync --install` again, or launchd keeps waking at the old, slower rate.
 
-Only a total failure switches the scheduler to the retry cadence: bad credentials, missing ctags, a discovery that returned no repos, or a run that died mid-flight. A run that fetched everything it could reach counts as a success even if one repo failed. Without that distinction, one permanently broken repo would make muninn refetch every repo every few minutes, forever.
+## What counts as broken
+
+Only a total failure puts the scheduler on the retry cadence: bad credentials, missing ctags, a discovery that returned no repos, or a run that died mid-flight. A run where some repos failed still shows as failed in `muninn status`, with the failures listed, but for scheduling it counts as having worked, since it fetched everything it could reach. Without that distinction, one permanently broken repo would make muninn refetch every repo every few minutes, forever.
 
 A broken sync is never recorded as a fresh index. A discovery that returns nothing, a clock that moved backwards and a run that died mid-flight are all reported rather than saved as success.
 
@@ -26,7 +27,7 @@ Staleness is tracked per repo, from that repo's last successful sync, so one unr
 
 - `read_file`, `list_tree` and the history tools warn when the repo you touched is behind.
 - `list_repos` shows every repo's age.
-- `muninn status` shows the full picture, including per-repo failures.
+- `muninn status` shows the last run, its per-repo failures, and every repo with no successful sync in 24 hours.
 
 ## One sync at a time
 
