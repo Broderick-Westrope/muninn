@@ -35,7 +35,6 @@ test('mergeFiles puts current-repo matches first without duplicates', () => {
   ]);
 });
 
-// Characterisation tests for behaviour moved out of palette.js.
 
 test('splitLineTarget reads a trailing line or range off a file term', () => {
   assert.deepEqual(splitLineTarget('payments.ts:15'), { base: 'payments.ts', target: { line: 15, endLine: 0 } });

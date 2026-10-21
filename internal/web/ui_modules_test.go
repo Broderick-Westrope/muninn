@@ -19,14 +19,14 @@ func TestUIModules(t *testing.T) {
 	}
 	files, err := filepath.Glob(filepath.Join("static", "_test", "*.test.mjs"))
 	if err != nil {
-		t.Fatalf("glob UI tests: err=%v", err)
+		t.Fatalf("glob UI tests: %v", err)
 	}
 	if len(files) == 0 {
 		t.Fatal("no UI test files found under static/_test")
 	}
 	out, err := exec.Command(node, append([]string{"--test"}, files...)...).CombinedOutput()
 	if err != nil {
-		t.Fatalf("node --test failed: err=%v\n%s", err, out)
+		t.Fatalf("node --test: %v\n%s", err, out)
 	}
 }
 
