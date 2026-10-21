@@ -24,15 +24,15 @@ export function parse(input) {
 // line target. A bare ":15" is the go-to-line mode, not this. Forms met on
 // the way to, or around, a target keep the file term so its lookup is not
 // thrown away: a trailing colon ("main.go:"), a half-typed range
-// ("main.go:10-", read as line 10), a line still being typed from zero
-// ("main.go:0"), and a trailing column as compilers print it
+// ("main.go:10-", read as line 10), a line or range still being typed
+// from zero ("main.go:0", "main.go:0-5"), and a trailing column as compilers print it
 // ("main.go:10:5").
 export function splitLineTarget(term) {
   const m = term.match(/^(.*?):\s*(\d+(?:\s*-\s*\d+)?)?\s*-?\s*(?::\d+)?$/);
   const base = m ? m[1].trim() : '';
   if (!m || !base) return { base: term, target: null };
   if (!m[2]) return { base, target: null };
-  if (/^0+$/.test(m[2])) return { base, target: null };
+  if (/^0+(\s*-|$)/.test(m[2])) return { base, target: null };
   const target = parseLineRange(m[2]);
   return target ? { base, target } : { base: term, target: null };
 }
@@ -43,14 +43,17 @@ const escapeRe = (s) => s.replace(/[\\^$.|?*+()[\]{}"]/g, '\\$&');
 // lookupQuery builds the zoekt query for a file-name or symbol lookup, each
 // whitespace-separated token an ANDed literal. A repo:<regex> token passes
 // through as zoekt's repo atom, so a name shared by many repos can be
-// narrowed to one ("repo:pilot payments.ts").
+// narrowed to one ("repo:pilot payments.ts"). File lookups ignore case,
+// as the palette's other matching does: zoekt's smart case would otherwise
+// make "README" miss readme.md. Symbols keep smart case, since a capital
+// there usually means the exported name.
 export function lookupQuery(kind, term) {
   const atom = kind === 'file' ? 'file' : 'sym';
   const parts = term
     .split(/\s+/)
     .filter(Boolean)
     .map((t) => (/^repo:./.test(t) ? t : `${atom}:${escapeRe(t)}`));
-  return kind === 'file' ? `${parts.join(' ')} type:file` : parts.join(' ');
+  return kind === 'file' ? `case:no ${parts.join(' ')} type:file` : parts.join(' ');
 }
 
 // mergeFiles puts the current repo's matches ahead of the global ones,

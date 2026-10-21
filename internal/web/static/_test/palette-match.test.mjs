@@ -45,7 +45,7 @@ test('fuzzyFilter accepts word prefixes but not letters scattered mid-word', () 
 });
 
 test('lookupQuery escapes regex metacharacters and ANDs tokens', () => {
-  assert.equal(lookupQuery('file', 'payments.ts auth'), 'file:payments\\.ts file:auth type:file');
+  assert.equal(lookupQuery('file', 'payments.ts auth'), 'case:no file:payments\\.ts file:auth type:file');
   assert.equal(lookupQuery('sym', 'New(Server'), 'sym:New\\(Server');
 });
 
@@ -69,7 +69,7 @@ test('keyIntent leaves keys alone while an IME is composing', () => {
 });
 
 test('lookupQuery passes repo: atoms through to scope a lookup', () => {
-  assert.equal(lookupQuery('file', 'repo:pilot payments.ts'), 'repo:pilot file:payments\\.ts type:file');
+  assert.equal(lookupQuery('file', 'repo:pilot payments.ts'), 'case:no repo:pilot file:payments\\.ts type:file');
 });
 
 test('splitLineTarget drops a trailing colon typed before the line number', () => {
@@ -119,4 +119,12 @@ test('splitLineTarget keeps the file while a zero-led line is typed', () => {
 
 test('parse ignores leading spaces before a prefix', () => {
   assert.deepEqual(parse('  >foo'), { mode: 'commands', term: 'foo' });
+});
+
+test('file lookups ignore case, as the rest of the palette does', () => {
+  assert.match(lookupQuery('file', 'README'), /^case:no /);
+});
+
+test('splitLineTarget keeps the file while a zero-led range is typed', () => {
+  assert.deepEqual(splitLineTarget('main.go:0-5'), { base: 'main.go', target: null });
 });
