@@ -122,9 +122,9 @@ Every session shares one background server per index, so opening more agent sess
 
 ### Web UI
 
-Press ⌘K (Ctrl+K off macOS) for the command palette: type a file name to open it (`payments.ts:15` opens at that line), `@` for symbol definitions, `:` for a line in the open file, `>` for commands, or `repo:<name>` to narrow a lookup. ⌘G jumps to a line in the open file, `/` focuses search, Shift+⌫ clears filters, and shift-clicking line numbers selects a range for the GitHub permalink.
+Press ⌘K (Ctrl+K off macOS) for the command palette: type a file name to open it (`payments.ts:15` or `payments.ts:10-20` opens at that line or range), `@` for symbol definitions, `:` for a line in the open file, `>` for commands, or `repo:<regex>` to narrow a lookup. ⌘G jumps to a line in the open file, `/` focuses search, Shift+⌫ clears filters, and shift-clicking line numbers selects a range for the GitHub permalink.
 
-The UI's JavaScript tests run under `go test` when `node` is on your PATH, and are skipped otherwise.
+The UI's JavaScript tests run under `go test` when `node` 20.19+ or 22.7+ is on your PATH, and are skipped otherwise. No workflow runs the tests, so a skip means they didn't run.
 
 ## Data
 
