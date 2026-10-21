@@ -14,7 +14,8 @@ export const PREFIXES = [
 ];
 
 // parse splits palette input into its mode (by leading prefix) and term.
-export function parse(v) {
+export function parse(input) {
+  const v = input.trimStart();
   const p = PREFIXES.find((x) => x.char === v[0]);
   return p ? { mode: p.mode, term: v.slice(1).trim() } : { mode: 'all', term: v.trim() };
 }
@@ -23,13 +24,15 @@ export function parse(v) {
 // line target. A bare ":15" is the go-to-line mode, not this. Forms met on
 // the way to, or around, a target keep the file term so its lookup is not
 // thrown away: a trailing colon ("main.go:"), a half-typed range
-// ("main.go:10-", read as line 10), and a trailing column as compilers
-// print it ("main.go:10:5").
+// ("main.go:10-", read as line 10), a line still being typed from zero
+// ("main.go:0"), and a trailing column as compilers print it
+// ("main.go:10:5").
 export function splitLineTarget(term) {
   const m = term.match(/^(.*?):\s*(\d+(?:\s*-\s*\d+)?)?\s*-?\s*(?::\d+)?$/);
   const base = m ? m[1].trim() : '';
   if (!m || !base) return { base: term, target: null };
   if (!m[2]) return { base, target: null };
+  if (/^0+$/.test(m[2])) return { base, target: null };
   const target = parseLineRange(m[2]);
   return target ? { base, target } : { base: term, target: null };
 }
@@ -81,7 +84,7 @@ export function fuzzyFilter(list, term) {
 // continue the previous match or start a word. Letters scattered mid-word
 // would match nearly every long repo name, so they do not count. A
 // substring outranks word prefixes, and earlier matches outrank later ones.
-export function fuzzy(text, term) {
+function fuzzy(text, term) {
   const t = text.toLowerCase();
   const q = term.toLowerCase().replace(/\s+/g, ' ');
   const at = t.indexOf(q);
@@ -114,18 +117,6 @@ export function fuzzy(text, term) {
 }
 
 const isWordStart = (t, i) => i === 0 || /[\s/._\-:]/.test(t[i - 1]);
-
-// substringPositions marks each token's first occurrence in text, for
-// highlighting server-matched results.
-export function substringPositions(text, term) {
-  const t = text.toLowerCase();
-  const out = [];
-  for (const tok of term.toLowerCase().split(/\s+/)) {
-    const at = tok ? t.indexOf(tok) : -1;
-    for (let i = at; at !== -1 && i < at + tok.length; i++) out.push(i);
-  }
-  return out;
-}
 
 // chord reports whether e is the app's primary modifier plus letter: Cmd on
 // a Mac, Ctrl elsewhere, with no other modifiers. On a Mac, Ctrl+letter

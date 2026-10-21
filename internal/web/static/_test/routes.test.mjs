@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { fileHash, lineSuffix, parseFileHash, parseLineRange } from '../routes.js';
+import { fileHash, parseFileHash, parseLineRange } from '../routes.js';
 
 test('parseLineRange reads lines and ranges, normalising reversed ones', () => {
   const cases = [
@@ -18,12 +18,6 @@ test('parseLineRange rejects anything that is not a positive line target', () =>
   for (const input of ['', '0', '5-0', '0-5', 'abc', '5-', '-5', '1.5']) {
     assert.equal(parseLineRange(input), null, input);
   }
-});
-
-test('lineSuffix writes an end only when it extends past the start', () => {
-  assert.equal(lineSuffix(15, 0), ':15');
-  assert.equal(lineSuffix(10, 20), ':10-20');
-  assert.equal(lineSuffix(0, 0), '');
 });
 
 test('file hashes round-trip a line range', () => {

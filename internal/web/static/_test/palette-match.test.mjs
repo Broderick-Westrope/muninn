@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
-  fuzzy,
+  fuzzyFilter,
   isGoToLineKey,
   isPaletteKey,
   keyIntent,
@@ -38,9 +38,10 @@ test('splitLineTarget leaves a term without a numeric suffix alone', () => {
   assert.deepEqual(splitLineTarget(':15'), { base: ':15', target: null });
 });
 
-test('fuzzy accepts word prefixes but not letters scattered mid-word', () => {
-  assert.ok(fuzzy('Go to symbol…', 'gts'));
-  assert.equal(fuzzy('eucalyptusvc/erx-cloud-vpn-infra', 'verif'), null);
+test('fuzzyFilter accepts word prefixes but not letters scattered mid-word', () => {
+  const titles = (list, term) => fuzzyFilter(list, term).map((it) => it.title);
+  assert.deepEqual(titles([{ title: 'Go to symbol…' }], 'gts'), ['Go to symbol…']);
+  assert.deepEqual(titles([{ title: 'eucalyptusvc/erx-cloud-vpn-infra' }], 'verif'), []);
 });
 
 test('lookupQuery escapes regex metacharacters and ANDs tokens', () => {
@@ -110,4 +111,12 @@ test('splitLineTarget ignores a trailing column, as compilers print', () => {
 test('parse reads each prefix in PREFIXES as its mode', () => {
   for (const p of PREFIXES) assert.deepEqual(parse(`${p.char} x `), { mode: p.mode, term: 'x' });
   assert.deepEqual(parse(' x '), { mode: 'all', term: 'x' });
+});
+
+test('splitLineTarget keeps the file while a zero-led line is typed', () => {
+  assert.deepEqual(splitLineTarget('foo.ts:0'), { base: 'foo.ts', target: null });
+});
+
+test('parse ignores leading spaces before a prefix', () => {
+  assert.deepEqual(parse('  >foo'), { mode: 'commands', term: 'foo' });
 });
