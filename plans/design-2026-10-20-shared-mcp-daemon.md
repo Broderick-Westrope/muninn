@@ -451,9 +451,9 @@ The daemon uses the same value; with 17 concurrent sessions it stayed at
   `Connect` context (the SDK strips cancellation from that context but
   keeps its values).
 - `muninn mcp` checks that the state directory is owned by the user and
-  closed to everyone else before it dials, and `--daemon-start` checks
-  again, since the directory's permissions are the socket's only access
-  control. Otherwise the session is served in-process and says why on
+  closed to everyone else before it dials, and `--daemon-start` and the
+  daemon itself (before it takes the lock) check again, since the
+  directory's permissions are the socket's only access control. Otherwise the session is served in-process and says why on
   stderr.
 - The startup budget is 5 s, not 2 s. Exercising it, the first launch of
   a freshly installed build took 3.5 s to admit six sessions started
