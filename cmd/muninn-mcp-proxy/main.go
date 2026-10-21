@@ -41,8 +41,8 @@ func run(args []string) int {
 		// session itself.
 		fmt.Fprintf(os.Stderr, "muninn: serving in-process: %v (the shared server logs to %s)\n", err, spec.Log())
 		argv := append([]string{spec.Muninn}, muninnArgs...)
-		err := syscall.Exec(spec.Muninn, argv, inProcessEnv(os.Environ()))
-		fmt.Fprintf(os.Stderr, "muninn-mcp-proxy: running %s: %v\n", spec.Muninn, err)
+		execErr := syscall.Exec(spec.Muninn, argv, inProcessEnv(os.Environ()))
+		fmt.Fprintf(os.Stderr, "muninn-mcp-proxy: running %s: %v\n", spec.Muninn, execErr)
 		return 1
 	}
 	defer conn.Close()

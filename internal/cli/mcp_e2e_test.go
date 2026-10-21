@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -131,11 +132,20 @@ func (e *e2e) session(t *testing.T, args ...string) (*sdk.ClientSession, *exec.C
 // connect is session without failing the test, for use off the test
 // goroutine.
 func (e *e2e) connect(t *testing.T, args ...string) (*sdk.ClientSession, *exec.Cmd, error) {
+	return e.connectWithStderr(t, nil, args...)
+}
+
+// connectWithStderr is connect, also copying the session's stderr to
+// stderr when it isn't nil.
+func (e *e2e) connectWithStderr(t *testing.T, stderr io.Writer, args ...string) (*sdk.ClientSession, *exec.Cmd, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	cmd := exec.Command(e.bin, append([]string{"mcp"}, args...)...)
 	cmd.Env = e.env
 	cmd.Stderr = testWriter{t}
+	if stderr != nil {
+		cmd.Stderr = io.MultiWriter(testWriter{t}, stderr)
+	}
 	client := sdk.NewClient(&sdk.Implementation{Name: "e2e"}, nil)
 	cs, err := client.Connect(ctx, &sdk.CommandTransport{Command: cmd}, nil)
 	if err != nil {
@@ -143,6 +153,24 @@ func (e *e2e) connect(t *testing.T, args ...string) (*sdk.ClientSession, *exec.C
 	}
 	t.Cleanup(func() { cs.Close() })
 	return cs, cmd, nil
+}
+
+// safeLog collects a session's stderr, which arrives on another goroutine.
+type safeLog struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *safeLog) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *safeLog) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
 }
 
 // testWriter sends a session's stderr to the test log, so a session that
@@ -457,9 +485,13 @@ func TestMCPWithNoIndexFailsFast(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	var stderr safeLog
 	start := time.Now()
-	if _, _, err := e.connect(t); err == nil {
+	if _, _, err := e.connectWithStderr(t, &stderr); err == nil {
 		t.Fatal("session started with no index")
+	}
+	if !strings.Contains(stderr.String(), "opening index directory") {
+		t.Errorf("session stderr = %q, want the missing index named", stderr.String())
 	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Errorf("failing took %v, want well under the startup budget", elapsed)

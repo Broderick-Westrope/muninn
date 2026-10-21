@@ -154,7 +154,8 @@ func TestSpecPassesOnFieldsItDoesNotKnow(t *testing.T) {
 }
 
 func TestDecodeSpecRejectsAnIncompleteSpec(t *testing.T) {
-	if _, err := DecodeSpec(`{"muninn":"/bin/muninn"}`); err == nil {
-		t.Error("DecodeSpec accepted a spec with no paths or identity")
+	_, err := DecodeSpec(`{"muninn":"/bin/muninn"}`)
+	if err == nil || !strings.Contains(err.Error(), "index_dir is missing") {
+		t.Errorf("DecodeSpec err = %v, want the first missing field named", err)
 	}
 }
