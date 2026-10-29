@@ -70,7 +70,11 @@ func (m *Manager) Ensure(ctx context.Context, repo discover.Repo, token string) 
 		if err := assertConfig(ctx, dir, repo.FullName); err != nil {
 			return false, err
 		}
-		if _, err := fetcher.Run(ctx, "-C", dir, "fetch", "--prune", "origin"); err != nil {
+		// --no-auto-maintenance as well as maintenance.auto=false: git
+		// before 2.56 (Apple's /usr/bin/git, which the launchd job runs)
+		// ignores gc.auto=0 here and detaches a geometric repack that
+		// deletes packs while the indexer is still reading them.
+		if _, err := fetcher.Run(ctx, "-C", dir, "fetch", "--prune", "--no-auto-maintenance", "origin"); err != nil {
 			return false, netOpErrorf("fetch", err)
 		}
 		return false, nil
@@ -99,7 +103,7 @@ func (m *Manager) Ensure(ctx context.Context, repo discover.Repo, token string) 
 	// repository '<dest>'..." banner, which would otherwise be the first
 	// stderr line on failure and would put the absolute temp path into the
 	// recorded error ahead of git's actual diagnosis.
-	if _, err := fetcher.Run(ctx, "clone", "--quiet", "--bare", "--config", "gc.auto=0", repo.CloneURL, tmp); err != nil {
+	if _, err := fetcher.Run(ctx, "clone", "--quiet", "--bare", "--config", "gc.auto=0", "--config", "maintenance.auto=false", repo.CloneURL, tmp); err != nil {
 		return false, netOpErrorf("clone", err)
 	}
 	if _, err := runGit(ctx, "-C", tmp, "config", "remote.origin.fetch", "+refs/heads/*:refs/heads/*"); err != nil {
@@ -111,15 +115,18 @@ func (m *Manager) Ensure(ctx context.Context, repo discover.Repo, token string) 
 	return true, nil
 }
 
-// assertConfig (re)applies the fetch refspec and gc backstop on an existing
-// mirror, healing mirrors left partial by a crash or created before the
-// config was passed atomically on clone.
+// assertConfig (re)applies the fetch refspec and the gc and maintenance
+// backstops on an existing mirror, healing mirrors left partial by a crash
+// or created before the config was passed atomically on clone.
 func assertConfig(ctx context.Context, dir, fullName string) error {
 	if _, err := runGit(ctx, "-C", dir, "config", "--replace-all", "remote.origin.fetch", "+refs/heads/*:refs/heads/*"); err != nil {
 		return fmt.Errorf("configuring fetch refspec for %s: %w", fullName, err)
 	}
 	if _, err := runGit(ctx, "-C", dir, "config", "gc.auto", "0"); err != nil {
 		return fmt.Errorf("disabling auto-gc for %s: %w", fullName, err)
+	}
+	if _, err := runGit(ctx, "-C", dir, "config", "maintenance.auto", "false"); err != nil {
+		return fmt.Errorf("disabling auto-maintenance for %s: %w", fullName, err)
 	}
 	return nil
 }

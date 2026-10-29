@@ -79,6 +79,9 @@ func TestEnsureClonesBareWithNarrowRefspec(t *testing.T) {
 	if got := git(t, dir, "config", "gc.auto"); got != "0" {
 		t.Errorf("gc.auto = %q, want 0", got)
 	}
+	if got := git(t, dir, "config", "maintenance.auto"); got != "false" {
+		t.Errorf("maintenance.auto = %q, want false", got)
+	}
 
 	head, err := m.HeadCommit(context.Background(), dir, "main")
 	if err != nil {
@@ -141,6 +144,7 @@ func TestEnsureSelfHealsConfig(t *testing.T) {
 	dir := m.Dir(repo.FullName)
 	git(t, dir, "config", "--unset-all", "remote.origin.fetch")
 	git(t, dir, "config", "--unset-all", "gc.auto")
+	git(t, dir, "config", "--unset-all", "maintenance.auto")
 
 	if _, err := m.Ensure(context.Background(), repo, ""); err != nil {
 		t.Fatalf("Ensure (fetch): %v", err)
@@ -151,6 +155,75 @@ func TestEnsureSelfHealsConfig(t *testing.T) {
 	if got := git(t, dir, "config", "gc.auto"); got != "0" {
 		t.Errorf("gc.auto = %q, want 0", got)
 	}
+	if got := git(t, dir, "config", "maintenance.auto"); got != "false" {
+		t.Errorf("maintenance.auto = %q, want false", got)
+	}
+}
+
+// TestFetchNeverRepacks is the regression test for git before 2.56, which
+// ignores gc.auto=0 when deciding whether fetch runs auto-maintenance and
+// detaches a geometric repack that deletes packs out from under a running
+// index build. maintenance.auto=true stands in for that git: on any version
+// it makes fetch start maintenance unless muninn turns it off.
+func TestFetchNeverRepacks(t *testing.T) {
+	m := &Manager{BaseDir: t.TempDir()}
+	repo, upstream := fixtureRepo(t, "acme/widget")
+
+	if _, err := m.Ensure(context.Background(), repo, ""); err != nil {
+		t.Fatalf("Ensure (clone): %v", err)
+	}
+	dir := m.Dir(repo.FullName)
+	git(t, dir, "config", "maintenance.auto", "true")
+	git(t, dir, "config", "maintenance.autoDetach", "false")
+	git(t, dir, "config", "maintenance.strategy", "geometric")
+
+	for i := range 3 {
+		name := fmt.Sprintf("f%d.txt", i)
+		if err := os.WriteFile(filepath.Join(upstream, name), []byte(name+"\n"), 0o644); err != nil {
+			t.Fatalf("writing fixture file: %v", err)
+		}
+		git(t, upstream, "add", ".")
+		git(t, upstream, "commit", "-m", name)
+		// transfer.unpackLimit=1 keeps every fetched pack instead of
+		// exploding it, so packs pile up the way they do on a busy mirror.
+		git(t, dir, "-c", "transfer.unpackLimit=1", "fetch", "--no-auto-maintenance", "origin")
+	}
+	before := packFiles(t, dir)
+	if len(before) < 2 {
+		t.Fatalf("fixture has %d packs, want at least 2 for a geometric repack to be due", len(before))
+	}
+
+	if err := os.WriteFile(filepath.Join(upstream, "last.txt"), []byte("last\n"), 0o644); err != nil {
+		t.Fatalf("writing fixture file: %v", err)
+	}
+	git(t, upstream, "add", ".")
+	git(t, upstream, "commit", "-m", "last")
+	if _, err := m.Ensure(context.Background(), repo, ""); err != nil {
+		t.Fatalf("Ensure (fetch): %v", err)
+	}
+
+	after := packFiles(t, dir)
+	for name := range before {
+		if !after[name] {
+			t.Errorf("pack %s was deleted by the fetch; packs before %v, after %v", name, before, after)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "objects", "pack", "multi-pack-index")); err == nil {
+		t.Error("fetch wrote a multi-pack-index: auto-maintenance ran")
+	}
+}
+
+func packFiles(t *testing.T, dir string) map[string]bool {
+	t.Helper()
+	paths, err := filepath.Glob(filepath.Join(dir, "objects", "pack", "*.pack"))
+	if err != nil {
+		t.Fatalf("globbing packs: %v", err)
+	}
+	names := make(map[string]bool, len(paths))
+	for _, p := range paths {
+		names[filepath.Base(p)] = true
+	}
+	return names
 }
 
 // TestForcePushKeepsIndexedCommit is the regression test the narrow
