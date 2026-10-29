@@ -12,6 +12,7 @@ import (
 
 	"github.com/broderick-westrope/muninn/internal/config"
 	"github.com/broderick-westrope/muninn/internal/launchd"
+	"github.com/broderick-westrope/muninn/internal/status"
 )
 
 // recordingLaunchctl records calls so a repair can be detected.
@@ -151,5 +152,22 @@ func TestPlistSuppressesRepair(t *testing.T) {
 	}
 	if !strings.Contains(string(plist), "--no-repair") {
 		t.Errorf("plist does not pass --no-repair:\n%s", plist)
+	}
+}
+
+func TestPrintSyncSummaryListsEachFailure(t *testing.T) {
+	st := &status.SyncStatus{Repos: map[string]status.RepoStatus{
+		"acme/zeta":  {Error: "indexing acme/zeta (branch main): zlib: invalid checksum"},
+		"acme/alpha": {Error: "fetch: timed out"},
+		"acme/ok":    {Indexed: true},
+	}}
+	var buf bytes.Buffer
+	printSyncSummary(&buf, st)
+
+	want := "synced 1 repos, 2 failed — see muninn status\n" +
+		"  failed acme/alpha: fetch: timed out\n" +
+		"  failed acme/zeta: indexing acme/zeta (branch main): zlib: invalid checksum\n"
+	if got := buf.String(); got != want {
+		t.Errorf("summary =\n%s\nwant\n%s", got, want)
 	}
 }

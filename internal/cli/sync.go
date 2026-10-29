@@ -3,8 +3,10 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -103,20 +105,7 @@ func runSync(cmd *cobra.Command, ifDue, noRepair bool) error {
 		return err
 	}
 
-	synced, failed := 0, 0
-	for _, rs := range st.Repos {
-		if rs.Error != "" {
-			failed++
-		} else {
-			synced++
-		}
-	}
-	fmt.Fprintf(out, "synced %d repos, %d failed — see muninn status\n", synced, failed)
-	// Surfaced here and not only in `muninn status`, because a run watched
-	// live is exactly when a climbing flake rate is worth noticing.
-	if repos, retries := fetchRetryTotals(st); retries > 0 {
-		fmt.Fprintf(out, "recovered %d transient fetch failures across %d repos\n", retries, repos)
-	}
+	printSyncSummary(out, st)
 
 	// Repair last, and never from the scheduled job. Reinstalling boots the
 	// job out, which would kill a scheduled run mid-sync; doing it after
@@ -125,6 +114,29 @@ func runSync(cmd *cobra.Command, ifDue, noRepair bool) error {
 		repairAgent(cmd, cfg)
 	}
 	return nil
+}
+
+// printSyncSummary reports a finished run. Each failed repo gets its own
+// line with its error, because the status file keeps only the latest run:
+// once the next run succeeds, the scheduled job's log is the only record of
+// why an earlier one failed.
+func printSyncSummary(out io.Writer, st *status.SyncStatus) {
+	var failed []string
+	for name, rs := range st.Repos {
+		if rs.Error != "" {
+			failed = append(failed, name)
+		}
+	}
+	sort.Strings(failed)
+	fmt.Fprintf(out, "synced %d repos, %d failed — see muninn status\n", len(st.Repos)-len(failed), len(failed))
+	for _, name := range failed {
+		fmt.Fprintf(out, "  failed %s: %s\n", name, st.Repos[name].Error)
+	}
+	// Surfaced here and not only in `muninn status`, because a run watched
+	// live is exactly when a climbing flake rate is worth noticing.
+	if repos, retries := fetchRetryTotals(st); retries > 0 {
+		fmt.Fprintf(out, "recovered %d transient fetch failures across %d repos\n", retries, repos)
+	}
 }
 
 // freshness describes how long ago the last successful sync finished, for
